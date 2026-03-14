@@ -16,7 +16,8 @@ build:
 	@echo "Built $(BUNDLE)"
 
 sign:
-	codesign --force --sign "$(IDENTITY)" \
+	codesign --force --options runtime --timestamp \
+		--sign "$(IDENTITY)" \
 		--entitlements tapkey.entitlements $(BUNDLE)
 	@echo "Signed $(BUNDLE)"
 

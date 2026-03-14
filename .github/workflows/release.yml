@@ -68,7 +68,51 @@ jobs:
       - name: Verify signature
         run: make verify
 
-      - name: Remove quarantine and package
+      - name: Notarize
+        run: |
+          # Create a zip for notarization submission
+          ditto -c -k --keepParent Tapkey.app "$RUNNER_TEMP/notarize.zip"
+
+          echo "$NOTARY_KEY_BASE64" | base64 --decode > "$RUNNER_TEMP/auth_key.p8"
+
+          xcrun notarytool submit "$RUNNER_TEMP/notarize.zip" \
+            --key "$RUNNER_TEMP/auth_key.p8" \
+            --key-id "$NOTARY_KEY_ID" \
+            --issuer "$NOTARY_ISSUER_ID" \
+            --wait --output-format json | tee "$RUNNER_TEMP/notarization_result.json"
+
+          STATUS=$(python3 -c "import json,sys; print(json.load(sys.stdin)['status'])" < "$RUNNER_TEMP/notarization_result.json")
+
+          if [ "$STATUS" != "Accepted" ]; then
+            echo "::error::Notarization failed with status: $STATUS"
+            SUBMISSION_ID=$(python3 -c "import json,sys; print(json.load(sys.stdin)['id'])" < "$RUNNER_TEMP/notarization_result.json")
+            xcrun notarytool log "$SUBMISSION_ID" \
+              --key "$RUNNER_TEMP/auth_key.p8" \
+              --key-id "$NOTARY_KEY_ID" \
+              --issuer "$NOTARY_ISSUER_ID" || true
+            exit 1
+          fi
+
+          rm -f "$RUNNER_TEMP/auth_key.p8" "$RUNNER_TEMP/notarize.zip"
+        env:
+          NOTARY_KEY_BASE64: ${{ steps.secrets.outputs.NOTARY_KEY_BASE64 }}
+          NOTARY_KEY_ID: ${{ steps.secrets.outputs.NOTARY_KEY_ID }}
+          NOTARY_ISSUER_ID: ${{ steps.secrets.outputs.NOTARY_ISSUER_ID }}
+
+      - name: Staple notarization
+        run: |
+          for i in $(seq 1 10); do
+            if xcrun stapler staple Tapkey.app; then
+              echo "Stapling succeeded on attempt $i"
+              exit 0
+            fi
+            echo "Staple attempt $i failed, retrying in 15s..."
+            sleep 15
+          done
+          echo "::error::Stapling failed after 10 attempts"
+          exit 1
+
+      - name: Package
         id: package
         run: |
           xattr -cr Tapkey.app

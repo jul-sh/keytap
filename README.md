@@ -13,8 +13,6 @@ Download the latest release:
 ```bash
 gh release download --repo jul-sh/tapkey --pattern 'tapkey-*.zip'
 unzip tapkey-*.zip
-# Remove macOS quarantine (the binary is attested but not Apple-notarized)
-xattr -dr com.apple.quarantine Tapkey.app
 # Symlink into PATH
 mkdir -p ~/.local/bin
 ln -sf "$(pwd)/Tapkey.app/Contents/MacOS/tapkey" ~/.local/bin/tapkey
