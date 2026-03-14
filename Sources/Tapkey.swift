@@ -3,7 +3,7 @@ import CryptoKit
 import AppKit
 import Foundation
 
-let tapkeyVersion = "0.1.0"
+let tapkeyVersion = "0.1.2"
 
 // MARK: - Bech32
 
@@ -134,8 +134,11 @@ enum SSHKey {
 
 struct Config {
     static let relyingParty = "tapkey.jul.sh"
-    static let configDir = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent(".config/tapkey")
+    static let configDir: URL = {
+        let fm = FileManager.default
+        let appSupport = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        return appSupport.appendingPathComponent("tapkey")
+    }()
     static let credentialFile = configDir.appendingPathComponent("credential.json")
 
     // Fixed PRF salt — public, deterministic. Changing this would change all derived keys.
@@ -287,6 +290,14 @@ struct Arguments {
                 name = args[i]
                 if name.isEmpty {
                     fputs("error: --name cannot be empty\n", stderr)
+                    exit(1)
+                }
+                if name.utf8.count > 1024 {
+                    fputs("error: --name must be at most 1024 bytes\n", stderr)
+                    exit(1)
+                }
+                if !name.allSatisfy({ $0.isASCII }) {
+                    fputs("error: --name must contain only ASCII characters\n", stderr)
                     exit(1)
                 }
             case "--format":

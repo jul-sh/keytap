@@ -118,19 +118,6 @@ tapkey public-key --name ssh --format ssh
 
 4. The derived bytes are formatted as hex, base64, an age secret key (Bech32), an OpenSSH Ed25519 key, or raw bytes.
 
-### Why not use the Secure Enclave directly?
-
-The Secure Enclave already participates — it handles the credential's private key operations and the PRF computation for platform authenticators on Apple Silicon. The PRF output (a `SymmetricKey`) is then returned to userspace, where HKDF derives the final key.
-
-Further Secure Enclave integration isn't useful here: the Secure Enclave only stores P-256 asymmetric keys and can't perform HKDF or store arbitrary symmetric keys. Since tapkey's purpose is to output key material for use by other tools, the key must leave process memory regardless.
-
-### Why can't I use an existing passkey?
-
-tapkey requires `tapkey register` because:
-
-- **PRF must be enabled at registration.** The PRF extension (CTAP2 `hmac-secret`) must be requested when the credential is created. Passkeys registered by typical website login flows don't request PRF, and it cannot be retroactively enabled.
-- **Relying party binding.** Passkeys are bound to their relying party identifier (`tapkey.jul.sh`). A passkey created for a different domain cannot be used.
-
 ## Security model
 
 ### What's trusted
@@ -143,7 +130,7 @@ tapkey requires `tapkey register` because:
 ### What's public and safe to expose
 
 - **PRF salt** (`SHA256("tapkey:prf-salt-v1")`) — fixed, deterministic, public. Knowing the salt doesn't help without the passkey.
-- **Credential ID** (stored in `~/.config/tapkey/credential.json`) — identifies which passkey to use, not secret. It's equivalent to a username.
+- **Credential ID** (stored in `~/Library/Containers/sh.jul.tapkey/Data/Library/Application Support/tapkey/credential.json`) — identifies which passkey to use, not secret. It's equivalent to a username.
 - **HKDF info strings** (`"tapkey:<name>"`) — public domain-separation labels.
 
 ### Domain separation
