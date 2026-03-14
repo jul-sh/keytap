@@ -37,21 +37,13 @@ jobs:
           touch _site/.nojekyll
 
           if [ -n "${APPLE_TEAM_ID}" ]; then
-            python3 - <<'PY' > _site/.well-known/apple-app-site-association
-import json
-import os
-
-bundle_id = "sh.jul.tapkey"
+            python3 -c '
+import json, os
 team_id = os.environ["APPLE_TEAM_ID"]
-payload = {
-    "webcredentials": {
-        "apps": [f"{team_id}.{bundle_id}"]
-    }
-}
-
+payload = {"webcredentials": {"apps": [f"{team_id}.sh.jul.tapkey"]}}
 print(json.dumps(payload, separators=(",", ":")))
-PY
-          else;
+' > _site/.well-known/apple-app-site-association
+          else
             echo "::warning::Repository variable APPLE_TEAM_ID is not set; skipping apple-app-site-association."
           fi
         env:
