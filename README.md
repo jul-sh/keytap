@@ -4,7 +4,7 @@ tapkey is a tiny macOS app that lets you recover the same SSH key, `age` identit
 
 Passkey providers sync passkeys. They usually do not sync arbitrary private keys such as SSH keys. tapkey bridges that gap by deriving the key locally after passkey authentication, without manually copying private key files between machines.
 
-For example, iCloud Keychain can sync a passkey tied to your Apple account, but it will not sync an SSH private key. tapkey lets that synced passkey act as the root, so the SSH key can be re-derived locally on each Mac after authentication.
+For example, iCloud Keychain syncs passkeys tied to your Apple account, but it will not sync an SSH private key. tapkey lets that synced passkey act as the root, so the SSH key can be re-derived locally on each of your Macs.
 
 Under the hood, tapkey uses the WebAuthn PRF extension to derive a deterministic 32-byte secret from a passkey, then expands it with HKDF-SHA256. No server. No custom sync layer. The passkey provider handles sync; tapkey derives locally.
 
@@ -21,7 +21,7 @@ mkdir -p ~/.local/bin
 ln -sf "$(pwd)/Tapkey.app/Contents/MacOS/tapkey" ~/.local/bin/tapkey
 ```
 
-Release artifacts are signed, notarized, and can be verified against GitHub Actions build attestation:
+Release artifacts are signed, notarized, and can be verified against GitHub Actions build attestation, so you can check that the release binary was built securely from the public, auditable source code in this repository:
 
 ```bash
 sha256sum tapkey-*.zip
@@ -121,7 +121,7 @@ In other words: tapkey is not a vault. It is a deterministic derivation tool bui
 
 - macOS 15.0 or later
 - Apple Silicon (`arm64`)
-- A passkey provider with PRF support
+- A passkey provider with PRF support (like Apple's built-in Password Manager)
 
 ## Development
 
