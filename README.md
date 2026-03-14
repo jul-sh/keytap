@@ -17,7 +17,7 @@ If the passkey you need is on your iPhone and not on the Mac in front of you, th
 Download the latest release:
 
 ```bash
-gh release download --repo jul-sh/tapkey --pattern 'tapkey-*.zip'
+curl -fLO "$(curl -fsSL https://api.github.com/repos/jul-sh/tapkey/releases/latest | grep browser_download_url | cut -d '"' -f 4)"
 unzip tapkey-*.zip
 mkdir -p ~/.local/bin
 ln -sf "$(pwd)/Tapkey.app/Contents/MacOS/tapkey" ~/.local/bin/tapkey
@@ -28,6 +28,8 @@ Release artifacts are signed, notarized, and can be verified against GitHub Acti
 ```bash
 gh attestation verify tapkey-*.zip -R jul-sh/tapkey
 ```
+
+The verification step requires the [GitHub CLI](https://cli.github.com/). It is optional but recommended.
 
 ### From source
 
