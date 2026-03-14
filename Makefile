@@ -1,7 +1,7 @@
 APP_NAME = Tapkey
 BUNDLE = $(APP_NAME).app
 BIN = $(BUNDLE)/Contents/MacOS/tapkey
-IDENTITY ?= Apple Development
+IDENTITY ?= Developer ID Application
 
 .PHONY: all build sign install verify clean
 

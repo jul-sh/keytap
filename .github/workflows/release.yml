@@ -63,7 +63,7 @@ jobs:
 
       - name: Sign
         run: |
-          make sign IDENTITY="${{ steps.secrets.outputs.SIGNING_IDENTITY || 'Apple Development' }}"
+          make sign IDENTITY="${{ steps.secrets.outputs.SIGNING_IDENTITY || 'Developer ID Application' }}"
 
       - name: Verify signature
         run: make verify
