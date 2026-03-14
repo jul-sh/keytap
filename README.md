@@ -46,16 +46,16 @@ make install
 
 ## Usage
 
-Create the passkey once, on the first Mac:
+Create the passkey once, only needed on the first Mac:
 
 ```bash
 tapkey register
 ```
 
-Most of the time you can just run:
+Then after that you can derive key material! 
 
 ```bash
-tapkey derive
+tapkey derive [name]
 ```
 
 tapkey first tries a local or synced passkey. If none is available, it falls back to nearby-device passkey flow so you can approve the request on your iPhone.
@@ -84,7 +84,6 @@ The default name is `default`.
 Get the public key for a derived key:
 
 ```bash
-tapkey public-key
 tapkey public-key --name ssh --format ssh
 ```
 
