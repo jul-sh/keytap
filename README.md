@@ -6,7 +6,7 @@ Passkey providers sync passkeys. They usually do not sync arbitrary private keys
 
 For example, iCloud Keychain syncs passkeys tied to your Apple account, but it will not sync an SSH private key. tapkey lets that synced passkey act as the root, so the SSH key can be re-derived locally on each of your Macs.
 
-Under the hood, tapkey uses the WebAuthn PRF extension to derive a deterministic 32-byte secret from a passkey, then expands it with HKDF-SHA256. There is no tapkey key-sync service. For nearby-device use, tapkey can open a small web view on `tapkey.jul.sh` so you can authenticate with a passkey on a nearby iPhone and still derive locally on the Mac you are using.
+If you are on a Mac that does not have the passkey, that is still fine. tapkey can fall back to Apple's nearby-device passkey flow: the Mac shows a QR code, you approve on your iPhone, and the Mac gets only the derived secret it asked for; your passkey remains on your iPhone. There is no tapkey key-sync service in the middle. Under the hood, this uses the WebAuthn PRF extension plus HKDF-SHA256.
 
 ## Install
 
@@ -46,16 +46,16 @@ make install
 
 ## Usage
 
-Create the passkey once, on the first Mac:
+Create the passkey once, only needed on the first Mac:
 
 ```bash
 tapkey register
 ```
 
-Most of the time you can just run:
+Then after that you can derive key material! 
 
 ```bash
-tapkey derive
+tapkey derive [name]
 ```
 
 tapkey first tries a local or synced passkey. If none is available, it falls back to nearby-device passkey flow so you can approve the request on your iPhone.
@@ -84,7 +84,6 @@ The default name is `default`.
 Get the public key for a derived key:
 
 ```bash
-tapkey public-key
 tapkey public-key --name ssh --format ssh
 ```
 
