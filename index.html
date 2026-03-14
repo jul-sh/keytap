@@ -3,24 +3,25 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'self' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; base-uri 'none'; form-action 'none'; frame-ancestors 'none'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'">
   <title>tapkey</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Iosevka+Charon&family=Pixelify+Sans:wght@400..700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="./nearby.css">
+  <style>
+    :root { color-scheme: dark; }
+    body { font: 18px/1.65 "SF Mono", "Fira Code", monospace; color: #fff; background: hsl(240,100%,20%); display: grid; place-items: center; padding: 48px 24px; margin: 0; min-height: 100vh; }
+    main { max-width: 680px; }
+    h1 { font-size: clamp(2rem,5vw,3rem); margin: 8px 0 24px; }
+    code { color: #00ff66; background: hsla(0,0%,100%,0.06); padding: 1px 6px; }
+    a { color: #00ff66; }
+    p { margin: 12px 0; }
+    .muted { color: hsl(240,40%,72%); font-size: 0.95rem; }
+  </style>
 </head>
 <body>
-  <main class="shell">
-    <p class="eyebrow">tapkey</p>
+  <main>
+    <p style="text-transform:uppercase;letter-spacing:0.25em;color:#00ff66;font-weight:700">> tapkey</p>
     <h1>Passkeys that turn into real keys.</h1>
-    <p class="summary">tapkey lets a passkey act as the root for a reproducible SSH key, <code>age</code> identity, or app secret on any Mac where you can approve that passkey.</p>
-    <section class="panel" aria-labelledby="source-title">
-      <div class="panel-header">
-        <p class="panel-label" id="source-title">Source</p>
-      </div>
-      <p class="panel-note">Repository: <a href="https://github.com/jul-sh/tapkey">github.com/jul-sh/tapkey</a></p>
-    </section>
+    <p>tapkey lets a passkey act as the root for a reproducible SSH key, <code>age</code> identity, or app secret on any Mac where you can approve that passkey.</p>
+    <p class="muted">Repository: <a href="https://github.com/jul-sh/tapkey">github.com/jul-sh/tapkey</a></p>
   </main>
 </body>
 </html>
