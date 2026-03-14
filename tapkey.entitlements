@@ -8,7 +8,6 @@
     <array>
         <string>webcredentials:tapkey.jul.sh</string>
     </array>
-    <key>com.apple.security.network.client</key>
-    <true/>
+
 </dict>
 </plist>

@@ -8,8 +8,6 @@ Passkey providers sync passkeys. They usually do not sync arbitrary private keys
 
 For example, iCloud Keychain syncs passkeys tied to your Apple account, but it will not sync an SSH private key. tapkey lets that synced passkey act as the root, so the SSH key can be re-derived locally on each of your Macs.
 
-If the passkey you need is on your iPhone and not on the Mac in front of you, that is still fine. tapkey can show a QR code, you scan it, approve with Apple's native passkey flow, and the Mac gets just the secret material needed to derive the same key locally. No tapkey sync service, no private-key file shuffling, no extra account. The passkey stays the root, and each Mac derives what it needs on demand.
-
 ## Install
 
 ### From release
@@ -19,8 +17,9 @@ Download the latest release:
 ```bash
 curl -fLO "$(curl -fsSL https://api.github.com/repos/jul-sh/tapkey/releases/latest | grep browser_download_url | cut -d '"' -f 4)"
 unzip tapkey-*.zip
+cp -r Tapkey.app /Applications/
 mkdir -p ~/.local/bin
-ln -sf "$(pwd)/Tapkey.app/Contents/MacOS/tapkey" ~/.local/bin/tapkey
+ln -sf /Applications/Tapkey.app/Contents/MacOS/tapkey ~/.local/bin/tapkey
 ```
 
 Release artifacts are signed, notarized, and can be verified against GitHub Actions build attestation, so you can check that the release binary was built securely from the public, auditable source code in this repository:
@@ -49,15 +48,11 @@ Create the passkey once, only needed on the first Mac:
 tapkey register
 ```
 
-If native passkey registration is not available yet, tapkey falls back to the hosted passkey flow on `tapkey.jul.sh`.
-
-Then after that you can derive key material! 
+Then derive key material:
 
 ```bash
 tapkey derive
 ```
-
-tapkey first tries a local or synced passkey. If none is available, it falls back to nearby-device passkey flow so you can approve the request on your iPhone.
 
 Derive key material in different formats:
 
@@ -125,7 +120,6 @@ tapkey's security model is simple: the passkey is the root secret.
 - If you save the output, pipe it into another tool, or import it into an agent, that destination now holds the key and must be trusted accordingly.
 - The local config file stores only the credential ID used to select the passkey. It is not secret key material.
 - The PRF inputs are public and derived from `--name`. They provide stable derivation and domain separation, not secrecy.
-- Nearby-device flow loads `https://tapkey.jul.sh/nearby.html` in a sandboxed `WKWebView`. That page is part of the trusted computing base for nearby derivation, and the app needs network access for that flow.
 - Replacing the registered passkey changes every key derived from it. Treat the passkey as the root of your derived identities.
 
 In other words: tapkey is not a vault. It is a deterministic derivation tool built on top of passkey security.

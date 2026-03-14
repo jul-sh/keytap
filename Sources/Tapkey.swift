@@ -2,7 +2,6 @@ import AppKit
 import AuthenticationServices
 import CryptoKit
 import Foundation
-import WebKit
 
 private let fallbackTapkeyVersion = "0.1.2"
 
@@ -167,7 +166,6 @@ enum SSHKey {
 
 struct Config {
     static let relyingParty = "tapkey.jul.sh"
-    static let nearbyPageURL = URL(string: "https://tapkey.jul.sh/nearby.html")!
     static let registrationName = "tapkey"
     static let registrationUserID = Data("tapkey-user".utf8)
     static let hkdfInfo = Data("tapkey:key".utf8)
@@ -192,20 +190,13 @@ enum OutputFormat: String {
     case ssh
 }
 
-enum KeyAccessMode {
-    case localOrNearby
-    case nearbyOnly
-}
-
 struct KeyOptions {
     let name: String
     let format: OutputFormat
-    let accessMode: KeyAccessMode
 }
 
 struct RegisterOptions {
     let replaceExisting: Bool
-    let accessMode: KeyAccessMode
 }
 
 // MARK: - Credential Storage
@@ -331,27 +322,23 @@ struct Arguments {
 
     private static func parseRegister(arguments: [String]) -> Command {
         var replaceExisting = false
-        var accessMode = KeyAccessMode.localOrNearby
 
         for argument in arguments {
             switch argument {
             case "--replace":
                 replaceExisting = true
-            case "--nearby":
-                accessMode = .nearbyOnly
             default:
                 fputs("error: unknown option '\(argument)'\n", stderr)
                 exit(1)
             }
         }
 
-        return .register(RegisterOptions(replaceExisting: replaceExisting, accessMode: accessMode))
+        return .register(RegisterOptions(replaceExisting: replaceExisting))
     }
 
     private static func parseKeyOptions(arguments: [String], defaultFormat: OutputFormat) -> KeyOptions {
         var name = "default"
         var format = defaultFormat
-        var accessMode = KeyAccessMode.localOrNearby
 
         var index = 0
         while index < arguments.count {
@@ -375,8 +362,6 @@ struct Arguments {
                     exit(1)
                 }
                 format = parsedFormat
-            case "--nearby":
-                accessMode = .nearbyOnly
             default:
                 fputs("error: unknown option '\(arguments[index])'\n", stderr)
                 exit(1)
@@ -384,7 +369,7 @@ struct Arguments {
             index += 1
         }
 
-        return KeyOptions(name: name, format: format, accessMode: accessMode)
+        return KeyOptions(name: name, format: format)
     }
 
     private static func validateKeyName(_ name: String) {
@@ -407,396 +392,23 @@ struct Arguments {
         Usage: tapkey <command> [options]
 
         Commands:
-          register [--replace] [--nearby]  Create the passkey root
-          derive [--nearby]                Derive key material from your passkey
-          public-key [--nearby]            Show the public key for a derived key
+          register [--replace]             Create the passkey root
+          derive                           Derive key material from your passkey
+          public-key                       Show the public key for a derived key
 
         Options:
           --name <name>                    Key name for domain separation (default: "default")
           --format <fmt>                   Output format: hex, base64, age, raw, ssh
-          --nearby                         Use nearby-device passkey flow in a web view
           --replace                        Replace the locally registered passkey root
           --version                        Show version
 
         Examples:
           tapkey register
-          tapkey derive
-          tapkey derive --nearby --name ssh --format ssh
-          tapkey public-key --nearby --name ssh --format ssh
+          tapkey derive --name ssh --format ssh
+          tapkey public-key --name ssh --format ssh
           tapkey register --replace
 
-        Without --nearby, tapkey first tries a local/synced passkey and then falls
-        back to nearby-device passkey flow if no local credential is available.
-
-        """, stderr)
-    }
-}
-
-// MARK: - Nearby Web Flow
-
-enum NearbyPageConfig: Encodable {
-    struct RegisterPayload: Encodable {
-        let rpId: String
-        let challengeBase64URL: String
-        let prfSaltBase64URL: String
-        let userIDBase64URL: String
-        let userName: String
-    }
-
-    struct AssertPayload: Encodable {
-        let rpId: String
-        let challengeBase64URL: String
-        let prfSaltBase64URL: String
-        let keyName: String
-        let preferredCredentialIDBase64URL: String?
-    }
-
-    case register(RegisterPayload)
-    case assert(AssertPayload)
-
-    private enum CodingKeys: String, CodingKey {
-        case operation
-        case rpId
-        case challengeBase64URL
-        case prfSaltBase64URL
-        case userIDBase64URL
-        case userName
-        case keyName
-        case preferredCredentialIDBase64URL
-    }
-
-    private enum Operation: String, Encodable {
-        case register
-        case assert
-    }
-
-    func encode(to encoder: Encoder) throws {
-        var container = encoder.container(keyedBy: CodingKeys.self)
-
-        switch self {
-        case .register(let payload):
-            try container.encode(Operation.register, forKey: .operation)
-            try container.encode(payload.rpId, forKey: .rpId)
-            try container.encode(payload.challengeBase64URL, forKey: .challengeBase64URL)
-            try container.encode(payload.prfSaltBase64URL, forKey: .prfSaltBase64URL)
-            try container.encode(payload.userIDBase64URL, forKey: .userIDBase64URL)
-            try container.encode(payload.userName, forKey: .userName)
-        case .assert(let payload):
-            try container.encode(Operation.assert, forKey: .operation)
-            try container.encode(payload.rpId, forKey: .rpId)
-            try container.encode(payload.challengeBase64URL, forKey: .challengeBase64URL)
-            try container.encode(payload.prfSaltBase64URL, forKey: .prfSaltBase64URL)
-            try container.encode(payload.keyName, forKey: .keyName)
-            try container.encodeIfPresent(payload.preferredCredentialIDBase64URL, forKey: .preferredCredentialIDBase64URL)
-        }
-    }
-}
-
-struct NearbyAssertionRequest {
-    let keyOptions: KeyOptions
-    let preferredCredentialID: Data?
-}
-
-enum NearbyResult {
-    case register(credentialID: Data)
-    case assert(keyOptions: KeyOptions, credentialID: Data, prfOutput: SymmetricKey)
-}
-
-enum NearbyMessage: Decodable {
-    struct RegisterSuccessPayload: Decodable {
-        let credentialId: String
-    }
-
-    struct AssertSuccessPayload: Decodable {
-        let credentialId: String
-        let prfFirst: String
-    }
-
-    struct ErrorPayload: Decodable {
-        let code: String?
-        let message: String
-    }
-
-    case registerSuccess(RegisterSuccessPayload)
-    case assertSuccess(AssertSuccessPayload)
-    case error(ErrorPayload)
-
-    private enum CodingKeys: String, CodingKey {
-        case type
-        case credentialId
-        case prfFirst
-        case code
-        case message
-    }
-
-    private enum MessageType: String, Decodable {
-        case registerSuccess = "register-success"
-        case assertSuccess = "assert-success"
-        case error
-    }
-
-    init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        switch try container.decode(MessageType.self, forKey: .type) {
-        case .registerSuccess:
-            self = .registerSuccess(
-                RegisterSuccessPayload(
-                    credentialId: try container.decode(String.self, forKey: .credentialId)
-                )
-            )
-        case .assertSuccess:
-            self = .assertSuccess(
-                AssertSuccessPayload(
-                    credentialId: try container.decode(String.self, forKey: .credentialId),
-                    prfFirst: try container.decode(String.self, forKey: .prfFirst)
-                )
-            )
-        case .error:
-            self = .error(
-                ErrorPayload(
-                    code: try container.decodeIfPresent(String.self, forKey: .code),
-                    message: try container.decode(String.self, forKey: .message)
-                )
-            )
-        }
-    }
-}
-
-final class NearbyWebFlowController: NSObject, NSWindowDelegate, WKNavigationDelegate, WKScriptMessageHandler {
-    enum Operation {
-        case register
-        case assert(NearbyAssertionRequest)
-    }
-
-    enum State {
-        case loadingPage
-        case awaitingWebAuthnResult
-        case finished
-    }
-
-    private let operation: Operation
-    private let onSuccess: (NearbyResult) -> Void
-    private let onFailure: (String) -> Void
-
-    private var state: State = .loadingPage
-    private var window: NSWindow?
-    private var webView: WKWebView?
-
-    init(operation: Operation,
-         onSuccess: @escaping (NearbyResult) -> Void,
-         onFailure: @escaping (String) -> Void) {
-        self.operation = operation
-        self.onSuccess = onSuccess
-        self.onFailure = onFailure
-    }
-
-    func start() {
-        let contentController = WKUserContentController()
-        contentController.add(self, name: "tapkey")
-
-        let configuration = WKWebViewConfiguration()
-        configuration.websiteDataStore = .nonPersistent()
-        configuration.userContentController = contentController
-        configuration.defaultWebpagePreferences.allowsContentJavaScript = true
-
-        let webView = WKWebView(frame: .zero, configuration: configuration)
-        webView.navigationDelegate = self
-
-        let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 560, height: 520),
-            styleMask: [.titled, .closable, .miniaturizable],
-            backing: .buffered,
-            defer: false
-        )
-        window.title = title(for: operation)
-        window.contentView = webView
-        window.center()
-        window.delegate = self
-        window.makeKeyAndOrderFront(nil)
-
-        NSApp.activate(ignoringOtherApps: true)
-
-        self.window = window
-        self.webView = webView
-
-        webView.load(URLRequest(url: pageURL(for: operation)))
-    }
-
-    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
-        guard message.name == "tapkey" else {
-            return
-        }
-
-        guard let json = message.body as? String,
-              let data = json.data(using: .utf8) else {
-            finishFailure("nearby-device flow returned an unreadable response")
-            return
-        }
-
-        let decoded: NearbyMessage
-        do {
-            decoded = try JSONDecoder().decode(NearbyMessage.self, from: data)
-        } catch {
-            finishFailure("nearby-device flow returned an unexpected response: \(error.localizedDescription)")
-            return
-        }
-
-        switch decoded {
-        case .registerSuccess(let payload):
-            handleRegisterSuccess(payload)
-        case .assertSuccess(let payload):
-            handleAssertSuccess(payload)
-        case .error(let payload):
-            let detail = payload.code.map { "\($0): \(payload.message)" } ?? payload.message
-            finishFailure("nearby-device flow failed: \(detail)")
-        }
-    }
-
-    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-        state = .awaitingWebAuthnResult
-    }
-
-    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
-        finishFailure("failed to load nearby-device flow: \(error.localizedDescription)")
-    }
-
-    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
-        finishFailure("failed to load nearby-device flow: \(error.localizedDescription)")
-    }
-
-    func webView(_ webView: WKWebView,
-                 decidePolicyFor navigationAction: WKNavigationAction,
-                 decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
-        guard let url = navigationAction.request.url else {
-            decisionHandler(.cancel)
-            return
-        }
-
-        let isExpectedHost = url.scheme == Config.nearbyPageURL.scheme
-            && url.host == Config.nearbyPageURL.host
-        let isExpectedPath = url.path == Config.nearbyPageURL.path
-
-        decisionHandler(isExpectedHost && isExpectedPath ? .allow : .cancel)
-    }
-
-    func windowWillClose(_ notification: Notification) {
-        switch state {
-        case .finished:
-            break
-        case .loadingPage, .awaitingWebAuthnResult:
-            finishFailure("nearby-device flow cancelled")
-        }
-    }
-
-    private func handleRegisterSuccess(_ payload: NearbyMessage.RegisterSuccessPayload) {
-        guard let credentialID = Data(base64URLEncoded: payload.credentialId) else {
-            finishFailure("nearby-device flow returned an invalid credential ID")
-            return
-        }
-
-        switch operation {
-        case .register:
-            finishSuccess(.register(credentialID: credentialID))
-        case .assert:
-            finishFailure("nearby-device flow returned a registration result during assertion")
-        }
-    }
-
-    private func handleAssertSuccess(_ payload: NearbyMessage.AssertSuccessPayload) {
-        guard let credentialID = Data(base64URLEncoded: payload.credentialId) else {
-            finishFailure("nearby-device flow returned an invalid credential ID")
-            return
-        }
-
-        guard let prfData = Data(base64URLEncoded: payload.prfFirst) else {
-            finishFailure("nearby-device flow did not return PRF output")
-            return
-        }
-
-        switch operation {
-        case .register:
-            finishFailure("nearby-device flow returned an assertion result during registration")
-        case .assert(let request):
-            finishSuccess(
-                .assert(
-                    keyOptions: request.keyOptions,
-                    credentialID: credentialID,
-                    prfOutput: SymmetricKey(data: prfData)
-                )
-            )
-        }
-    }
-
-    private func finishSuccess(_ result: NearbyResult) {
-        guard state != .finished else {
-            return
-        }
-        state = .finished
-        cleanup()
-        onSuccess(result)
-    }
-
-    private func finishFailure(_ message: String) {
-        guard state != .finished else {
-            return
-        }
-        state = .finished
-        cleanup()
-        onFailure(message)
-    }
-
-    private func cleanup() {
-        webView?.configuration.userContentController.removeScriptMessageHandler(forName: "tapkey")
-        webView?.navigationDelegate = nil
-        window?.delegate = nil
-        if let window {
-            window.orderOut(nil)
-            window.close()
-        }
-        webView = nil
-        window = nil
-    }
-
-    private func title(for operation: Operation) -> String {
-        switch operation {
-        case .register:
-            return "Tapkey Register"
-        case .assert:
-            return "Tapkey Nearby Passkey"
-        }
-    }
-
-    private func pageURL(for operation: Operation) -> URL {
-        let config = pageConfig(for: operation)
-        let jsonData = try! JSONEncoder().encode(config)
-        var urlComponents = URLComponents(url: Config.nearbyPageURL, resolvingAgainstBaseURL: false)!
-        urlComponents.fragment = "cfg=\(jsonData.base64URLEncodedString())"
-        return urlComponents.url!
-    }
-
-    private func pageConfig(for operation: Operation) -> NearbyPageConfig {
-        switch operation {
-        case .register:
-            return .register(
-                NearbyPageConfig.RegisterPayload(
-                    rpId: Config.relyingParty,
-                    challengeBase64URL: randomChallenge().base64URLEncodedString(),
-                    prfSaltBase64URL: Config.prfSalt(for: "default").base64URLEncodedString(),
-                    userIDBase64URL: Config.registrationUserID.base64URLEncodedString(),
-                    userName: Config.registrationName
-                )
-            )
-        case .assert(let request):
-            return .assert(
-                NearbyPageConfig.AssertPayload(
-                    rpId: Config.relyingParty,
-                    challengeBase64URL: randomChallenge().base64URLEncodedString(),
-                    prfSaltBase64URL: Config.prfSalt(for: request.keyOptions.name).base64URLEncodedString(),
-                    keyName: request.keyOptions.name,
-                    preferredCredentialIDBase64URL: request.preferredCredentialID?.base64URLEncodedString()
-                )
-            )
-        }
+""", stderr)
     }
 }
 
@@ -804,12 +416,6 @@ final class NearbyWebFlowController: NSObject, NSWindowDelegate, WKNavigationDel
 
 enum AssertionNotHandledAction {
     case retry(message: String, perform: () -> Void)
-    case nearbyFlow(message: String, perform: () -> Void)
-    case fail(lines: [String])
-}
-
-enum RegistrationNotHandledAction {
-    case nearbyFlow(message: String, perform: () -> Void)
     case fail(lines: [String])
 }
 
@@ -834,7 +440,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let command: Command
     var activeController: ASAuthorizationController?
     var activeDelegate: NSObject?
-    var activeNearbyFlow: NearbyWebFlowController?
 
     init(command: Command) {
         self.command = command
@@ -864,32 +469,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             exit(1)
         }
 
-        switch options.accessMode {
-        case .nearbyOnly:
-            startNearbyRegistration()
-        case .localOrNearby:
-            startNativeRegistration()
-        }
-    }
-
-    func performAssertion(command: AssertionCommand) {
-        let accessMode = keyOptions(for: command).accessMode
-
-        switch accessMode {
-        case .nearbyOnly:
-            startNearbyAssertion(command: command)
-        case .localOrNearby:
-            let selection: CredentialSelection
-            if let stored = try? loadCredential() {
-                selection = .stored(stored)
-            } else {
-                selection = .discoverable
-            }
-            startNativeAssertion(command: command, selection: selection)
-        }
-    }
-
-    private func startNativeRegistration() {
         let provider = ASAuthorizationPlatformPublicKeyCredentialProvider(relyingPartyIdentifier: Config.relyingParty)
         let request = provider.createCredentialRegistrationRequest(
             challenge: randomChallenge(),
@@ -905,18 +484,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         let controller = ASAuthorizationController(authorizationRequests: [request])
-        let delegate = RegistrationDelegate(
-            notHandledAction: .nearbyFlow(
-                message: "Native passkey registration was not available. Opening nearby-device passkey flow...",
-                perform: { [weak self] in
-                    self?.startNearbyRegistration()
-                }
-            )
-        )
+        let delegate = RegistrationDelegate()
         beginAuthorization(controller: controller, delegate: delegate)
     }
 
-    private func startNativeAssertion(command: AssertionCommand, selection: CredentialSelection) {
+    func performAssertion(command: AssertionCommand) {
+        let selection: CredentialSelection
+        if let stored = try? loadCredential() {
+            selection = .stored(stored)
+        } else {
+            selection = .discoverable
+        }
+
         let provider = ASAuthorizationPlatformPublicKeyCredentialProvider(relyingPartyIdentifier: Config.relyingParty)
         let request = provider.createCredentialAssertionRequest(challenge: randomChallenge())
 
@@ -938,98 +517,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             exit(1)
         }
 
-        let action = notHandledAction(for: command, selection: selection)
-        let controller = ASAuthorizationController(authorizationRequests: [request])
-        let delegate = AssertionDelegate(command: command, notHandledAction: action)
-        beginAuthorization(controller: controller, delegate: delegate)
-    }
-
-    private func startNearbyRegistration() {
-        let flow = NearbyWebFlowController(
-            operation: .register,
-            onSuccess: { [weak self] result in
-                self?.handleNearbyResult(result)
-            },
-            onFailure: { message in
-                fputs("error: \(message)\n", stderr)
-                exit(1)
-            }
-        )
-        activeNearbyFlow = flow
-        activeController = nil
-        activeDelegate = nil
-        flow.start()
-    }
-
-    private func startNearbyAssertion(command: AssertionCommand) {
-        let preferredCredentialID = (try? loadCredential())?.credentialID
-        let flow = NearbyWebFlowController(
-            operation: .assert(
-                NearbyAssertionRequest(
-                    keyOptions: keyOptions(for: command),
-                    preferredCredentialID: preferredCredentialID
-                )
-            ),
-            onSuccess: { [weak self] result in
-                self?.handleNearbyResult(result)
-            },
-            onFailure: { message in
-                fputs("error: \(message)\n", stderr)
-                exit(1)
-            }
-        )
-        activeNearbyFlow = flow
-        activeController = nil
-        activeDelegate = nil
-        flow.start()
-    }
-
-    private func handleNearbyResult(_ result: NearbyResult) {
-        activeNearbyFlow = nil
-
-        switch result {
-        case .register(let credentialID):
-            do {
-                try saveCredential(StoredCredential(credentialID: credentialID))
-            } catch {
-                fputs("error: failed to save credential: \(error.localizedDescription)\n", stderr)
-                exit(1)
-            }
-
-            fputs("Passkey registered successfully.\n", stderr)
-            fputs("Credential saved to \(Config.credentialFile.path)\n", stderr)
-            exit(0)
-
-        case .assert(let keyOptions, let credentialID, let prfOutput):
-            do {
-                try cacheCredentialIDIfNeeded(credentialID)
-            } catch {
-                fputs("error: failed to cache credential: \(error.localizedDescription)\n", stderr)
-                exit(1)
-            }
-
-            let rawKey = deriveRawKey(from: prfOutput)
-            emit(rawKey: rawKey, for: keyOptions, command: result)
-        }
-    }
-
-    private func notHandledAction(for command: AssertionCommand, selection: CredentialSelection) -> AssertionNotHandledAction {
+        let retryAction: AssertionNotHandledAction
         switch selection {
         case .stored:
-            return .retry(
-                message: "Stored credential selection was not available on this Mac. Retrying with discoverable passkeys...",
+            retryAction = .retry(
+                message: "Stored credential was not available. Retrying with discoverable passkeys...",
                 perform: { [weak self] in
-                    self?.startNativeAssertion(command: command, selection: .discoverable)
+                    self?.performAssertion(command: command)
                 }
             )
         case .discoverable:
-            return .nearbyFlow(
-                message: "No local tapkey passkey was available. Opening nearby-device passkey flow...",
-                perform: { [weak self] in
-                    self?.startNearbyAssertion(command: command)
-                }
-            )
+            retryAction = .fail(lines: [
+                "error: no passkey was available for tapkey",
+                "  Run 'tapkey register' first to create a passkey."
+            ])
         }
+
+        let controller = ASAuthorizationController(authorizationRequests: [request])
+        let delegate = AssertionDelegate(command: command, notHandledAction: retryAction)
+        beginAuthorization(controller: controller, delegate: delegate)
     }
 
     private func keyOptions(for command: AssertionCommand) -> KeyOptions {
@@ -1046,53 +552,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         activeDelegate = delegate
         controller.performRequests()
     }
-
-    private func emit(rawKey: Data, for keyOptions: KeyOptions, command result: NearbyResult) {
-        switch result {
-        case .register:
-            fatalError("register results should not be emitted as key material")
-        case .assert:
-            break
-        }
-
-        switch commandFrom(keyOptions: keyOptions) {
-        case .derive:
-            if keyOptions.format == .raw {
-                FileHandle.standardOutput.write(rawKey)
-            } else {
-                let output = formatKey(rawKey, format: keyOptions.format)
-                if keyOptions.format == .ssh {
-                    print(output, terminator: "")
-                } else {
-                    print(output)
-                }
-            }
-        case .publicKey:
-            if keyOptions.format == .raw {
-                fputs("error: --format raw is not supported for public-key\n", stderr)
-                exit(1)
-            }
-            print(formatPublicKey(rawKey, format: keyOptions.format))
-        }
-
-        exit(0)
-    }
-
-    private enum EmissionCommand {
-        case derive
-        case publicKey
-    }
-
-    private func commandFrom(keyOptions: KeyOptions) -> EmissionCommand {
-        switch command {
-        case .derive:
-            return .derive
-        case .publicKey:
-            return .publicKey
-        case .register, .version:
-            fatalError("unexpected command for key emission")
-        }
-    }
 }
 
 extension AppDelegate: ASAuthorizationControllerPresentationContextProviding {
@@ -1104,12 +563,6 @@ extension AppDelegate: ASAuthorizationControllerPresentationContextProviding {
 // MARK: - Registration Delegate
 
 final class RegistrationDelegate: NSObject, ASAuthorizationControllerDelegate {
-    let notHandledAction: RegistrationNotHandledAction
-
-    init(notHandledAction: RegistrationNotHandledAction) {
-        self.notHandledAction = notHandledAction
-    }
-
     func authorizationController(controller: ASAuthorizationController,
                                  didCompleteWithAuthorization authorization: ASAuthorization) {
         guard let credential = authorization.credential as? ASAuthorizationPlatformPublicKeyCredentialRegistration else {
@@ -1150,14 +603,8 @@ final class RegistrationDelegate: NSObject, ASAuthorizationControllerDelegate {
                 fputs("error: registration failed — ensure your passkey provider is available\n", stderr)
                 exit(1)
             case .notHandled:
-                switch notHandledAction {
-                case .nearbyFlow(let message, let perform):
-                    fputs("\(message)\n", stderr)
-                    perform()
-                case .fail(let lines):
-                    lines.forEach { fputs("\($0)\n", stderr) }
-                    exit(1)
-                }
+                fputs("error: passkey registration was not handled by the system\n", stderr)
+                exit(1)
             default:
                 fputs("error: registration failed: \(error.localizedDescription)\n", stderr)
                 exit(1)
@@ -1244,7 +691,7 @@ final class AssertionDelegate: NSObject, ASAuthorizationControllerDelegate {
                 exit(1)
             case .notHandled:
                 switch notHandledAction {
-                case .retry(let message, let perform), .nearbyFlow(let message, let perform):
+                case .retry(let message, let perform):
                     fputs("\(message)\n", stderr)
                     perform()
                 case .fail(let lines):
