@@ -32,7 +32,7 @@ The verification step requires the [GitHub CLI](https://cli.github.com/). It is 
 
 ### From source
 
-Requires macOS 15+, Xcode Command Line Tools, and a [paid Apple Developer Program membership](https://developer.apple.com/programs/) for the Associated Domains entitlement. If you do not have one, use the release build instead; releases are already signed and notarized with my Apple Developer account.
+Requires macOS 15+, a Rust toolchain, and a [paid Apple Developer Program membership](https://developer.apple.com/programs/) for the Associated Domains entitlement. If you do not have one, use the release build instead; releases are already signed and notarized with my Apple Developer account.
 
 ```bash
 git clone https://github.com/jul-sh/tapkey.git
@@ -135,6 +135,9 @@ In other words: tapkey is not a vault. It is a deterministic derivation tool bui
 ```bash
 # Enter dev shell
 nix develop
+
+# Run tests
+make test
 
 # Build and sign
 make

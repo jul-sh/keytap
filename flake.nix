@@ -14,6 +14,8 @@
       {
         devShells.default = pkgs.mkShell {
           buildInputs = with pkgs; [
+            rustc
+            cargo
             age
             gh
           ];
@@ -21,6 +23,7 @@
           shellHook = ''
             echo "tapkey dev shell"
             echo "  make        - build and sign"
+            echo "  make test   - run tests"
             echo "  make install - build, sign, and symlink to ~/.local/bin"
           '';
         };

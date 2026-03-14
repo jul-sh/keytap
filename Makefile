@@ -3,22 +3,21 @@ BUNDLE = $(APP_NAME).app
 BIN = $(BUNDLE)/Contents/MacOS/tapkey
 IDENTITY ?= Developer ID Application
 
-.PHONY: all build sign install verify clean
+.PHONY: all build sign install verify test clean
 
 all: build sign
 
 build:
+	cargo build --release --manifest-path mac/Cargo.toml
 	@mkdir -p $(BUNDLE)/Contents/MacOS
-	@cp Info.plist $(BUNDLE)/Contents/Info.plist
-	swiftc -O -target arm64-apple-macos15.0 \
-		-framework AuthenticationServices -framework AppKit \
-		Sources/Tapkey.swift -o $(BIN)
+	@cp mac/Info.plist $(BUNDLE)/Contents/Info.plist
+	@cp target/release/tapkey $(BIN)
 	@echo "Built $(BUNDLE)"
 
 sign:
 	codesign --force --options runtime --timestamp \
 		--sign "$(IDENTITY)" \
-		--entitlements tapkey.entitlements $(BUNDLE)
+		--entitlements mac/tapkey.entitlements $(BUNDLE)
 	@echo "Signed $(BUNDLE)"
 
 install: all
@@ -32,5 +31,9 @@ verify:
 	@echo ""
 	codesign -d --entitlements :- $(BUNDLE)
 
+test:
+	cargo test --workspace
+
 clean:
+	cargo clean
 	rm -rf $(BUNDLE)
