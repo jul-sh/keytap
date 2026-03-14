@@ -130,7 +130,7 @@ tapkey public-key --name ssh --format ssh
 ### What's public and safe to expose
 
 - **PRF salt** (`SHA256("tapkey:prf-salt-v1")`) — fixed, deterministic, public. Knowing the salt doesn't help without the passkey.
-- **Credential ID** (stored in `~/Library/Containers/sh.jul.tapkey/Data/Library/Application Support/tapkey/credential.json`) — identifies which passkey to use, not secret. It's equivalent to a username.
+- **Credential ID** (stored in `~/Library/Containers/sh.jul.tapkey/Data/.config/tapkey/credential.json`) — identifies which passkey to use, not secret. It's equivalent to a username.
 - **HKDF info strings** (`"tapkey:<name>"`) — public domain-separation labels.
 
 ### Domain separation

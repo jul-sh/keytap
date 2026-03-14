@@ -134,11 +134,8 @@ enum SSHKey {
 
 struct Config {
     static let relyingParty = "tapkey.jul.sh"
-    static let configDir: URL = {
-        let fm = FileManager.default
-        let appSupport = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        return appSupport.appendingPathComponent("tapkey")
-    }()
+    static let configDir = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent(".config/tapkey")
     static let credentialFile = configDir.appendingPathComponent("credential.json")
 
     // Fixed PRF salt — public, deterministic. Changing this would change all derived keys.
