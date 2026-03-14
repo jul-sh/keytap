@@ -11,7 +11,7 @@ build:
 	@mkdir -p $(BUNDLE)/Contents/MacOS
 	@cp Info.plist $(BUNDLE)/Contents/Info.plist
 	swiftc -O -target arm64-apple-macos15.0 \
-		-framework AuthenticationServices -framework AppKit \
+		-framework AuthenticationServices -framework AppKit -framework WebKit \
 		Sources/Tapkey.swift -o $(BIN)
 	@echo "Built $(BUNDLE)"
 

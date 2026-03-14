@@ -6,7 +6,7 @@ Passkey providers sync passkeys. They usually do not sync arbitrary private keys
 
 For example, iCloud Keychain syncs passkeys tied to your Apple account, but it will not sync an SSH private key. tapkey lets that synced passkey act as the root, so the SSH key can be re-derived locally on each of your Macs.
 
-Under the hood, tapkey uses the WebAuthn PRF extension to derive a deterministic 32-byte secret from a passkey, then expands it with HKDF-SHA256. No server. No custom sync layer. The passkey provider handles sync; tapkey derives locally.
+Under the hood, tapkey uses the WebAuthn PRF extension to derive a deterministic 32-byte secret from a passkey, then expands it with HKDF-SHA256. There is no tapkey key-sync service. For nearby-device use, tapkey can open a small web view on `tapkey.jul.sh` so you can authenticate with a passkey on a nearby iPhone and still derive locally on the Mac you are using.
 
 ## Install
 
@@ -52,11 +52,13 @@ Create the passkey once, on the first Mac:
 tapkey register
 ```
 
-On another Mac where the passkey has already synced, you can go straight to `derive`:
+Most of the time you can just run:
 
 ```bash
 tapkey derive
 ```
+
+tapkey first tries a local or synced passkey. If none is available, it falls back to nearby-device passkey flow so you can approve the request on your iPhone.
 
 Derive key material in different formats:
 
@@ -104,8 +106,8 @@ tapkey public-key --name ssh --format ssh
 ## How It Works
 
 1. `tapkey register` creates a passkey for the relying party `tapkey.jul.sh`. The passkey lives in your chosen passkey provider.
-2. `tapkey derive` performs a WebAuthn assertion using the PRF extension and a fixed public salt.
-3. The PRF output is expanded with HKDF-SHA256 using `tapkey:<name>` as the info string.
+2. `tapkey derive` performs a WebAuthn assertion using the PRF extension. The PRF input is `SHA256("tapkey:prf:<name>")`, so each `--name` requests a different PRF output directly from the passkey.
+3. The PRF output is expanded with HKDF-SHA256 using a fixed tapkey info string to produce 32 bytes of key material.
 4. The result is formatted as raw bytes, hex, base64, an `age` secret key, or an OpenSSH Ed25519 key.
 
 Same passkey, same name, same derived key. Different names derive different keys.
@@ -124,7 +126,8 @@ tapkey's security model is simple: the passkey is the root secret.
 - tapkey does not sync or cache derived keys itself. It derives on demand, writes to stdout, and exits.
 - If you save the output, pipe it into another tool, or import it into an agent, that destination now holds the key and must be trusted accordingly.
 - The local config file stores only the credential ID used to select the passkey. It is not secret key material.
-- The PRF salt and key names are public. They provide stable derivation and domain separation, not secrecy.
+- The PRF inputs are public and derived from `--name`. They provide stable derivation and domain separation, not secrecy.
+- Nearby-device flow loads `https://tapkey.jul.sh/nearby.html` in a sandboxed `WKWebView`. That page is part of the trusted computing base for nearby derivation, and the app needs network access for that flow.
 - Replacing the registered passkey changes every key derived from it. Treat the passkey as the root of your derived identities.
 
 In other words: tapkey is not a vault. It is a deterministic derivation tool built on top of passkey security.
