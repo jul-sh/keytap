@@ -1,26 +1,27 @@
 # tapkey
 
-Derive deterministic symmetric keys from a passkey via the WebAuthn PRF extension.
+tapkey is a tiny macOS app that lets you recover the same SSH key, `age` identity, or app secret on any Mac where you can unlock the same passkey.
 
-Same passkey on any device — same key. Works with any passkey provider that supports PRF (iCloud Keychain, 1Password, etc.). No server, no secrets to copy between machines.
+Passkey providers sync passkeys. They usually do not sync arbitrary private keys such as SSH keys. tapkey bridges that gap by deriving the key locally after passkey authentication, without manually copying private key files between machines.
+
+For example, iCloud Keychain syncs passkeys tied to your Apple account, but it will not sync an SSH private key. tapkey lets that synced passkey act as the root, so the SSH key can be re-derived locally on each of your Macs.
+
+Under the hood, tapkey uses the WebAuthn PRF extension to derive a deterministic 32-byte secret from a passkey, then expands it with HKDF-SHA256. There is no tapkey key-sync service. For nearby-device use, tapkey can open a small web view on `tapkey.jul.sh` so you can authenticate with a passkey on a nearby iPhone and still derive locally on the Mac you are using.
 
 ## Install
 
-### From release (recommended)
+### From release
 
 Download the latest release:
 
 ```bash
 gh release download --repo jul-sh/tapkey --pattern 'tapkey-*.zip'
 unzip tapkey-*.zip
-# Symlink into PATH
 mkdir -p ~/.local/bin
 ln -sf "$(pwd)/Tapkey.app/Contents/MacOS/tapkey" ~/.local/bin/tapkey
 ```
 
-#### Verify build attestation
-
-Compute the artifact digest and verify it against Sigstore's transparency log:
+Release artifacts are signed, notarized, and can be verified against GitHub Actions build attestation, so you can check that the release binary was built securely from the public, auditable source code in this repository:
 
 ```bash
 sha256sum tapkey-*.zip
@@ -33,11 +34,9 @@ cosign verify-blob-attestation \
   tapkey-*.zip
 ```
 
-This verifies that the binary was built by the expected GitHub Actions workflow, the signature is valid in Sigstore's transparency log (Rekor), and the artifact digest matches.
-
 ### From source
 
-Requires macOS 15+, Xcode Command Line Tools, and a [paid Apple Developer Program membership](https://developer.apple.com/programs/) (Associated Domains entitlement requires it).
+Requires macOS 15+, Xcode Command Line Tools, and a [paid Apple Developer Program membership](https://developer.apple.com/programs/) for the Associated Domains entitlement. If you do not have one, use the release build instead; releases are already signed and notarized with my Apple Developer account.
 
 ```bash
 git clone https://github.com/jul-sh/tapkey.git
@@ -45,122 +44,104 @@ cd tapkey
 make install
 ```
 
-This compiles, codesigns with entitlements, and symlinks to `~/.local/bin/tapkey`.
-
 ## Usage
 
-### First-time setup
-
-Create a passkey (one-time — macOS will let you choose your passkey provider):
+Create the passkey once, on the first Mac:
 
 ```bash
 tapkey register
 ```
 
-### Derive a key
+Most of the time you can just run:
 
 ```bash
-tapkey derive                              # 32-byte key as hex (default)
-tapkey derive --format base64              # base64
-tapkey derive --format raw                 # raw bytes to stdout
-tapkey derive --format age                 # AGE-SECRET-KEY-1...
-tapkey derive --format ssh                 # OpenSSH Ed25519 private key
+tapkey derive
 ```
 
-### Named keys
+tapkey first tries a local or synced passkey. If none is available, it falls back to nearby-device passkey flow so you can approve the request on your iPhone.
 
-Use `--name` to derive different keys from the same passkey. Each name deterministically produces a different key:
+Derive key material in different formats:
 
 ```bash
-tapkey derive --name backup                # one key for backups
-tapkey derive --name deploy                # a different key for deploys
-tapkey derive --name age --format age      # age encryption key
-tapkey derive --name ssh --format ssh      # SSH key
+tapkey derive
+tapkey derive --format base64
+tapkey derive --format raw
+tapkey derive --format age
+tapkey derive --format ssh
 ```
 
-The default name is `"default"`.
-
-### Public keys
+Use `--name` to derive different keys from the same passkey:
 
 ```bash
-tapkey public-key                          # age public key (age1...)
-tapkey public-key --name ssh --format ssh  # ssh-ed25519 AAAA...
+tapkey derive --name backup
+tapkey derive --name deploy
+tapkey derive --name age --format age
+tapkey derive --name ssh --format ssh
 ```
 
-### Use with age
+The default name is `default`.
+
+Get the public key for a derived key:
 
 ```bash
-# Encrypt
-echo "secret" | age -r $(tapkey public-key --name age) > secret.age
-
-# Decrypt
-age -d -i <(tapkey derive --name age --format age) secret.age
-```
-
-### Use with SSH
-
-```bash
-# Write SSH key
-tapkey derive --name ssh --format ssh > ~/.ssh/id_tapkey
-chmod 600 ~/.ssh/id_tapkey
-
-# Get public key for authorized_keys / GitHub
+tapkey public-key
 tapkey public-key --name ssh --format ssh
 ```
 
-## How it works
+### age
 
-1. **Register** creates a passkey via `ASAuthorizationPlatformPublicKeyCredentialProvider` with the relying party `tapkey.jul.sh`. The passkey is stored in your chosen passkey provider (iCloud Keychain, 1Password, etc.) and syncs across devices.
+```bash
+echo "secret" | age -r "$(tapkey public-key --name age)" > secret.age
+age -d -i <(tapkey derive --name age --format age) secret.age
+```
 
-2. **Derive** performs a WebAuthn assertion with the [PRF extension](https://w3c.github.io/webauthn/#prf-extension) (macOS 15+). The PRF extension takes a fixed salt and returns a deterministic 32-byte `SymmetricKey` bound to the passkey credential.
+### SSH
 
-3. The PRF output is passed through **HKDF-SHA256** with info string `"tapkey:<name>"` to derive 32 bytes of key material. Different `--name` values produce different keys from the same PRF output.
+```bash
+tapkey derive --name ssh --format ssh > ~/.ssh/id_tapkey
+chmod 600 ~/.ssh/id_tapkey
+tapkey public-key --name ssh --format ssh
+```
 
-4. The derived bytes are formatted as hex, base64, an age secret key (Bech32), an OpenSSH Ed25519 key, or raw bytes.
+## How It Works
 
-## Security model
+1. `tapkey register` creates a passkey for the relying party `tapkey.jul.sh`. The passkey lives in your chosen passkey provider.
+2. `tapkey derive` performs a WebAuthn assertion using the PRF extension. The PRF input is `SHA256("tapkey:prf:<name>")`, so each `--name` requests a different PRF output directly from the passkey.
+3. The PRF output is expanded with HKDF-SHA256 using a fixed tapkey info string to produce 32 bytes of key material.
+4. The result is formatted as raw bytes, hex, base64, an `age` secret key, or an OpenSSH Ed25519 key.
 
-### What's trusted
+Same passkey, same name, same derived key. Different names derive different keys.
 
-- **Your passkey provider** (iCloud Keychain, 1Password, etc.) — passkeys are synced via the provider's E2E encryption. For iCloud Keychain, the credential secret never leaves the Secure Enclave, and access is gated by biometric authentication.
-- **The PRF extension** — deterministic output bound to the specific credential; different credentials produce different outputs even with the same salt.
-- **HKDF-SHA256** — standard key derivation with domain separation via the `--name` parameter.
-- **GitHub Actions build attestation** (if using a release binary) — Sigstore-signed SLSA provenance proves the binary was built by the expected workflow from this repository. Verify via cosign + Rekor (see [install](#verify-build-attestation)).
+If you ever intentionally want to replace the tapkey passkey root, use:
 
-### What's public and safe to expose
+```bash
+tapkey register --replace
+```
 
-- **PRF salt** (`SHA256("tapkey:prf-salt-v1")`) — fixed, deterministic, public. Knowing the salt doesn't help without the passkey.
-- **Credential ID** (stored in `~/Library/Containers/sh.jul.tapkey/Data/.config/tapkey/credential.json`) — identifies which passkey to use, not secret. It's equivalent to a username.
-- **HKDF info strings** (`"tapkey:<name>"`) — public domain-separation labels.
+## Security
 
-### Domain separation
+tapkey's security model is simple: the passkey is the root secret.
 
-The `--name` flag sets the HKDF info string to `"tapkey:<name>"`. HKDF info is part of the expand step in the extract-then-expand construction, so different names produce cryptographically independent keys. The info string is used as raw bytes — there is no parsing, escaping, or normalization, so the mapping from name to key is injective. However, names that are prefixes of each other (e.g. `"a"` vs `"ab"`) are still fully independent because HKDF processes the entire info string as an opaque input to HMAC.
+- tapkey depends on your passkey provider, WebAuthn PRF, and local device authentication. It does not create a stronger trust boundary than the provider already gives you.
+- tapkey does not sync or cache derived keys itself. It derives on demand, writes to stdout, and exits.
+- If you save the output, pipe it into another tool, or import it into an agent, that destination now holds the key and must be trusted accordingly.
+- The local config file stores only the credential ID used to select the passkey. It is not secret key material.
+- The PRF inputs are public and derived from `--name`. They provide stable derivation and domain separation, not secrecy.
+- Nearby-device flow loads `https://tapkey.jul.sh/nearby.html` in a sandboxed `WKWebView`. That page is part of the trusted computing base for nearby derivation, and the app needs network access for that flow.
+- Replacing the registered passkey changes every key derived from it. Treat the passkey as the root of your derived identities.
 
-### Threat model
-
-- **Attacker with physical access to unlocked Mac**: Can derive keys if they can authenticate with the passkey provider. tapkey is a convenience tool for key derivation, not a vault — it provides the same protection as your passkey provider's authentication (biometrics, device PIN, etc.).
-- **Attacker with stolen provider credentials**: Would also need a trusted device to approve passkey sync. Your provider's recovery protections apply.
-- **Attacker who compromises the binary**: Build attestation via Sigstore provides supply chain verification. Verify the artifact digest against the Rekor transparency log before trusting a release binary.
-
-### What tapkey does NOT do
-
-- Store or transmit derived keys — they're printed to stdout and forgotten
-- Cache PRF output or derived keys
-- Phone home or make network requests
-- Run persistently — it launches, prompts for passkey authentication, outputs the key, and exits
+In other words: tapkey is not a vault. It is a deterministic derivation tool built on top of passkey security.
 
 ## Requirements
 
-- macOS 15.0 (Sequoia) or later
-- Apple Silicon (arm64)
-- A passkey provider with PRF support (iCloud Keychain, 1Password, etc.)
-- Paid Apple Developer Program membership (for building from source — Associated Domains entitlement requires it)
+- macOS 15.0 or later
+- Apple Silicon (`arm64`)
+- A passkey provider with PRF support (like Apple's built-in Password Manager)
 
 ## Development
 
 ```bash
-# Enter dev shell (provides age, gh)
+# Enter dev shell
 nix develop
 
 # Build and sign
@@ -176,13 +157,11 @@ make verify
 make clean
 ```
 
-### Encrypting secrets for CI
+### Encrypting Secrets For CI
 
 ```bash
-# Encrypt a secret
 echo -n "secret-value" | age -R secrets/age-recipients.txt -o secrets/SECRET_NAME.age
 
-# Decrypt (locally)
 AGE_SECRET_KEY=$(./distribution/get-age-key.sh)
 echo "$AGE_SECRET_KEY" | age -d -i - secrets/SECRET_NAME.age
 ```
