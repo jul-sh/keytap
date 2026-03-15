@@ -2,9 +2,6 @@ mod auth;
 mod credential;
 
 use clap::{Parser, Subcommand, ValueEnum};
-use objc2::{msg_send, MainThreadOnly};
-use objc2_app_kit::{NSApplication, NSBackingStoreType, NSWindow, NSWindowStyleMask};
-use objc2_foundation::{MainThreadMarker, NSPoint, NSRect, NSSize};
 use std::io::Write;
 use tapkey_core::{PrivateKeyFormat, PublicKeyFormat};
 
@@ -54,67 +51,47 @@ enum Format {
 
 fn main() {
     let cli = Cli::parse();
-    let mtm = MainThreadMarker::new().expect("tapkey must run on the main thread");
 
-    unsafe {
-        let app = NSApplication::sharedApplication(mtm);
-        let _: () = msg_send![&app, setActivationPolicy: 1i64]; // .accessory
-
-        match cli.command {
-            Cmd::Register { replace } => {
-                if !replace && credential::load().is_ok() {
-                    die("a tapkey passkey is already registered on this Mac\n  Run 'tapkey derive' to use it.\n  Use 'tapkey register --replace' only if you intend to rotate every derived key.");
+    match cli.command {
+        Cmd::Register { replace } => {
+            if !replace && credential::load().is_ok() {
+                die("a tapkey passkey is already registered on this Mac\n  \
+                     Run 'tapkey derive' to use it.\n  \
+                     Use 'tapkey register --replace' only if you intend to rotate every derived key.");
+            }
+            auth::start_registration(Box::new(|outcome| match outcome {
+                auth::RegistrationOutcome::Success { credential_id } => {
+                    if let Err(e) =
+                        credential::save(&credential::StoredCredential::new(credential_id))
+                    {
+                        die(&format!("failed to save credential: {e}"));
+                    }
+                    eprintln!("Passkey registered successfully.");
+                    eprintln!(
+                        "Credential saved to {}",
+                        credential::credential_path().display()
+                    );
+                    std::process::exit(0);
                 }
-                start_registration(mtm);
-            }
-            Cmd::Derive { name, format } => {
-                start_assertion(mtm, &name, format, false);
-            }
-            Cmd::PublicKey { name, format } => {
-                if matches!(format, Format::Raw) {
-                    die("--format raw is not supported for public-key");
-                }
-                start_assertion(mtm, &name, format, true);
-            }
+                auth::RegistrationOutcome::Error(msg) => die(&msg),
+            }));
         }
-
-        app.run();
+        Cmd::Derive { name, format } => {
+            start_assertion(&name, format, false);
+        }
+        Cmd::PublicKey { name, format } => {
+            if matches!(format, Format::Raw) {
+                die("--format raw is not supported for public-key");
+            }
+            start_assertion(&name, format, true);
+        }
     }
 }
 
-fn start_registration(mtm: MainThreadMarker) {
-    let anchor = create_anchor_window(mtm);
-    auth::start_registration(
-        mtm,
-        &anchor,
-        Box::new(move |outcome| match outcome {
-            auth::RegistrationOutcome::Success { credential_id } => {
-                if let Err(e) = credential::save(&credential::StoredCredential::new(credential_id))
-                {
-                    die(&format!("failed to save credential: {e}"));
-                }
-                eprintln!("Passkey registered successfully.");
-                eprintln!(
-                    "Credential saved to {}",
-                    credential::credential_path().display()
-                );
-                std::process::exit(0);
-            }
-            auth::RegistrationOutcome::Error(msg) => die(&msg),
-        }),
-    );
-    std::mem::forget(anchor);
-}
-
-fn start_assertion(mtm: MainThreadMarker, name: &str, format: Format, is_public: bool) {
+fn start_assertion(name: &str, format: Format, is_public: bool) {
     let preferred_id = credential::load().ok().map(|c| c.credential_id);
-    let name = name.to_string();
-
-    let anchor = create_anchor_window(mtm);
     auth::start_assertion(
-        mtm,
-        &anchor,
-        &name,
+        name,
         preferred_id.as_deref(),
         Box::new(move |outcome| match outcome {
             auth::AssertionOutcome::Success {
@@ -129,10 +106,7 @@ fn start_assertion(mtm: MainThreadMarker, name: &str, format: Format, is_public:
             auth::AssertionOutcome::Error(msg) => die(&msg),
         }),
     );
-    std::mem::forget(anchor);
 }
-
-// -- Output --
 
 fn emit_key(prf_output: &[u8], format: Format, is_public: bool) {
     let raw_key = match tapkey_core::derive_raw_key(prf_output) {
@@ -182,17 +156,4 @@ fn emit_key(prf_output: &[u8], format: Format, is_public: bool) {
 fn die(msg: &str) -> ! {
     eprintln!("error: {msg}");
     std::process::exit(1);
-}
-
-fn create_anchor_window(mtm: MainThreadMarker) -> objc2::rc::Retained<NSWindow> {
-    let frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(1.0, 1.0));
-    unsafe {
-        NSWindow::initWithContentRect_styleMask_backing_defer(
-            NSWindow::alloc(mtm),
-            frame,
-            NSWindowStyleMask::empty(),
-            NSBackingStoreType::Buffered,
-            true,
-        )
-    }
 }

@@ -3,3 +3,4 @@ Tapkey.provisionprofile
 target/
 web/pkg/
 .claude/
+mac/swift-lib/.build/

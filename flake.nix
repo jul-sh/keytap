@@ -25,7 +25,7 @@
 
           shellHook = ''
             echo "tapkey dev shell"
-            echo "  make build       - build macOS app (Swift)"
+            echo "  make build       - build macOS app"
             echo "  make build-wasm  - build WASM package (Rust)"
             echo "  make test        - run all tests"
             echo "  make install     - build, sign, and symlink to ~/.local/bin"
