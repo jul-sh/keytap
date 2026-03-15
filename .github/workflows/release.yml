@@ -15,133 +15,98 @@ jobs:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-
-      - name: Decrypt secrets
-        id: secrets
-        run: |
-          brew install age
-          echo "$AGE_SECRET_KEY" > "$RUNNER_TEMP/age-key.txt"
-          chmod 600 "$RUNNER_TEMP/age-key.txt"
-          for f in secrets/*.age; do
-            [ -f "$f" ] || continue
-            name=$(basename "$f" .age)
-            value=$(age -d -i "$RUNNER_TEMP/age-key.txt" "$f")
-            echo "::add-mask::$value"
-            {
-              echo "${name}<<AGEDELIM"
-              echo "$value"
-              echo "AGEDELIM"
-            } >> "$GITHUB_OUTPUT"
-          done
-          rm -f "$RUNNER_TEMP/age-key.txt"
-        env:
-          AGE_SECRET_KEY: ${{ secrets.AGE_SECRET_KEY }}
-
-      - name: Import certificate
-        run: |
-          KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain-db"
-          KEYCHAIN_PASSWORD="$(openssl rand -hex 32)"
-
-          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
-          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-
-          echo "$P12_BASE64" | base64 --decode > "$RUNNER_TEMP/cert.p12"
-          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN_PATH" \
-            -P "$P12_PASSWORD" -T /usr/bin/codesign
-          rm -f "$RUNNER_TEMP/cert.p12"
-
-          security set-key-partition-list -S apple-tool:,apple: \
-            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-          security list-keychains -d user -s "$KEYCHAIN_PATH" login.keychain-db
-        env:
-          P12_BASE64: ${{ steps.secrets.outputs.MACOS_P12_BASE64 }}
-          P12_PASSWORD: ${{ steps.secrets.outputs.MACOS_P12_PASSWORD }}
-
-      - name: Embed provisioning profile
-        run: |
-          echo "$PROVISION_PROFILE_BASE64" | base64 --decode > Tapkey.provisionprofile
-        env:
-          PROVISION_PROFILE_BASE64: ${{ steps.secrets.outputs.PROVISION_PROFILE_BASE64 }}
+      - uses: DeterminateSystems/nix-installer-action@main
 
       - name: Build
         run: make build
 
-      - name: Sign
+      - name: Sign, notarize, and release
         run: |
-          make sign IDENTITY="${{ steps.secrets.outputs.SIGNING_IDENTITY || 'Developer ID Application' }}"
+          nix develop -c bash -euo pipefail -c '
+            # Decrypt secrets
+            echo "$AGE_SECRET_KEY" > "$RUNNER_TEMP/age-key.txt"
+            chmod 600 "$RUNNER_TEMP/age-key.txt"
+            eval "$(
+              for f in secrets/*.age; do
+                [ -f "$f" ] || continue
+                name=$(basename "$f" .age)
+                value=$(age -d -i "$RUNNER_TEMP/age-key.txt" "$f")
+                echo "::add-mask::$value" >&2
+                printf "export %s=%q\n" "$name" "$value"
+              done
+            )"
+            rm -f "$RUNNER_TEMP/age-key.txt"
 
-      - name: Verify signature
-        run: make verify
+            # Import certificate
+            KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain-db"
+            KEYCHAIN_PASSWORD="$(openssl rand -hex 32)"
 
-      - name: Notarize
-        run: |
-          # Create a zip for notarization submission
-          ditto -c -k --keepParent Tapkey.app "$RUNNER_TEMP/notarize.zip"
+            security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+            security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+            security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
 
-          echo "$NOTARY_KEY_BASE64" | base64 --decode > "$RUNNER_TEMP/auth_key.p8"
+            echo "$MACOS_P12_BASE64" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+            security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN_PATH" \
+              -P "$MACOS_P12_PASSWORD" -T /usr/bin/codesign
+            rm -f "$RUNNER_TEMP/cert.p12"
 
-          xcrun notarytool submit "$RUNNER_TEMP/notarize.zip" \
-            --key "$RUNNER_TEMP/auth_key.p8" \
-            --key-id "$NOTARY_KEY_ID" \
-            --issuer "$NOTARY_ISSUER_ID" \
-            --wait --output-format json | tee "$RUNNER_TEMP/notarization_result.json"
+            security set-key-partition-list -S apple-tool:,apple: \
+              -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+            security list-keychains -d user -s "$KEYCHAIN_PATH" login.keychain-db
 
-          STATUS=$(python3 -c "import json,sys; print(json.load(sys.stdin)['status'])" < "$RUNNER_TEMP/notarization_result.json")
+            # Embed provisioning profile
+            echo "$PROVISION_PROFILE_BASE64" | base64 --decode > Tapkey.provisionprofile
 
-          if [ "$STATUS" != "Accepted" ]; then
-            echo "::error::Notarization failed with status: $STATUS"
-            SUBMISSION_ID=$(python3 -c "import json,sys; print(json.load(sys.stdin)['id'])" < "$RUNNER_TEMP/notarization_result.json")
-            xcrun notarytool log "$SUBMISSION_ID" \
+            # Sign
+            IDENTITY="${SIGNING_IDENTITY:-Developer ID Application}"
+            make sign IDENTITY="$IDENTITY"
+            make verify
+
+            # Notarize
+            ditto -c -k --keepParent Tapkey.app "$RUNNER_TEMP/notarize.zip"
+            echo "$NOTARY_KEY_BASE64" | base64 --decode > "$RUNNER_TEMP/auth_key.p8"
+
+            xcrun notarytool submit "$RUNNER_TEMP/notarize.zip" \
               --key "$RUNNER_TEMP/auth_key.p8" \
               --key-id "$NOTARY_KEY_ID" \
-              --issuer "$NOTARY_ISSUER_ID" || true
-            exit 1
-          fi
+              --issuer "$NOTARY_ISSUER_ID" \
+              --wait --output-format json | tee "$RUNNER_TEMP/notarization_result.json"
 
-          rm -f "$RUNNER_TEMP/auth_key.p8" "$RUNNER_TEMP/notarize.zip"
-        env:
-          NOTARY_KEY_BASE64: ${{ steps.secrets.outputs.NOTARY_KEY_BASE64 }}
-          NOTARY_KEY_ID: ${{ steps.secrets.outputs.NOTARY_KEY_ID }}
-          NOTARY_ISSUER_ID: ${{ steps.secrets.outputs.NOTARY_ISSUER_ID }}
-
-      - name: Staple notarization
-        run: |
-          for i in $(seq 1 10); do
-            if xcrun stapler staple Tapkey.app; then
-              echo "Stapling succeeded on attempt $i"
-              exit 0
+            STATUS=$(python3 -c "import json,sys; print(json.load(sys.stdin)[\"status\"])" < "$RUNNER_TEMP/notarization_result.json")
+            if [ "$STATUS" != "Accepted" ]; then
+              echo "::error::Notarization failed with status: $STATUS"
+              SUBMISSION_ID=$(python3 -c "import json,sys; print(json.load(sys.stdin)[\"id\"])" < "$RUNNER_TEMP/notarization_result.json")
+              xcrun notarytool log "$SUBMISSION_ID" \
+                --key "$RUNNER_TEMP/auth_key.p8" \
+                --key-id "$NOTARY_KEY_ID" \
+                --issuer "$NOTARY_ISSUER_ID" || true
+              exit 1
             fi
-            echo "Staple attempt $i failed, retrying in 15s..."
-            sleep 15
-          done
-          echo "::error::Stapling failed after 10 attempts"
-          exit 1
+            rm -f "$RUNNER_TEMP/auth_key.p8" "$RUNNER_TEMP/notarize.zip"
 
-      - name: Package
-        id: package
-        run: |
-          xattr -cr Tapkey.app
-          SHA="${GITHUB_SHA::7}"
-          ZIP_NAME="tapkey-${SHA}-arm64.zip"
-          ditto -c -k --keepParent Tapkey.app "$ZIP_NAME"
-          echo "zip_name=$ZIP_NAME" >> "$GITHUB_OUTPUT"
-          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+            # Staple
+            for i in $(seq 1 10); do
+              if xcrun stapler staple Tapkey.app; then
+                echo "Stapling succeeded on attempt $i"
+                break
+              fi
+              echo "Staple attempt $i failed, retrying in 15s..."
+              sleep 15
+              [ "$i" -lt 10 ] || { echo "::error::Stapling failed after 10 attempts"; exit 1; }
+            done
 
-      - name: Attest
-        if: ${{ !github.event.repository.private }}
-        uses: actions/attest-build-provenance@c074443f1aee8d4aeeae555aebba3282517141b2 # v2.2.3
-        with:
-          subject-path: ${{ steps.package.outputs.zip_name }}
+            # Package and release
+            xattr -cr Tapkey.app
+            SHA="${GITHUB_SHA::7}"
+            ZIP_NAME="tapkey-${SHA}-arm64.zip"
+            ditto -c -k --keepParent Tapkey.app "$ZIP_NAME"
 
-      - name: Create release
-        run: |
-          gh release create "$SHA" "$ZIP_NAME" \
-            --title "tapkey $SHA" \
-            --target "$GITHUB_SHA" \
-            --generate-notes \
-            --prerelease
+            gh release create "$SHA" "$ZIP_NAME" \
+              --title "tapkey $SHA" \
+              --target "$GITHUB_SHA" \
+              --generate-notes \
+              --prerelease
+          '
         env:
+          AGE_SECRET_KEY: ${{ secrets.AGE_SECRET_KEY }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          SHA: ${{ steps.package.outputs.sha }}
-          ZIP_NAME: ${{ steps.package.outputs.zip_name }}
