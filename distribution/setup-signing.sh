@@ -11,7 +11,7 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-KEYCHAIN_NAME="tapkey_signing.keychain-db"
+KEYCHAIN_NAME="prf_cli_signing.keychain-db"
 KEYCHAIN_PATH="$HOME/Library/Keychains/$KEYCHAIN_NAME"
 
 if [ "$1" = "--cleanup" ]; then
@@ -21,14 +21,14 @@ fi
 
 # Decrypt provisioning profile if not already present
 decrypt_profile() {
-    if [ -f "$PROJECT_ROOT/Tapkey.provisionprofile" ]; then
+    if [ -f "$PROJECT_ROOT/PrfCli.provisionprofile" ]; then
         return
     fi
     local age_key
     age_key=$("$SCRIPT_DIR/get-age-key.sh") || return 1
     printf '%s' "$age_key" > /tmp/_tk_age.txt
     age -d -i /tmp/_tk_age.txt "$PROJECT_ROOT/secrets/PROVISION_PROFILE_BASE64.age" \
-        | base64 --decode > "$PROJECT_ROOT/Tapkey.provisionprofile"
+        | base64 --decode > "$PROJECT_ROOT/PrfCli.provisionprofile"
     rm -f /tmp/_tk_age.txt
     echo "Decrypted provisioning profile"
 }

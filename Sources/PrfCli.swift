@@ -3,11 +3,11 @@ import AuthenticationServices
 import CryptoKit
 import Foundation
 
-private let fallbackTapkeyVersion = "0.1.2"
+private let fallbackVersion = "0.1.2"
 
-func currentTapkeyVersion() -> String {
+func currentVersion() -> String {
     Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
-        ?? fallbackTapkeyVersion
+        ?? fallbackVersion
 }
 
 // MARK: - Data Helpers
@@ -97,7 +97,7 @@ enum Bech32 {
 // MARK: - OpenSSH Ed25519 Key Formatting
 
 enum SSHKey {
-    private static let checkIntLabel = Data("tapkey:ssh-checkint".utf8)
+    private static let checkIntLabel = Data("prf-cli:ssh-checkint".utf8)
 
     static func privateKeyPEM(seed: Data) -> String {
         let privateKey = try! Curve25519.Signing.PrivateKey(rawRepresentation: seed)
@@ -138,7 +138,7 @@ enum SSHKey {
         let privateKey = try! Curve25519.Signing.PrivateKey(rawRepresentation: seed)
         let publicKey = privateKey.publicKey.rawRepresentation
         let blob = sshString("ssh-ed25519") + sshBytes(publicKey)
-        return "ssh-ed25519 \(blob.base64EncodedString()) tapkey"
+        return "ssh-ed25519 \(blob.base64EncodedString()) prf-cli"
     }
 
     private static func deterministicCheckInt(seed: Data) -> UInt32 {
@@ -165,17 +165,17 @@ enum SSHKey {
 // MARK: - Config
 
 struct Config {
-    static let relyingParty = "tapkey.jul.sh"
-    static let registrationName = "tapkey"
-    static let registrationUserID = Data("tapkey-user".utf8)
-    static let hkdfInfo = Data("tapkey:key".utf8)
+    static let relyingParty = "prf-cli.jul.sh"
+    static let registrationName = "prf-cli"
+    static let registrationUserID = Data("prf-cli-user".utf8)
+    static let hkdfInfo = Data("prf-cli:key".utf8)
 
     static let configDir = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent(".config/tapkey")
+        .appendingPathComponent(".config/prf-cli")
     static let credentialFile = configDir.appendingPathComponent("credential.json")
 
     static func prfSalt(for name: String) -> Data {
-        let input = Data("tapkey:prf:\(name)".utf8)
+        let input = Data("prf-cli:prf:\(name)".utf8)
         return Data(SHA256.hash(data: input))
     }
 }
@@ -389,7 +389,7 @@ struct Arguments {
 
     static func printUsage() {
         fputs("""
-        Usage: tapkey <command> [options]
+        Usage: prf-cli <command> [options]
 
         Commands:
           register [--replace]             Create the passkey root
@@ -403,10 +403,10 @@ struct Arguments {
           --version                        Show version
 
         Examples:
-          tapkey register
-          tapkey derive --name ssh --format ssh
-          tapkey public-key --name ssh --format ssh
-          tapkey register --replace
+          prf-cli register
+          prf-cli derive --name ssh --format ssh
+          prf-cli public-key --name ssh --format ssh
+          prf-cli register --replace
 
 """, stderr)
     }
@@ -450,7 +450,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         switch command {
         case .version:
-            print("tapkey \(currentTapkeyVersion())")
+            print("prf-cli \(currentVersion())")
             exit(0)
         case .register(let options):
             performRegistration(options: options)
@@ -463,9 +463,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func performRegistration(options: RegisterOptions) {
         if (try? loadCredential()) != nil && !options.replaceExisting {
-            fputs("error: a tapkey passkey is already registered on this Mac\n", stderr)
-            fputs("  Run 'tapkey derive' to use it.\n", stderr)
-            fputs("  Use 'tapkey register --replace' only if you intend to rotate every derived key.\n", stderr)
+            fputs("error: a passkey is already registered on this Mac\n", stderr)
+            fputs("  Run 'prf-cli derive' to use it.\n", stderr)
+            fputs("  Use 'prf-cli register --replace' only if you intend to rotate every derived key.\n", stderr)
             exit(1)
         }
 
@@ -479,7 +479,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if #available(macOS 15.0, *) {
             request.prf = .checkForSupport
         } else {
-            fputs("error: tapkey requires macOS 15.0 or later (PRF extension)\n", stderr)
+            fputs("error: prf-cli requires macOS 15.0 or later (PRF extension)\n", stderr)
             exit(1)
         }
 
@@ -513,7 +513,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 .saltInput1(Config.prfSalt(for: keyOptions(for: command).name))
             request.prf = .inputValues(inputValues)
         } else {
-            fputs("error: tapkey requires macOS 15.0 or later (PRF extension)\n", stderr)
+            fputs("error: prf-cli requires macOS 15.0 or later (PRF extension)\n", stderr)
             exit(1)
         }
 
@@ -528,8 +528,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             )
         case .discoverable:
             retryAction = .fail(lines: [
-                "error: no passkey was available for tapkey",
-                "  Run 'tapkey register' first to create a passkey."
+                "error: no passkey was available for prf-cli",
+                "  Run 'prf-cli register' first to create a passkey."
             ])
         }
 
@@ -671,7 +671,7 @@ final class AssertionDelegate: NSObject, ASAuthorizationControllerDelegate {
                 print(formatPublicKey(rawKey, format: keyOptions.format))
             }
         } else {
-            fputs("error: tapkey requires macOS 15.0 or later\n", stderr)
+            fputs("error: prf-cli requires macOS 15.0 or later\n", stderr)
             exit(1)
         }
 
