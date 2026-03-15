@@ -87,7 +87,7 @@ prf-cli public-key --name ssh --format ssh
 
 ## How It Works
 
-1. `prf-cli register` creates a passkey for the relying party `tapkey.jul.sh`. The passkey lives in your chosen passkey provider (e.g. iCloud Keychain).
+1. `prf-cli register` creates a passkey scoped to the WebAuthn relying party `tapkey.jul.sh`. The passkey lives in your chosen passkey provider (e.g. iCloud Keychain).
 2. `prf-cli derive` performs a WebAuthn assertion with the PRF extension. The PRF input is `SHA256("tapkey:prf:<name>")`, so each `--name` produces a different PRF output directly from the passkey.
 3. The PRF output is expanded with HKDF-SHA256 to produce 32 bytes of key material.
 4. The result is formatted as raw bytes, hex, base64, an `age` secret key, or an OpenSSH Ed25519 key.
@@ -97,6 +97,14 @@ Replace the passkey root (rotates all derived keys):
 ```bash
 prf-cli register --replace
 ```
+
+### Relying party domain
+
+The release build uses `tapkey.jul.sh` as the WebAuthn relying party. This domain hosts an [Associated Domains](https://developer.apple.com/documentation/bundleresources/entitlements/com_apple_developer_associated-domains) file (`.well-known/apple-app-site-association`) that tells macOS which app bundle is authorized to use passkeys for that origin.
+
+The domain is only an identifier — all key derivation happens locally on your device, and no secret material is ever sent to or received from `tapkey.jul.sh`. If the domain were to become unavailable or hostile, the operator could break functionality (by revoking the app association, which would prevent the release build from accessing its passkeys), but could not extract or influence derived keys.
+
+To use your own relying party, change `Config.relyingParty` in the source, host the Associated Domains file on your domain, and build with your own Apple Developer account. This creates a separate set of passkeys.
 
 ## Security
 
