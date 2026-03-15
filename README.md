@@ -102,9 +102,11 @@ prf-cli register --replace
 
 The release build uses `tapkey.jul.sh` as the WebAuthn relying party. This domain hosts an [Associated Domains](https://developer.apple.com/documentation/bundleresources/entitlements/com_apple_developer_associated-domains) file (`.well-known/apple-app-site-association`) that tells macOS which app bundle is authorized to use passkeys for that origin.
 
-The domain is only an identifier — all key derivation happens locally on your device, and no secret material is ever sent to or received from `tapkey.jul.sh`. If the domain were to become unavailable or hostile, the operator could break functionality (by revoking the app association, which would prevent the release build from accessing its passkeys), but could not extract or influence derived keys.
+The domain is only an identifier — when using prf-cli locally, all key derivation happens on your device and no secret material is sent to `tapkey.jul.sh`. If the domain were to become unavailable or its Associated Domains file were revoked, the release build would lose access to its passkeys (breaking functionality), but keys already derived would be unaffected.
 
-To use your own relying party, change `Config.relyingParty` in the source, host the Associated Domains file on your domain, and build with your own Apple Developer account. This creates a separate set of passkeys.
+However, because the PRF salts and HKDF parameters are deterministic and public, a hostile operator of the relying party domain could serve a web page that requests a WebAuthn PRF assertion with the same salts prf-cli uses. If you visited that page and approved the passkey prompt in your browser, the page's JavaScript would receive the PRF output and could derive the same keys. This requires active user interaction (you'd see a passkey authentication prompt), but there's no visual indication that approving it exposes your derived keys.
+
+To eliminate this trust dependency, change `Config.relyingParty` in the source to a domain you control, host the Associated Domains file there, and build with your own Apple Developer account. This creates a separate set of passkeys.
 
 ## Security
 
