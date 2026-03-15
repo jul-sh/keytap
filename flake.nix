@@ -1,5 +1,5 @@
 {
-  description = "prf-cli - derive keys from passkeys via WebAuthn PRF";
+  description = "tapkey - derive keys from iCloud Keychain passkeys via Touch ID";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
@@ -19,7 +19,7 @@
           ];
 
           shellHook = ''
-            echo "prf-cli dev shell"
+            echo "tapkey dev shell"
             echo "  make install - build, sign, and symlink to ~/.local/bin"
           '';
         };

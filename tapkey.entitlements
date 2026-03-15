@@ -4,7 +4,7 @@
 <dict>
     <key>com.apple.developer.associated-domains</key>
     <array>
-        <string>webcredentials:prf-cli.jul.sh</string>
+        <string>webcredentials:tapkey.jul.sh</string>
     </array>
 </dict>
 </plist>

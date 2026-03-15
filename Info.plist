@@ -3,11 +3,11 @@
 <plist version="1.0">
 <dict>
     <key>CFBundleIdentifier</key>
-    <string>sh.jul.prf-cli</string>
+    <string>sh.jul.tapkey</string>
     <key>CFBundleName</key>
-    <string>PrfCli</string>
+    <string>Tapkey</string>
     <key>CFBundleExecutable</key>
-    <string>prf-cli</string>
+    <string>tapkey</string>
     <key>CFBundleVersion</key>
     <string>0.1.2</string>
     <key>CFBundleShortVersionString</key>

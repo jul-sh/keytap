@@ -55,7 +55,7 @@ jobs:
             security list-keychains -d user -s "$KEYCHAIN_PATH" login.keychain-db
 
             # Embed provisioning profile
-            echo "$PROVISION_PROFILE_BASE64" | base64 --decode > PrfCli.provisionprofile
+            echo "$PROVISION_PROFILE_BASE64" | base64 --decode > Tapkey.provisionprofile
 
             # Sign
             IDENTITY="${SIGNING_IDENTITY:-Developer ID Application}"
@@ -63,7 +63,7 @@ jobs:
             make verify
 
             # Notarize
-            ditto -c -k --keepParent PrfCli.app "$RUNNER_TEMP/notarize.zip"
+            ditto -c -k --keepParent Tapkey.app "$RUNNER_TEMP/notarize.zip"
             echo "$NOTARY_KEY_BASE64" | base64 --decode > "$RUNNER_TEMP/auth_key.p8"
 
             xcrun notarytool submit "$RUNNER_TEMP/notarize.zip" \
@@ -86,7 +86,7 @@ jobs:
 
             # Staple
             for i in $(seq 1 10); do
-              if xcrun stapler staple PrfCli.app; then
+              if xcrun stapler staple Tapkey.app; then
                 echo "Stapling succeeded on attempt $i"
                 break
               fi
@@ -96,13 +96,13 @@ jobs:
             done
 
             # Package and release
-            xattr -cr PrfCli.app
+            xattr -cr Tapkey.app
             SHA="${GITHUB_SHA::7}"
-            ZIP_NAME="prf-cli-${SHA}-arm64.zip"
-            ditto -c -k --keepParent PrfCli.app "$ZIP_NAME"
+            ZIP_NAME="tapkey-${SHA}-arm64.zip"
+            ditto -c -k --keepParent Tapkey.app "$ZIP_NAME"
 
             gh release create "$SHA" "$ZIP_NAME" \
-              --title "prf-cli $SHA" \
+              --title "tapkey $SHA" \
               --target "$GITHUB_SHA" \
               --generate-notes \
               --prerelease
