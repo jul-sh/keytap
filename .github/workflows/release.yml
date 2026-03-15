@@ -16,24 +16,27 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
+      - uses: cachix/install-nix-action@v31
+
       - name: Decrypt secrets
         id: secrets
         run: |
-          brew install age
-          echo "$AGE_SECRET_KEY" > "$RUNNER_TEMP/age-key.txt"
-          chmod 600 "$RUNNER_TEMP/age-key.txt"
-          for f in secrets/*.age; do
-            [ -f "$f" ] || continue
-            name=$(basename "$f" .age)
-            value=$(age -d -i "$RUNNER_TEMP/age-key.txt" "$f")
-            echo "::add-mask::$value"
-            {
-              echo "${name}<<AGEDELIM"
-              echo "$value"
-              echo "AGEDELIM"
-            } >> "$GITHUB_OUTPUT"
-          done
-          rm -f "$RUNNER_TEMP/age-key.txt"
+          nix develop --command bash -c '
+            echo "$AGE_SECRET_KEY" > "$RUNNER_TEMP/age-key.txt"
+            chmod 600 "$RUNNER_TEMP/age-key.txt"
+            for f in secrets/*.age; do
+              [ -f "$f" ] || continue
+              name=$(basename "$f" .age)
+              value=$(age -d -i "$RUNNER_TEMP/age-key.txt" "$f")
+              echo "::add-mask::$value"
+              {
+                echo "${name}<<AGEDELIM"
+                echo "$value"
+                echo "AGEDELIM"
+              } >> "$GITHUB_OUTPUT"
+            done
+            rm -f "$RUNNER_TEMP/age-key.txt"
+          '
         env:
           AGE_SECRET_KEY: ${{ secrets.AGE_SECRET_KEY }}
 
@@ -58,11 +61,6 @@ jobs:
           P12_BASE64: ${{ steps.secrets.outputs.MACOS_P12_BASE64 }}
           P12_PASSWORD: ${{ steps.secrets.outputs.MACOS_P12_PASSWORD }}
 
-      - name: Install Rust
-        run: |
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-
       - name: Embed provisioning profile
         run: |
           echo "$PROVISION_PROFILE_BASE64" | base64 --decode > Tapkey.provisionprofile
@@ -70,7 +68,7 @@ jobs:
           PROVISION_PROFILE_BASE64: ${{ steps.secrets.outputs.PROVISION_PROFILE_BASE64 }}
 
       - name: Build
-        run: make build
+        run: nix develop --command make build
 
       - name: Sign
         run: |
