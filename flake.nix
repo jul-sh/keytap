@@ -16,11 +16,16 @@
           buildInputs = with pkgs; [
             age
             gh
+            rustc
+            cargo
+            rustfmt
+            clippy
           ];
 
           shellHook = ''
             echo "tapkey dev shell"
-            echo "  make        - build and sign"
+            echo "  make build   - build macOS app"
+            echo "  make test    - run tests"
             echo "  make install - build, sign, and symlink to ~/.local/bin"
           '';
         };
