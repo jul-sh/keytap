@@ -57,43 +57,11 @@ jobs:
             # Embed provisioning profile
             echo "$PROVISION_PROFILE_BASE64" | base64 --decode > Tapkey.provisionprofile
 
-            # Sign
+            # Sign, notarize, and staple
             IDENTITY="${SIGNING_IDENTITY:-Developer ID Application}"
             make sign IDENTITY="$IDENTITY"
             make verify
-
-            # Notarize
-            ditto -c -k --keepParent Tapkey.app "$RUNNER_TEMP/notarize.zip"
-            echo "$NOTARY_KEY_BASE64" | base64 --decode > "$RUNNER_TEMP/auth_key.p8"
-
-            xcrun notarytool submit "$RUNNER_TEMP/notarize.zip" \
-              --key "$RUNNER_TEMP/auth_key.p8" \
-              --key-id "$NOTARY_KEY_ID" \
-              --issuer "$NOTARY_ISSUER_ID" \
-              --wait --output-format json | tee "$RUNNER_TEMP/notarization_result.json"
-
-            STATUS=$(python3 -c "import json,sys; print(json.load(sys.stdin)[\"status\"])" < "$RUNNER_TEMP/notarization_result.json")
-            if [ "$STATUS" != "Accepted" ]; then
-              echo "::error::Notarization failed with status: $STATUS"
-              SUBMISSION_ID=$(python3 -c "import json,sys; print(json.load(sys.stdin)[\"id\"])" < "$RUNNER_TEMP/notarization_result.json")
-              xcrun notarytool log "$SUBMISSION_ID" \
-                --key "$RUNNER_TEMP/auth_key.p8" \
-                --key-id "$NOTARY_KEY_ID" \
-                --issuer "$NOTARY_ISSUER_ID" || true
-              exit 1
-            fi
-            rm -f "$RUNNER_TEMP/auth_key.p8" "$RUNNER_TEMP/notarize.zip"
-
-            # Staple
-            for i in $(seq 1 10); do
-              if xcrun stapler staple Tapkey.app; then
-                echo "Stapling succeeded on attempt $i"
-                break
-              fi
-              echo "Staple attempt $i failed, retrying in 15s..."
-              sleep 15
-              [ "$i" -lt 10 ] || { echo "::error::Stapling failed after 10 attempts"; exit 1; }
-            done
+            make notarize
 
             # Package and release
             xattr -cr Tapkey.app

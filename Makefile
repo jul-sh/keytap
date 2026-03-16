@@ -4,9 +4,9 @@ BIN = $(BUNDLE)/Contents/MacOS/tapkey
 IDENTITY ?= $(shell security find-identity -v -p codesigning 2>/dev/null | grep -q "Developer ID Application" && echo "Developer ID Application" || echo "-")
 PROVISIONING_PROFILE ?=
 
-.PHONY: all build sign setup-signing install verify clean
+.PHONY: all build sign notarize setup-signing install verify clean
 
-all: build sign
+all: build sign notarize
 
 setup-signing:
 	@./distribution/setup-signing.sh
@@ -31,6 +31,9 @@ sign:
 		--sign "$(IDENTITY)" \
 		--entitlements tapkey.entitlements $(BUNDLE)
 	@echo "Signed $(BUNDLE)"
+
+notarize:
+	@./distribution/notarize.sh $(BUNDLE)
 
 INSTALL_DIR = $(HOME)/.local/share/tapkey
 INSTALL_BUNDLE = $(INSTALL_DIR)/$(BUNDLE)

@@ -447,6 +447,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
+        anchorWindow.center()
+        anchorWindow.orderFrontRegardless()
 
         switch command {
         case .version:
