@@ -97,14 +97,6 @@ If you want to avoid re-authenticating every time, you can store a derived key i
 security add-generic-password -s tapkey -a AGE_SECRET_KEY -w "$(tapkey derive myKey --format age)"
 ```
 
-### SSH
-
-```bash
-tapkey derive ssh --format ssh > ~/.ssh/id_tapkey
-chmod 600 ~/.ssh/id_tapkey
-tapkey public-key ssh --format ssh
-```
-
 ## How It Works
 
 1. `tapkey register` creates a passkey for the relying party `tapkey.jul.sh`. The passkey lives in your chosen passkey provider.
