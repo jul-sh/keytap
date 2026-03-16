@@ -2,7 +2,7 @@
 
 <img src="tapkey.icon/Assets/ChatGPT Image Mar 15, 2026 at 10_01_47 PM-2.png" width="128" alt="tapkey icon" />
 
-tapkey is a tiny macOS app that lets you recover the same SSH key, `age` identity, or app secret on any Mac where you can unlock the same passkey.
+tapkey is a tiny macOS CLI that lets you recover the same SSH key, `age` identity, or app secret on any Mac where you can unlock the same passkey.
 
 Passkey providers sync passkeys. They usually do not sync arbitrary private keys such as SSH keys. tapkey bridges that gap by deriving the key locally after passkey authentication, without manually copying private key files between machines.
 
