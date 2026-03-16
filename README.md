@@ -1,10 +1,6 @@
 # tapkey
 
-<p align="center">
-  <img src="tapkey.icon/Assets/ChatGPT Image Mar 15, 2026 at 10_01_47 PM-2.png" width="128" alt="tapkey icon" />
-</p>
-
-⚠️ Pre-release experimental software. The design is still in flux, breaking changes should be expected for now, and it has not yet had a security review.
+<img src="tapkey.icon/Assets/ChatGPT Image Mar 15, 2026 at 10_01_47 PM-2.png" width="128" alt="tapkey icon" />
 
 tapkey is a tiny macOS app that lets you recover the same SSH key, `age` identity, or app secret on any Mac where you can unlock the same passkey.
 

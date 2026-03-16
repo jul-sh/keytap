@@ -3,7 +3,7 @@ import AuthenticationServices
 import CryptoKit
 import Foundation
 
-private let fallbackTapkeyVersion = "0.1.2"
+private let fallbackTapkeyVersion = "1.0.0"
 
 func currentTapkeyVersion() -> String {
     Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
