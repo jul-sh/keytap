@@ -3,3 +3,5 @@ Tapkey.provisionprofile
 target/
 .claude/
 mac/swift-lib/.build/
+.DS_Store
+*.zip
