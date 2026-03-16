@@ -15,66 +15,97 @@ jobs:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
       - uses: DeterminateSystems/nix-installer-action@main
+
+      - name: Decrypt secrets
+        id: secrets
+        run: |
+          nix develop --command bash -c '
+            echo "$AGE_SECRET_KEY" > "$RUNNER_TEMP/age-key.txt"
+            chmod 600 "$RUNNER_TEMP/age-key.txt"
+            for f in secrets/*.age; do
+              [ -f "$f" ] || continue
+              name=$(basename "$f" .age)
+              value=$(age -d -i "$RUNNER_TEMP/age-key.txt" "$f")
+              echo "::add-mask::$value"
+              {
+                echo "${name}<<AGEDELIM"
+                echo "$value"
+                echo "AGEDELIM"
+              } >> "$GITHUB_OUTPUT"
+            done
+            rm -f "$RUNNER_TEMP/age-key.txt"
+          '
+        env:
+          AGE_SECRET_KEY: ${{ secrets.AGE_SECRET_KEY }}
+
+      - name: Import certificate
+        run: |
+          KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -hex 32)"
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          echo "$P12_BASE64" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN_PATH" \
+            -P "$P12_PASSWORD" -T /usr/bin/codesign
+          rm -f "$RUNNER_TEMP/cert.p12"
+
+          security set-key-partition-list -S apple-tool:,apple: \
+            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH" login.keychain-db
+        env:
+          P12_BASE64: ${{ steps.secrets.outputs.MACOS_P12_BASE64 }}
+          P12_PASSWORD: ${{ steps.secrets.outputs.MACOS_P12_PASSWORD }}
+
+      - name: Embed provisioning profile
+        run: |
+          echo "$PROVISION_PROFILE_BASE64" | base64 --decode > Tapkey.provisionprofile
+        env:
+          PROVISION_PROFILE_BASE64: ${{ steps.secrets.outputs.PROVISION_PROFILE_BASE64 }}
 
       - name: Build
         run: make build
 
-      - name: Sign, notarize, and release
+      - name: Sign
         run: |
-          nix develop -c bash -euo pipefail -c '
-            # Decrypt secrets
-            echo "$AGE_SECRET_KEY" > "$RUNNER_TEMP/age-key.txt"
-            chmod 600 "$RUNNER_TEMP/age-key.txt"
-            eval "$(
-              for f in secrets/*.age; do
-                [ -f "$f" ] || continue
-                name=$(basename "$f" .age)
-                value=$(age -d -i "$RUNNER_TEMP/age-key.txt" "$f")
-                echo "::add-mask::$value" >&2
-                printf "export %s=%q\n" "$name" "$value"
-              done
-            )"
-            rm -f "$RUNNER_TEMP/age-key.txt"
+          make sign IDENTITY="${{ steps.secrets.outputs.SIGNING_IDENTITY || 'Developer ID Application' }}"
 
-            # Import certificate
-            KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain-db"
-            KEYCHAIN_PASSWORD="$(openssl rand -hex 32)"
+      - name: Verify signature
+        run: make verify
 
-            security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-            security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
-            security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-
-            echo "$MACOS_P12_BASE64" | base64 --decode > "$RUNNER_TEMP/cert.p12"
-            security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN_PATH" \
-              -P "$MACOS_P12_PASSWORD" -T /usr/bin/codesign
-            rm -f "$RUNNER_TEMP/cert.p12"
-
-            security set-key-partition-list -S apple-tool:,apple: \
-              -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-            security list-keychains -d user -s "$KEYCHAIN_PATH" login.keychain-db
-
-            # Embed provisioning profile
-            echo "$PROVISION_PROFILE_BASE64" | base64 --decode > Tapkey.provisionprofile
-
-            # Sign, notarize, and staple
-            IDENTITY="${SIGNING_IDENTITY:-Developer ID Application}"
-            make sign IDENTITY="$IDENTITY"
-            make verify
-            make notarize
-
-            # Package and release
-            xattr -cr Tapkey.app
-            SHA="${GITHUB_SHA::7}"
-            ZIP_NAME="tapkey-${SHA}-arm64.zip"
-            ditto -c -k --keepParent Tapkey.app "$ZIP_NAME"
-
-            gh release create "$SHA" "$ZIP_NAME" \
-              --title "tapkey $SHA" \
-              --target "$GITHUB_SHA" \
-              --generate-notes \
-              --prerelease
-          '
+      - name: Notarize and staple
+        run: nix develop --command make notarize
         env:
           AGE_SECRET_KEY: ${{ secrets.AGE_SECRET_KEY }}
+
+      - name: Package
+        id: package
+        run: |
+          xattr -cr Tapkey.app
+          SHA="${GITHUB_SHA::7}"
+          ZIP_NAME="tapkey-${SHA}-arm64.zip"
+          ditto -c -k --keepParent Tapkey.app "$ZIP_NAME"
+          echo "zip_name=$ZIP_NAME" >> "$GITHUB_OUTPUT"
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Attest
+        if: ${{ !github.event.repository.private }}
+        uses: actions/attest-build-provenance@c074443f1aee8d4aeeae555aebba3282517141b2 # v2.2.3
+        with:
+          subject-path: ${{ steps.package.outputs.zip_name }}
+
+      - name: Create release
+        run: |
+          gh release create "$SHA" "$ZIP_NAME" \
+            --title "tapkey $SHA" \
+            --target "$GITHUB_SHA" \
+            --generate-notes \
+            --prerelease
+        env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SHA: ${{ steps.package.outputs.sha }}
+          ZIP_NAME: ${{ steps.package.outputs.zip_name }}
