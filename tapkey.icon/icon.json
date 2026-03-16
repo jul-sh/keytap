@@ -1,0 +1,176 @@
+{
+  "fill" : {
+    "linear-gradient" : [
+      "display-p3:0.94217,0.98515,1.00000,1.00000",
+      "display-p3:0.91434,0.91624,0.96783,1.00000"
+    ],
+    "orientation" : {
+      "start" : {
+        "x" : 0.5,
+        "y" : 0
+      },
+      "stop" : {
+        "x" : 0.5,
+        "y" : 0.7
+      }
+    }
+  },
+  "groups" : [
+    {
+      "hidden" : true,
+      "layers" : [
+        {
+          "blend-mode" : "normal",
+          "fill" : {
+            "solid" : "display-p3:0.96783,0.19889,0.89485,1.00000"
+          },
+          "image-name" : "icon 2.svg",
+          "name" : "icon 2",
+          "opacity" : 0.92,
+          "position" : {
+            "scale" : 2.93,
+            "translation-in-points" : [
+              139.75,
+              127.9765625
+            ]
+          }
+        },
+        {
+          "blend-mode" : "normal",
+          "fill" : {
+            "solid" : "display-p3:0.76395,0.96783,0.39798,1.00000"
+          },
+          "image-name" : "icon 2.svg",
+          "name" : "icon 2",
+          "opacity" : 0.92,
+          "position" : {
+            "scale" : 4.17,
+            "translation-in-points" : [
+              91.1953125,
+              91.390625
+            ]
+          }
+        },
+        {
+          "blend-mode" : "normal",
+          "fill" : {
+            "solid" : "display-p3:0.76395,0.96783,0.39798,1.00000"
+          },
+          "image-name" : "icon 2.svg",
+          "name" : "icon 2",
+          "opacity" : 0.92,
+          "position" : {
+            "scale" : 4.17,
+            "translation-in-points" : [
+              91.1953125,
+              91.390625
+            ]
+          }
+        },
+        {
+          "blend-mode" : "normal",
+          "fill" : {
+            "solid" : "display-p3:0.45676,0.96783,0.63931,1.00000"
+          },
+          "image-name" : "icon 2.svg",
+          "name" : "icon 2",
+          "opacity" : 0.92,
+          "position" : {
+            "scale" : 4.17,
+            "translation-in-points" : [
+              91.1953125,
+              91.390625
+            ]
+          }
+        },
+        {
+          "blend-mode" : "normal",
+          "fill" : {
+            "solid" : "display-p3:0.17359,0.96783,0.86089,1.00000"
+          },
+          "image-name" : "icon 2.svg",
+          "name" : "icon 2",
+          "opacity" : 0.92,
+          "position" : {
+            "scale" : 5.15,
+            "translation-in-points" : [
+              64.90625,
+              54.9765625
+            ]
+          }
+        },
+        {
+          "blend-mode" : "normal",
+          "fill" : {
+            "solid" : "display-p3:0.16695,0.71013,0.96783,1.00000"
+          },
+          "image-name" : "icon 2.svg",
+          "name" : "icon 2",
+          "opacity" : 0.92,
+          "position" : {
+            "scale" : 5.98,
+            "translation-in-points" : [
+              42.7734375,
+              32.2578125
+            ]
+          }
+        },
+        {
+          "blend-mode" : "normal",
+          "fill" : {
+            "solid" : "extended-srgb:0.00000,0.53333,1.00000,1.00000"
+          },
+          "image-name" : "icon 2.svg",
+          "name" : "icon 2",
+          "opacity" : 0.92,
+          "position" : {
+            "scale" : 7.09,
+            "translation-in-points" : [
+              0,
+              0
+            ]
+          }
+        }
+      ],
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 0.5
+      },
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.5
+      }
+    },
+    {
+      "layers" : [
+        {
+          "glass" : false,
+          "hidden" : false,
+          "image-name" : "ChatGPT Image Mar 15, 2026 at 10_01_47 PM-2.png",
+          "name" : "ChatGPT Image Mar 15, 2026 at 10_01_47 PM-2",
+          "position" : {
+            "scale" : 1.15,
+            "translation-in-points" : [
+              -9.199999999999932,
+              5.75
+            ]
+          }
+        }
+      ],
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 0.5
+      },
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.5
+      }
+    }
+  ],
+  "supported-platforms" : {
+    "circles" : [
+      "watchOS"
+    ],
+    "squares" : "shared"
+  }
+}

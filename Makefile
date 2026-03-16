@@ -12,8 +12,9 @@ setup-signing:
 	@./distribution/setup-signing.sh
 
 build:
-	@mkdir -p $(BUNDLE)/Contents/MacOS
+	@mkdir -p $(BUNDLE)/Contents/MacOS $(BUNDLE)/Contents/Resources
 	@cp Info.plist $(BUNDLE)/Contents/Info.plist
+	@cp tapkey.icns $(BUNDLE)/Contents/Resources/tapkey.icns
 	swiftc -O -target arm64-apple-macos15.0 \
 		-framework AuthenticationServices -framework AppKit \
 		Sources/Tapkey.swift -o $(BIN)

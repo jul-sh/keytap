@@ -12,6 +12,8 @@
     <string>0.1.2</string>
     <key>CFBundleShortVersionString</key>
     <string>0.1.2</string>
+    <key>CFBundleIconFile</key>
+    <string>tapkey</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>LSMinimumSystemVersion</key>
