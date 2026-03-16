@@ -69,13 +69,13 @@ Derive key material in different formats:
 ```bash
 tapkey derive myBase64Key --format base64
 tapkey derive myRawKey --format raw
-tapkey derive anAgeKey --format age
+tapkey derive smolSecrets --format age
 tapkey derive smolSshKey --format ssh
 ```
 
 The default name is `default`.
 
-Get the public key for a derived key:
+Get the public key for a derived key, e.g. a key named `smolSshKey`:
 
 ```bash
 tapkey public-key smolSshKey --format ssh
@@ -83,9 +83,11 @@ tapkey public-key smolSshKey --format ssh
 
 ### age
 
+E.g. using an age key called `smolSecrets`
+
 ```bash
-echo "secret" | age -r "$(tapkey public-key age)" > secret.age
-age -d -i <(tapkey derive age --format age) secret.age
+echo "secret" | age -r "$(tapkey public-key smolSecrets)" > secret.age
+age -d -i <(tapkey derive smolSecrets --format age) secret.age
 ```
 
 ### SSH
