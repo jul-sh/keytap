@@ -89,6 +89,14 @@ echo "secret" | age -r "$(tapkey public-key smolSecrets)" > secret.age
 age -d -i <(tapkey derive smolSecrets --format age) secret.age
 ```
 
+### Storing a derived key in macOS Keychain
+
+If you want to avoid re-authenticating every time, you can store a derived key in the macOS Keychain:
+
+```bash
+security add-generic-password -s tapkey -a AGE_SECRET_KEY -w "$(tapkey derive myKey --format age)"
+```
+
 ### SSH
 
 ```bash
