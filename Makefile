@@ -4,7 +4,7 @@ BIN = $(BUNDLE)/Contents/MacOS/tapkey
 IDENTITY ?= $(shell security find-identity -v -p codesigning 2>/dev/null | grep -q "Developer ID Application" && echo "Developer ID Application" || echo "-")
 PROVISIONING_PROFILE ?=
 
-.PHONY: all build sign notarize setup-signing install verify package clean
+.PHONY: all build sign notarize setup-signing install verify package test clean
 
 all: build sign notarize
 
@@ -19,12 +19,11 @@ setup-signing:
 	@./distribution/setup-signing.sh
 
 build:
+	cargo build --release -p tapkey
 	@mkdir -p $(BUNDLE)/Contents/MacOS $(BUNDLE)/Contents/Resources
-	@cp Info.plist $(BUNDLE)/Contents/Info.plist
+	@cp mac/Info.plist $(BUNDLE)/Contents/Info.plist
 	@cp tapkey.icns $(BUNDLE)/Contents/Resources/tapkey.icns
-	swiftc -O -target arm64-apple-macos15.0 \
-		-framework AuthenticationServices -framework AppKit \
-		Sources/Tapkey.swift -o $(BIN)
+	@cp target/release/tapkey $(BIN)
 	@echo "Built $(BUNDLE)"
 
 sign:
@@ -37,7 +36,7 @@ sign:
 	fi
 	codesign --force --options runtime --timestamp \
 		--sign "$(IDENTITY)" \
-		--entitlements tapkey.entitlements $(BUNDLE)
+		--entitlements mac/tapkey.entitlements $(BUNDLE)
 	@echo "Signed $(BUNDLE)"
 
 notarize:
@@ -61,5 +60,10 @@ verify:
 	@echo ""
 	codesign -d --entitlements :- $(BUNDLE)
 
+test:
+	cargo test -p tapkey-core
+	@echo "All tests passed."
+
 clean:
+	cargo clean
 	rm -rf $(BUNDLE)

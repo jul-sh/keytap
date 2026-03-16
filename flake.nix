@@ -16,10 +16,19 @@
           buildInputs = with pkgs; [
             age
             gh
+            rustc
+            cargo
+            rustfmt
+            clippy
           ];
 
+          # Ensure system Swift (from Xcode) is available — nix Swift
+          # lacks the macOS 15 SDK needed for AuthenticationServices PRF.
           shellHook = ''
+            export PATH="/usr/bin:$PATH"
             echo "tapkey dev shell"
+            echo "  make build   - build macOS app"
+            echo "  make test    - run tests"
             echo "  make install - build, sign, and symlink to ~/.local/bin"
           '';
         };
