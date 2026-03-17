@@ -1,4 +1,5 @@
 mod auth;
+mod nearby;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use std::io::Write;
@@ -14,7 +15,11 @@ struct Cli {
 #[derive(Subcommand)]
 enum Cmd {
     /// Create the passkey root
-    Register,
+    Register {
+        /// Use QR code flow for nearby device authentication
+        #[arg(long)]
+        nearby: bool,
+    },
     /// Derive key material from your passkey
     Derive {
         /// Key name for domain separation
@@ -23,6 +28,9 @@ enum Cmd {
         /// Output format
         #[arg(long, default_value = "hex")]
         format: Format,
+        /// Use QR code flow for nearby device authentication
+        #[arg(long)]
+        nearby: bool,
     },
     /// Show the public key for a derived key
     PublicKey {
@@ -32,11 +40,14 @@ enum Cmd {
         /// Output format
         #[arg(long, default_value = "age")]
         format: Format,
+        /// Use QR code flow for nearby device authentication
+        #[arg(long)]
+        nearby: bool,
     },
 }
 
 #[derive(Clone, Copy, ValueEnum)]
-enum Format {
+pub(crate) enum Format {
     Hex,
     Base64,
     Age,
@@ -48,7 +59,11 @@ fn main() {
     let cli = Cli::parse();
 
     match cli.command {
-        Cmd::Register => {
+        Cmd::Register { nearby } => {
+            if nearby {
+                nearby::start_nearby_flow("register", "default", Format::Hex, false);
+                return;
+            }
             auth::start_registration(Box::new(|outcome| match outcome {
                 auth::RegistrationOutcome::Success { .. } => {
                     eprintln!("Passkey registered successfully.");
@@ -57,12 +72,20 @@ fn main() {
                 auth::RegistrationOutcome::Error(msg) => die(&msg),
             }));
         }
-        Cmd::Derive { name, format } => {
+        Cmd::Derive { name, format, nearby } => {
+            if nearby {
+                nearby::start_nearby_flow("assert", &name, format, false);
+                return;
+            }
             start_assertion(&name, format, false);
         }
-        Cmd::PublicKey { name, format } => {
+        Cmd::PublicKey { name, format, nearby } => {
             if matches!(format, Format::Raw) {
                 die("--format raw is not supported for public-key");
+            }
+            if nearby {
+                nearby::start_nearby_flow("assert", &name, format, true);
+                return;
             }
             start_assertion(&name, format, true);
         }
@@ -81,7 +104,7 @@ fn start_assertion(name: &str, format: Format, is_public: bool) {
     );
 }
 
-fn emit_key(prf_output: &[u8], format: Format, is_public: bool) {
+pub(crate) fn emit_key(prf_output: &[u8], format: Format, is_public: bool) {
     let raw_key = match tapkey_core::derive_raw_key(prf_output) {
         Ok(k) => k,
         Err(e) => die(&format!("key derivation failed: {e}")),
@@ -126,7 +149,7 @@ fn emit_key(prf_output: &[u8], format: Format, is_public: bool) {
     }
 }
 
-fn die(msg: &str) -> ! {
+pub(crate) fn die(msg: &str) -> ! {
     eprintln!("error: {msg}");
     std::process::exit(1);
 }

@@ -1,0 +1,35 @@
+name: Deploy Relay
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - relay/**
+      - .github/workflows/deploy-relay.yml
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - uses: cachix/install-nix-action@v31
+
+      - name: Decrypt Cloudflare API token
+        run: |
+          nix profile install nixpkgs#age
+          CLOUDFLARE_API_TOKEN=$(echo "$AGE_SECRET_KEY" | age -d -i - secrets/CLOUDFLARE_API_TOKEN.age)
+          echo "::add-mask::$CLOUDFLARE_API_TOKEN"
+          echo "CLOUDFLARE_API_TOKEN=$CLOUDFLARE_API_TOKEN" >> "$GITHUB_ENV"
+        env:
+          AGE_SECRET_KEY: ${{ secrets.AGE_SECRET_KEY }}
+
+      - name: Deploy relay worker
+        working-directory: relay
+        run: |
+          npm ci
+          npx wrangler deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ env.CLOUDFLARE_API_TOKEN }}
