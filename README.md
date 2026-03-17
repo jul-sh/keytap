@@ -6,9 +6,9 @@ tapkey is a tiny CLI that lets you recover the same SSH key, `age` identity, or 
 
 Passkey providers sync passkeys. They usually do not sync arbitrary private keys such as SSH keys. tapkey bridges that gap by deriving the key locally after passkey authentication, without manually copying private key files between machines.
 
-For example, iCloud Keychain syncs passkeys tied to your Apple account, but it will not sync an SSH private key. tapkey lets that synced passkey act as the root, so the SSH key can be re-derived locally on each of your Macs.
+For example, iCloud Keychain syncs passkeys tied to your Apple account, but it will not sync an SSH private key. tapkey lets that synced passkey act as the root, so the SSH key can be re-derived locally on each of your Macs. If the passkey is on your iPhone and not on the Mac in front of you, macOS will natively show a QR code for cross-device authentication.
 
-On non-macOS systems (or when the passkey lives only on your phone), use `--nearby`: tapkey displays a QR code, you scan it on your phone, approve the passkey, and the derived key material is relayed back over an end-to-end encrypted channel. The relay never sees plaintext key material.
+On systems without native passkey support (like Linux), tapkey shows a QR code you scan on your phone. The phone performs the passkey ceremony and relays the result back over an end-to-end encrypted channel (X25519 + AES-256-GCM). The relay never sees plaintext key material.
 
 ## Install
 
@@ -45,7 +45,7 @@ make install
 
 ## Usage
 
-Create the passkey once, only needed on the first machine:
+Create the passkey once, only needed on the first Mac:
 
 ```bash
 tapkey register
@@ -80,17 +80,15 @@ Get the public key for a derived key, e.g. a key named `smolSshKey`:
 tapkey public-key smolSshKey --format ssh
 ```
 
-### Nearby (QR code) mode
+### Linux / non-macOS
 
-On systems without native passkey support, or when the passkey is only on your phone, add `--nearby` to any command:
+On systems without native passkey support, `tapkey derive` and `tapkey public-key` automatically show a QR code. Scan it on your phone, approve the passkey, and the key is printed to stdout as usual.
 
 ```bash
-tapkey derive myKey --nearby
-tapkey public-key smolSshKey --format ssh --nearby
-tapkey register --nearby
+tapkey derive myKey
+tapkey public-key smolSshKey --format ssh
+tapkey register --nearby   # registration still requires --nearby
 ```
-
-Scan the QR code with your phone, approve the passkey, and the key is printed to stdout as usual.
 
 ### age
 
@@ -134,13 +132,13 @@ In other words: tapkey is not a vault. It is a deterministic derivation tool bui
 
 ## Requirements
 
-### Native mode (default)
+### macOS (native passkey)
 - macOS 15.0 or later
 - Apple Silicon (`arm64`)
 - A passkey provider with PRF support (like Apple's built-in Password Manager)
 
-### Nearby mode (`--nearby`)
-- Any platform with a Rust toolchain
+### Linux / other platforms (QR relay)
+- A Rust toolchain to build from source
 - A phone with a passkey provider that supports the PRF extension
 
 ## Development

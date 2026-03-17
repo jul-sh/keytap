@@ -73,7 +73,7 @@ fn main() {
             }));
         }
         Cmd::Derive { name, format, nearby } => {
-            if nearby {
+            if nearby || !cfg!(target_os = "macos") {
                 nearby::start_nearby_flow("assert", &name, format, false);
                 return;
             }
@@ -83,7 +83,7 @@ fn main() {
             if matches!(format, Format::Raw) {
                 die("--format raw is not supported for public-key");
             }
-            if nearby {
+            if nearby || !cfg!(target_os = "macos") {
                 nearby::start_nearby_flow("assert", &name, format, true);
                 return;
             }
