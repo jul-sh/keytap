@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'none'; connect-src https://tapkey-relay.julsh.workers.dev; form-action 'none'; frame-ancestors 'none'; base-uri 'none'; manifest-src 'none'">
-  <title>tapkey Nearby Passkey</title>
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src https://tapkey-relay.julsh.workers.dev; form-action 'none'; frame-ancestors 'none'; base-uri 'none'">
+  <title>tapkey</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Iosevka+Charon&family=Pixelify+Sans:wght@400..700&display=swap" rel="stylesheet">
@@ -14,34 +14,10 @@
 <body>
   <main class="shell">
     <p class="eyebrow">tapkey</p>
-    <h1 id="title">No session config.</h1>
-    <p class="summary" id="summary">This page runs the passkey ceremony for tapkey, but no session config was provided. If you expected authentication to happen, something went wrong.</p>
-    <p class="details" id="details"></p>
-
-    <section class="panel" aria-labelledby="steps-title">
-      <div class="panel-header">
-        <p class="panel-label" id="steps-title">What happens</p>
-        <p class="panel-note" id="panel-note"></p>
-      </div>
-      <ol class="steps" id="steps">
-        <li>Run <code>tapkey register</code> or <code>tapkey derive</code>.</li>
-        <li>The app opens this page with the right config.</li>
-      </ol>
-    </section>
-
-    <aside class="callout" id="callout" hidden></aside>
-
-    <button class="action" id="start" type="button" disabled>Waiting for tapkey</button>
-    <p class="status" id="status" aria-live="polite">No session config.</p>
-    <p class="hint" id="bridge-hint" hidden>Open this page from the tapkey app to hand the result back automatically.</p>
-
-    <section class="result" id="result" hidden>
-      <div class="panel-header">
-        <p class="panel-label">Result</p>
-        <button class="copy-btn" id="copy-btn" type="button">Copy</button>
-      </div>
-      <pre class="result-value" id="result-value"></pre>
-    </section>
+    <h1 id="title">Loading…</h1>
+    <p class="summary" id="summary"></p>
+    <button class="action" id="start" type="button" disabled>Loading…</button>
+    <p class="status" id="status" aria-live="polite"></p>
   </main>
 </body>
 </html>
