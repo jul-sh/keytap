@@ -43,7 +43,6 @@ func tapkeyRegister(context: UInt64, callback: Callback) {
 @_cdecl("tapkey_assert")
 func tapkeyAssert(
     saltPtr: UnsafePointer<UInt8>, saltLen: UInt,
-    credIdPtr: UnsafePointer<UInt8>?, credIdLen: UInt,
     context: UInt64, callback: Callback
 ) {
     let (app, window) = setupApp()
@@ -53,11 +52,6 @@ func tapkeyAssert(
     let provider = ASAuthorizationPlatformPublicKeyCredentialProvider(relyingPartyIdentifier: "tapkey.jul.sh")
     let request = provider.createCredentialAssertionRequest(challenge: randomChallenge())
 
-    if let credIdPtr, credIdLen > 0 {
-        let credId = Data(bytes: credIdPtr, count: Int(credIdLen))
-        request.allowedCredentials = [ASAuthorizationPlatformPublicKeyCredentialDescriptor(credentialID: credId)]
-    }
-
     let inputValues = ASAuthorizationPublicKeyCredentialPRFAssertionInput.InputValues.saltInput1(salt)
     request.prf = .inputValues(inputValues)
 
@@ -65,7 +59,12 @@ func tapkeyAssert(
     controller.delegate = delegate
     controller.presentationContextProvider = delegate
     delegate.retainController(controller)
-    controller.performRequests()
+
+    if #available(macOS 14.0, *) {
+        controller.performRequests(options: .preferImmediatelyAvailableCredentials)
+    } else {
+        controller.performRequests()
+    }
 
     app.run()
 }

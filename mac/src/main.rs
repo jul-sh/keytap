@@ -1,5 +1,4 @@
 mod auth;
-mod credential;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use std::io::Write;
@@ -15,11 +14,7 @@ struct Cli {
 #[derive(Subcommand)]
 enum Cmd {
     /// Create the passkey root
-    Register {
-        /// Replace the locally registered passkey root
-        #[arg(long)]
-        replace: bool,
-    },
+    Register,
     /// Derive key material from your passkey
     Derive {
         /// Key name for domain separation
@@ -53,24 +48,10 @@ fn main() {
     let cli = Cli::parse();
 
     match cli.command {
-        Cmd::Register { replace } => {
-            if !replace && credential::load().is_ok() {
-                die("a tapkey passkey is already registered on this Mac\n  \
-                     Run 'tapkey derive' to use it.\n  \
-                     Use 'tapkey register --replace' only if you intend to rotate every derived key.");
-            }
+        Cmd::Register => {
             auth::start_registration(Box::new(|outcome| match outcome {
-                auth::RegistrationOutcome::Success { credential_id } => {
-                    if let Err(e) =
-                        credential::save(&credential::StoredCredential::new(credential_id))
-                    {
-                        die(&format!("failed to save credential: {e}"));
-                    }
+                auth::RegistrationOutcome::Success { .. } => {
                     eprintln!("Passkey registered successfully.");
-                    eprintln!(
-                        "Credential saved to {}",
-                        credential::credential_path().display()
-                    );
                     std::process::exit(0);
                 }
                 auth::RegistrationOutcome::Error(msg) => die(&msg),
@@ -89,18 +70,10 @@ fn main() {
 }
 
 fn start_assertion(name: &str, format: Format, is_public: bool) {
-    let preferred_id = credential::load().ok().map(|c| c.credential_id);
     auth::start_assertion(
         name,
-        preferred_id.as_deref(),
         Box::new(move |outcome| match outcome {
-            auth::AssertionOutcome::Success {
-                credential_id,
-                prf_output,
-            } => {
-                if let Err(e) = credential::cache_if_needed(&credential_id) {
-                    die(&format!("failed to cache credential: {e}"));
-                }
+            auth::AssertionOutcome::Success { prf_output, .. } => {
                 emit_key(&prf_output, format, is_public);
             }
             auth::AssertionOutcome::Error(msg) => die(&msg),

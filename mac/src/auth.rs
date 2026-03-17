@@ -1,11 +1,10 @@
 pub enum RegistrationOutcome {
-    Success { credential_id: Vec<u8> },
+    Success,
     Error(String),
 }
 
 pub enum AssertionOutcome {
     Success {
-        credential_id: Vec<u8>,
         prf_output: Vec<u8>,
     },
     Error(String),
@@ -25,8 +24,6 @@ extern "C" {
     fn tapkey_assert(
         salt_ptr: *const u8,
         salt_len: usize,
-        cred_id_ptr: *const u8,
-        cred_id_len: usize,
         context: u64,
         callback: RawCallback,
     );
@@ -45,8 +42,7 @@ unsafe extern "C" fn on_registration(
         let msg = unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(data, data_len)) };
         cb(RegistrationOutcome::Error(msg.to_string()));
     } else {
-        let cred_id = unsafe { std::slice::from_raw_parts(data, data_len) }.to_vec();
-        cb(RegistrationOutcome::Success { credential_id: cred_id });
+        cb(RegistrationOutcome::Success);
     }
 }
 
@@ -63,10 +59,9 @@ unsafe extern "C" fn on_assertion(
         let msg = unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(data, data_len)) };
         cb(AssertionOutcome::Error(msg.to_string()));
     } else {
-        let cred_id = unsafe { std::slice::from_raw_parts(data, data_len) }.to_vec();
+        let _cred_id = unsafe { std::slice::from_raw_parts(data, data_len) };
         let prf = unsafe { std::slice::from_raw_parts(extra, extra_len) }.to_vec();
         cb(AssertionOutcome::Success {
-            credential_id: cred_id,
             prf_output: prf,
         });
     }
@@ -79,21 +74,14 @@ pub fn start_registration(callback: Box<dyn Fn(RegistrationOutcome)>) {
 
 pub fn start_assertion(
     key_name: &str,
-    preferred_credential_id: Option<&[u8]>,
     callback: Box<dyn Fn(AssertionOutcome)>,
 ) {
     let prf_salt = tapkey_core::prf_salt_for_name(key_name).expect("invalid key name");
-    let (cred_ptr, cred_len) = match preferred_credential_id {
-        Some(id) => (id.as_ptr(), id.len()),
-        None => (std::ptr::null(), 0),
-    };
     let ctx = Box::into_raw(Box::new(callback)) as u64;
     unsafe {
         tapkey_assert(
             prf_salt.as_ptr(),
             prf_salt.len(),
-            cred_ptr,
-            cred_len,
             ctx,
             on_assertion,
         );

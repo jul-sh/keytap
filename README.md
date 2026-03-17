@@ -106,20 +106,15 @@ security add-generic-password -s tapkey -a AGE_SECRET_KEY -w "$(tapkey derive my
 
 Same passkey, same name, same derived key. Different names derive different keys.
 
-If you ever intentionally want to replace the tapkey passkey root, use:
-
-```bash
-tapkey register --replace
-```
+If you ever intentionally want to replace the tapkey passkey root, just run `tapkey register` again.
 
 ## Security
 
 tapkey's security model is simple: the passkey is the root secret.
 
 - tapkey depends on your passkey provider, WebAuthn PRF, and local device authentication. It does not create a stronger trust boundary than the provider already gives you.
-- tapkey does not sync or cache derived keys itself. It derives on demand, writes to stdout, and exits.
+- tapkey does not sync or cache derived keys itself. It derives on demand, writes to stdout, and exits. There are no local config files or cached state.
 - If you save the output, pipe it into another tool, or import it into an agent, that destination now holds the key and must be trusted accordingly.
-- The local config file stores only the credential ID used to select the passkey. It is not secret key material.
 - The PRF inputs are public and derived from the key name. They provide stable derivation and domain separation, not secrecy.
 - Replacing the registered passkey changes every key derived from it. Treat the passkey as the root of your derived identities.
 
