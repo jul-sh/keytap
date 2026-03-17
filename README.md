@@ -1,6 +1,6 @@
 # tapkey
 
-<img src="tapkey.icon/Assets/ChatGPT Image Mar 15, 2026 at 10_01_47 PM-2.png" width="128" alt="tapkey icon" />
+<img src="tapkey.icon/Assets/icon.png" width="128" alt="tapkey icon" />
 
 tapkey is a tiny CLI that lets you recover the same SSH key, `age` identity, or app secret on any machine where you can unlock the same passkey.
 
@@ -121,6 +121,14 @@ tapkey's security model is simple: the passkey is the root secret.
 - If you save the output, pipe it into another tool, or import it into an agent, that destination now holds the key and must be trusted accordingly.
 - The PRF inputs are public and derived from the key name. They provide stable derivation and domain separation, not secrecy.
 - Replacing the registered passkey changes every key derived from it. Treat the passkey as the root of your derived identities.
+
+### QR relay mode (non-macOS)
+
+When tapkey uses the QR relay flow, additional trust considerations apply:
+
+- **You trust the web page served to your phone.** The website served by `tapkey.jul.sh` performs the WebAuthn ceremony, receives the PRF output, encrypts it, and posts back to the host, via the relay. You trust its functionality and integrity. The web page is served inspectable, but in practice you are unlikely to review it each time.
+- The Cloudflare relay (`tapkey-relay.julsh.workers.dev`) forwards opaque encrypted blobs. It never sees plaintext key material. The channel is end-to-end encrypted with X25519 ECDH + HKDF-SHA256 + AES-256-GCM. An attacker who controls the relay can deny service but cannot decrypt the payload.
+- On macOS hosts, none of this applies. The native passkey flow uses the hosts passkeys, or alternatively a native QR code with that opens a native direct device-to-device channel.
 
 In other words: tapkey is not a vault. It is a deterministic derivation tool built on top of passkey security.
 
