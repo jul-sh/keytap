@@ -8,6 +8,7 @@ on:
       - .github/workflows/pages.yml
       - CNAME
       - .well-known/**
+      - web/**
   workflow_dispatch:
 
 permissions:
@@ -33,6 +34,7 @@ jobs:
           mkdir -p _site/.well-known
           cp .well-known/apple-app-site-association _site/.well-known/
           cp CNAME _site/
+          cp -r web/* _site/
 
       - uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5.0.0
 

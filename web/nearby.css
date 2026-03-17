@@ -1,0 +1,279 @@
+/* ─── tapkey — BSOD brutalist ─── */
+
+:root {
+  color-scheme: dark;
+  --bg: hsl(240, 100%, 20%);
+  --fg: #fff;
+  --muted: hsl(240, 40%, 72%);
+  --panel-bg: hsla(240, 100%, 28%, 0.5);
+  --line: hsla(0, 0%, 100%, 0.15);
+  --accent: #00ff66;
+  --accent-fg: hsl(240, 100%, 14%);
+  --error: #ff4444;
+  --callout-bg: hsla(240, 100%, 32%, 0.4);
+  --display: "Pixelify Sans", monospace;
+  --body: "Iosevka Charon", "SF Mono", "Fira Code", "Courier New", monospace;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html, body {
+  min-height: 100%;
+}
+
+body {
+  font: 18px/1.65 var(--body);
+  color: var(--fg);
+  background: var(--bg);
+  display: grid;
+  place-items: center;
+  padding: 48px 24px;
+}
+
+/* ─── shell ─── */
+
+.shell {
+  width: min(100%, 680px);
+  padding: 0;
+  border: none;
+  background: none;
+}
+
+/* ─── eyebrow / label ─── */
+
+.eyebrow {
+  font-family: var(--display);
+  text-transform: uppercase;
+  letter-spacing: 0.25em;
+  font-size: 1rem;
+  font-weight: 700;
+  color: var(--accent);
+  margin-bottom: 8px;
+}
+
+.eyebrow::before {
+  content: "> ";
+}
+
+/* ─── headings ─── */
+
+h1 {
+  font: 700 clamp(2rem, 5vw, 3rem)/1.1 var(--display);
+  color: var(--fg);
+  margin: 8px 0 24px;
+}
+
+/* ─── text blocks ─── */
+
+.summary,
+.details,
+.status,
+.hint,
+.panel-note {
+  margin: 0;
+}
+
+.summary {
+  font-size: 1.1rem;
+  max-width: 38rem;
+  line-height: 1.7;
+}
+
+.details {
+  margin-top: 14px;
+  color: var(--muted);
+  font-size: 0.95rem;
+}
+
+/* ─── inline code ─── */
+
+code {
+  font: inherit;
+  color: var(--accent);
+  background: hsla(0, 0%, 100%, 0.06);
+  padding: 1px 6px;
+}
+
+/* ─── links ─── */
+
+a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+a:hover {
+  text-decoration: underline;
+}
+
+/* ─── panel ─── */
+
+.panel {
+  margin-top: 28px;
+  padding: 20px 22px;
+  border: 1px solid var(--line);
+  background: var(--panel-bg);
+}
+
+.panel-label {
+  font-family: var(--display);
+  text-transform: uppercase;
+  letter-spacing: 0.2em;
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: var(--accent);
+  margin: 0;
+}
+
+.panel-header {
+  display: flex;
+  gap: 16px;
+  justify-content: space-between;
+  align-items: baseline;
+  flex-wrap: wrap;
+}
+
+.panel-note {
+  color: var(--muted);
+  font-size: 0.95rem;
+}
+
+/* ─── steps ─── */
+
+.steps {
+  margin: 16px 0 0;
+  padding-left: 22px;
+  font-size: 1rem;
+}
+
+.steps li + li {
+  margin-top: 10px;
+}
+
+.steps li::marker {
+  color: var(--accent);
+  font-weight: 700;
+}
+
+/* ─── callout ─── */
+
+.callout {
+  margin-top: 20px;
+  padding: 16px 20px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--accent);
+  background: var(--callout-bg);
+  font-size: 0.95rem;
+  color: var(--muted);
+}
+
+/* ─── action button ─── */
+
+.action {
+  appearance: none;
+  display: inline-block;
+  margin-top: 28px;
+  border: 2px solid var(--accent);
+  padding: 14px 28px;
+  font-family: var(--display);
+  font-weight: 700;
+  font-size: 1.1rem;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  background: transparent;
+  color: var(--accent);
+  cursor: pointer;
+  min-width: 16rem;
+  transition: background 60ms, color 60ms;
+}
+
+.action:hover:enabled {
+  background: var(--accent);
+  color: var(--accent-fg);
+}
+
+.action:active:enabled {
+  background: #00cc52;
+  color: var(--accent-fg);
+}
+
+.action:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+  border-color: var(--muted);
+  color: var(--muted);
+}
+
+/* ─── status / hint ─── */
+
+.status {
+  margin-top: 20px;
+  min-height: 1.6em;
+  font-family: var(--display);
+  font-size: 1.2rem;
+  font-weight: 700;
+  color: var(--muted);
+  line-height: 1.4;
+}
+
+.hint {
+  margin-top: 12px;
+  color: var(--muted);
+  font-size: 0.95rem;
+}
+
+/* ─── result ─── */
+
+.result {
+  margin-top: 28px;
+  padding: 20px 22px;
+  border: 1px solid var(--accent);
+  background: var(--panel-bg);
+}
+
+.result-value {
+  margin: 14px 0 0;
+  font-family: var(--body);
+  font-size: 0.85rem;
+  line-height: 1.6;
+  color: var(--accent);
+  white-space: pre-wrap;
+  word-break: break-all;
+  user-select: all;
+}
+
+.copy-btn {
+  appearance: none;
+  border: 1px solid var(--accent);
+  padding: 4px 14px;
+  font-family: var(--display);
+  font-weight: 700;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  background: transparent;
+  color: var(--accent);
+  cursor: pointer;
+  transition: background 60ms, color 60ms;
+}
+
+.copy-btn:hover {
+  background: var(--accent);
+  color: var(--accent-fg);
+}
+
+/* ─── responsive ─── */
+
+@media (max-width: 640px) {
+  body {
+    padding: 32px 16px;
+  }
+
+  .action {
+    width: 100%;
+    min-width: 0;
+  }
+}
