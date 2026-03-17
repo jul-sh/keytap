@@ -20,6 +20,7 @@
             cargo
             rustfmt
             clippy
+            nodePackages.wrangler
           ];
 
           # Ensure system Swift (from Xcode) is available — nix Swift

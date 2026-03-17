@@ -28,8 +28,6 @@ jobs:
 
       - name: Deploy relay worker
         working-directory: relay
-        run: |
-          npm ci
-          npx wrangler deploy
+        run: nix run nixpkgs#nodePackages.wrangler -- deploy
         env:
           CLOUDFLARE_API_TOKEN: ${{ env.CLOUDFLARE_API_TOKEN }}

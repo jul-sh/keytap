@@ -1,12 +1,12 @@
-export interface Env {
-  RELAY_SESSION: DurableObjectNamespace;
-}
-
 const CORS_ORIGINS = new Set([
   "https://tapkey.jul.sh",
 ]);
 
-function corsHeaders(request: Request): HeadersInit {
+/**
+ * @param {Request} request
+ * @returns {HeadersInit}
+ */
+function corsHeaders(request) {
   const origin = request.headers.get("Origin") || "";
   const allowed = CORS_ORIGINS.has(origin) ? origin : "";
   return {
@@ -17,7 +17,12 @@ function corsHeaders(request: Request): HeadersInit {
 }
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  /**
+   * @param {Request} request
+   * @param {{ RELAY_SESSION: DurableObjectNamespace }} env
+   * @returns {Promise<Response>}
+   */
+  async fetch(request, env) {
     const url = new URL(request.url);
     const match = url.pathname.match(/^\/relay\/([a-zA-Z0-9_-]{22,44})$/);
     if (!match) {
@@ -35,10 +40,20 @@ export default {
   },
 };
 
-export class RelaySession implements DurableObject {
-  constructor(private state: DurableObjectState, _env: Env) {}
+export class RelaySession {
+  /**
+   * @param {DurableObjectState} state
+   * @param {unknown} _env
+   */
+  constructor(state, _env) {
+    this.state = state;
+  }
 
-  async fetch(request: Request): Promise<Response> {
+  /**
+   * @param {Request} request
+   * @returns {Promise<Response>}
+   */
+  async fetch(request) {
     // WebSocket upgrade (CLI connects here)
     if (request.headers.get("Upgrade") === "websocket") {
       const pair = new WebSocketPair();
@@ -94,13 +109,15 @@ export class RelaySession implements DurableObject {
     });
   }
 
-  async webSocketMessage(): Promise<void> {}
+  async webSocketMessage() {}
 
-  async webSocketClose(ws: WebSocket): Promise<void> {
+  /** @param {WebSocket} ws */
+  async webSocketClose(ws) {
     try { ws.close(); } catch {}
   }
 
-  async webSocketError(ws: WebSocket): Promise<void> {
+  /** @param {WebSocket} ws */
+  async webSocketError(ws) {
     try { ws.close(1011, "error"); } catch {}
   }
 }
