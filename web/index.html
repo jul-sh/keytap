@@ -3,113 +3,23 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'self' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'">
-  <title>tapkey — Passkeys that turn into real keys</title>
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'self' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; base-uri 'none'; form-action 'none'; frame-ancestors 'none'">
+  <title>tapkey</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Iosevka+Charon&family=Pixelify+Sans:wght@400..700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="./nearby.css">
-  <style>
-    h2 { font: 700 1.4rem/1.2 var(--display); color: var(--accent); margin: 40px 0 16px; text-transform: uppercase; letter-spacing: 0.1em; }
-    h3 { font: 700 1.1rem/1.3 var(--display); color: var(--fg); margin: 28px 0 12px; }
-    p, li { color: var(--muted); line-height: 1.7; margin: 8px 0; }
-    ul, ol { padding-left: 22px; }
-    li::marker { color: var(--accent); font-weight: 700; }
-    pre { margin: 12px 0; padding: 16px 20px; border: 1px solid var(--line); background: var(--panel-bg); overflow-x: auto; font-size: 0.85rem; line-height: 1.6; color: var(--accent); }
-    strong { color: var(--fg); }
-    hr { border: none; border-top: 1px solid var(--line); margin: 32px 0; }
-  </style>
 </head>
 <body>
   <main class="shell">
     <p class="eyebrow">tapkey</p>
     <h1>Passkeys that turn into real keys.</h1>
-    <p class="summary">tapkey is a smol CLI that lets you recover the same SSH key, <code>age</code> identity, or app secret on any machine where you can unlock the same passkey.</p>
-
-    <p>Passkey providers sync passkeys. They usually do not sync arbitrary private keys such as SSH keys. tapkey bridges that gap by deriving the key locally after passkey authentication, without manually copying private key files between machines.</p>
-
-    <p>For example, iCloud Keychain syncs passkeys tied to your Apple account, but it will not sync an SSH private key. tapkey lets that synced passkey act as the root, so the SSH key can be re-derived locally on each of your Macs. If the passkey is on your iPhone and not on the Mac in front of you, macOS will natively show a QR code for cross-device authentication.</p>
-
-    <p>On systems without native passkey support (like Linux), tapkey authenticates via your phone over an encrypted relay. It prints a QR code to stderr, you scan it on your phone, approve with your passkey, and the result is sent back over an end-to-end encrypted channel (X25519 + AES-256-GCM). The relay never sees plaintext key material.</p>
-
-    <hr>
-
-    <h2>Install</h2>
-<pre>URL=$(curl -fsSL https://api.github.com/repos/jul-sh/tapkey/releases/latest \
-  | grep -o '"browser_download_url": *"[^"]*"' | cut -d '"' -f 4 \
-  | grep "$([ "$(uname -s)" = Darwin ] && echo arm64 || echo linux)") \
-  && curl -fLO "$URL" && mkdir -p ~/.local/bin \
-  && if [ "$(uname -s)" = Darwin ]; then
-       mkdir -p ~/.local/share/tapkey && unzip -o tapkey-*-arm64.zip -d ~/.local/share/tapkey \
-       && ln -sf ~/.local/share/tapkey/Tapkey.app/Contents/MacOS/tapkey ~/.local/bin/tapkey
-     else
-       unzip -o tapkey-*-linux*.zip tapkey -d ~/.local/bin
-     fi</pre>
-
-    <p>Releases are built in CI with <a href="https://docs.github.com/en/actions/security-for-github-actions/using-artifact-attestations">build attestation</a>. To verify (requires <a href="https://cli.github.com/">GitHub CLI</a>):</p>
-<pre>gh attestation verify tapkey-*.zip -R jul-sh/tapkey</pre>
-
-    <hr>
-
-    <h2>Usage</h2>
-    <p>Create the passkey once:</p>
-<pre>tapkey register</pre>
-
-    <p>Then derive key material:</p>
-<pre>tapkey derive [name]</pre>
-
-    <p>Use a name to derive different keys from the same passkey:</p>
-<pre>tapkey derive backup
-tapkey derive deploy
-tapkey derive # The default name is `default`.</pre>
-
-    <p>Derive key material in different formats:</p>
-<pre>tapkey derive myBase64Key --format base64
-tapkey derive myRawKey --format raw
-tapkey derive smolSecrets --format age
-tapkey derive smolSshKey --format ssh</pre>
-
-    <p>Get the public key for a derived key:</p>
-<pre>tapkey public-key smolSshKey --format ssh</pre>
-
-    <hr>
-
-    <h2>How It Works</h2>
-    <ol>
-      <li><code>tapkey register</code> creates a passkey for the relying party <code>tapkey.jul.sh</code>. The passkey lives in your chosen passkey provider.</li>
-      <li><code>tapkey derive</code> performs a WebAuthn assertion using the PRF extension. The PRF input is <code>SHA256("tapkey:prf:&lt;name&gt;")</code>, so each name requests a different PRF output directly from the passkey.</li>
-      <li>The PRF output is expanded with HKDF-SHA256 using a fixed tapkey info string to produce 32 bytes of key material.</li>
-      <li>The result is formatted as raw bytes, hex, base64, an <code>age</code> secret key, or an OpenSSH Ed25519 key.</li>
-    </ol>
-    <p>Same passkey, same name, same derived key. Different names derive different keys.</p>
-
-    <hr>
-
-    <h2>Security</h2>
-    <p>tapkey's security model is simple: the passkey is the root secret.</p>
-    <ul>
-      <li>tapkey depends on your passkey provider, WebAuthn PRF, and local device authentication. It does not create a stronger trust boundary than the provider already gives you.</li>
-      <li>tapkey does not sync or cache derived keys itself. It derives on demand, writes to stdout, and exits. There are no local config files or cached state.</li>
-      <li>If you save the output, pipe it into another tool, or import it into an agent, that destination now holds the key and must be trusted accordingly.</li>
-      <li>The PRF inputs are public and derived from the key name. They provide stable derivation and domain separation, not secrecy.</li>
-      <li>Replacing the registered passkey changes every key derived from it. Treat the passkey as the root of your derived identities.</li>
-    </ul>
-
-    <h3>Auth via phone over relay (non-macOS)</h3>
-    <ul>
-      <li><strong>You trust the web page served to your phone.</strong> The website served by <code>tapkey.jul.sh</code> performs the WebAuthn ceremony, receives the PRF output, encrypts it, and posts back to the host, via the relay. You trust its functionality and integrity. The web page is inspectable, but in practice you are unlikely to review it each time.</li>
-      <li>The Cloudflare relay forwards opaque encrypted blobs. It never sees plaintext key material. The channel is end-to-end encrypted with X25519 ECDH + HKDF-SHA256 + AES-256-GCM. An attacker who controls the relay can deny service but cannot decrypt the payload.</li>
-      <li>On macOS hosts, none of this applies. The native passkey flow uses the host's passkeys, or alternatively a native QR code that opens a native direct device-to-device channel.</li>
-    </ul>
-    <p>In other words: tapkey is not a vault. It is a deterministic derivation tool built on top of passkey security.</p>
-
-    <hr>
-
-    <section class="panel">
+    <p class="summary">tapkey lets a passkey act as the root for a reproducible SSH key, <code>age</code> identity, or app secret on any Mac where you can approve that passkey.</p>
+    <section class="panel" aria-labelledby="source-title">
       <div class="panel-header">
-        <p class="panel-label">Source</p>
+        <p class="panel-label" id="source-title">Source</p>
       </div>
-      <p class="panel-note"><a href="https://github.com/jul-sh/tapkey">github.com/jul-sh/tapkey</a></p>
+      <p class="panel-note">Repository: <a href="https://github.com/jul-sh/tapkey">github.com/jul-sh/tapkey</a></p>
     </section>
   </main>
 </body>
