@@ -16,12 +16,12 @@
         # Updated automatically by the release workflow
         releases = {
           aarch64-darwin = {
-            url = "https://github.com/jul-sh/tapkey/releases/download/4949215/tapkey-4949215-arm64.zip";
-            hash = "sha256-p5DW9HPlUQDBWU51G6ZkYzMohV/EFCMVDAKDjyTQ980=";
+            url = "https://github.com/jul-sh/tapkey/releases/download/e409f3f/tapkey-e409f3f-arm64.zip";
+            hash = "sha256-oyOTqZrfqzE2iNzcSV023s46ujRz1Hx0FPjnnE4BOZs=";
           };
           x86_64-linux = {
-            url = "PLACEHOLDER";
-            hash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+            url = "https://github.com/jul-sh/tapkey/releases/download/e409f3f/tapkey-e409f3f-linux-x86_64.zip";
+            hash = "sha256-cn0GaDLceF6UMhiLlJVsKLiZtDDqpJefByhgaJbF9XM=";
           };
         };
       in
