@@ -73,14 +73,6 @@ echo "secret" | age -r "$(tapkey public-key smolSecrets)" > secret.age
 age -d -i <(tapkey derive smolSecrets --format age) secret.age
 ```
 
-### Storing a derived key in macOS Keychain
-
-If you want to avoid re-authenticating every time, you can store a derived key in the macOS Keychain:
-
-```bash
-security add-generic-password -s tapkey -a AGE_SECRET_KEY -w "$(tapkey derive myKey --format age)"
-```
-
 ## How It Works
 
 1. `tapkey register` creates a passkey for the relying party `tapkey.jul.sh`. The passkey lives in your chosen passkey provider.
@@ -120,8 +112,17 @@ In other words: tapkey is not a vault. It is a deterministic derivation tool bui
 - A passkey provider with PRF support (like Apple's built-in Password Manager)
 
 ### Linux / other platforms (QR relay)
-- A Rust toolchain, or Nix
 - A phone with a passkey provider that supports the PRF extension
+
+## Tips
+
+### Storing a derived key in macOS Keychain
+
+If you want to avoid re-authenticating every time, you can store a derived key in the macOS Keychain:
+
+```bash
+security add-generic-password -s tapkey -a AGE_SECRET_KEY -w "$(tapkey derive myKey --format age)"
+```
 
 ## Development
 
