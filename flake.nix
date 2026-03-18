@@ -11,8 +11,33 @@
       let
         pkgs = nixpkgs.legacyPackages.${system};
         isDarwin = pkgs.stdenv.isDarwin;
+
+        # Pre-built release binaries (built in CI with attestation)
+        releases = {
+          aarch64-darwin = {
+            url = "https://github.com/jul-sh/tapkey/releases/download/4949215/tapkey-4949215-arm64.zip";
+            hash = "sha256-p5DW9HPlUQDBWU51G6ZkYzMohV/EFCMVDAKDjyTQ980=";
+          };
+        };
       in
       {
+        packages = pkgs.lib.optionalAttrs (builtins.hasAttr system releases) {
+          default = pkgs.stdenv.mkDerivation {
+            pname = "tapkey";
+            version = "1.2.0";
+            src = pkgs.fetchurl {
+              inherit (releases.${system}) url hash;
+            };
+            sourceRoot = ".";
+            nativeBuildInputs = [ pkgs.unzip ];
+            unpackPhase = "unzip $src";
+            installPhase = ''
+              mkdir -p $out/bin
+              cp Tapkey.app/Contents/MacOS/tapkey $out/bin/tapkey
+            '';
+          };
+        };
+
         devShells.default = pkgs.mkShell {
           buildInputs = with pkgs; [
             age
