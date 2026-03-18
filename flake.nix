@@ -36,7 +36,10 @@
             sourceRoot = ".";
             nativeBuildInputs = [ pkgs.unzip ];
             unpackPhase = "unzip $src";
-            installPhase = ''
+            installPhase = if isDarwin then ''
+              mkdir -p $out/bin
+              cp Tapkey.app/Contents/MacOS/tapkey $out/bin/tapkey
+            '' else ''
               mkdir -p $out/bin
               cp tapkey $out/bin/tapkey
               chmod +x $out/bin/tapkey

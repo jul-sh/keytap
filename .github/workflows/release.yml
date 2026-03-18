@@ -23,37 +23,25 @@ jobs:
         run: |
           nix develop --command make package
           SHA="${GITHUB_SHA::7}"
-          # Standalone binary zip for easy install
-          zip "tapkey-${SHA}-darwin-arm64.zip" -j Tapkey.app/Contents/MacOS/tapkey
-          echo "app_zip=tapkey-${SHA}-arm64.zip" >> "$GITHUB_OUTPUT"
-          echo "bin_zip=tapkey-${SHA}-darwin-arm64.zip" >> "$GITHUB_OUTPUT"
+          echo "zip_name=tapkey-${SHA}-arm64.zip" >> "$GITHUB_OUTPUT"
           echo "sha=$SHA" >> "$GITHUB_OUTPUT"
         env:
           AGE_SECRET_KEY: ${{ secrets.AGE_SECRET_KEY }}
 
-      - name: Attest app bundle
+      - name: Attest
         if: ${{ !github.event.repository.private }}
         uses: actions/attest-build-provenance@c074443f1aee8d4aeeae555aebba3282517141b2 # v2.2.3
         with:
-          subject-path: ${{ steps.package.outputs.app_zip }}
-
-      - name: Attest binary
-        if: ${{ !github.event.repository.private }}
-        uses: actions/attest-build-provenance@c074443f1aee8d4aeeae555aebba3282517141b2 # v2.2.3
-        with:
-          subject-path: ${{ steps.package.outputs.bin_zip }}
+          subject-path: ${{ steps.package.outputs.zip_name }}
 
       - uses: actions/upload-artifact@v4
         with:
           name: macos-arm64
-          path: |
-            ${{ steps.package.outputs.app_zip }}
-            ${{ steps.package.outputs.bin_zip }}
+          path: ${{ steps.package.outputs.zip_name }}
 
     outputs:
       sha: ${{ steps.package.outputs.sha }}
-      app_zip: ${{ steps.package.outputs.app_zip }}
-      bin_zip: ${{ steps.package.outputs.bin_zip }}
+      zip_name: ${{ steps.package.outputs.zip_name }}
 
   build-linux:
     runs-on: ubuntu-latest
@@ -98,8 +86,7 @@ jobs:
       - name: Create release
         run: |
           gh release create "$SHA" \
-            "artifacts/macos-arm64/$APP_ZIP" \
-            "artifacts/macos-arm64/$BIN_ZIP" \
+            "artifacts/macos-arm64/$MACOS_ZIP" \
             "artifacts/linux-x86_64/$LINUX_ZIP" \
             --title "tapkey $SHA" \
             --target "$GITHUB_SHA" \
@@ -108,20 +95,19 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SHA: ${{ needs.build-macos.outputs.sha }}
-          APP_ZIP: ${{ needs.build-macos.outputs.app_zip }}
-          BIN_ZIP: ${{ needs.build-macos.outputs.bin_zip }}
+          MACOS_ZIP: ${{ needs.build-macos.outputs.zip_name }}
           LINUX_ZIP: ${{ needs.build-linux.outputs.zip_name }}
 
       - name: Update flake.nix with new release
         run: |
           SHA="${{ needs.build-macos.outputs.sha }}"
-          BIN_ZIP="${{ needs.build-macos.outputs.bin_zip }}"
+          MACOS_ZIP="${{ needs.build-macos.outputs.zip_name }}"
           LINUX_ZIP="${{ needs.build-linux.outputs.zip_name }}"
 
-          MACOS_HASH=$(nix hash file --sri "artifacts/macos-arm64/$BIN_ZIP")
+          MACOS_HASH=$(nix hash file --sri "artifacts/macos-arm64/$MACOS_ZIP")
           LINUX_HASH=$(nix hash file --sri "artifacts/linux-x86_64/$LINUX_ZIP")
 
-          MACOS_URL="https://github.com/jul-sh/tapkey/releases/download/${SHA}/${BIN_ZIP}"
+          MACOS_URL="https://github.com/jul-sh/tapkey/releases/download/${SHA}/${MACOS_ZIP}"
           LINUX_URL="https://github.com/jul-sh/tapkey/releases/download/${SHA}/${LINUX_ZIP}"
 
           VERSION=$(grep '^version' cli/Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')

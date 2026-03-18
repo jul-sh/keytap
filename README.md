@@ -13,11 +13,16 @@ On systems without native passkey support (like Linux), tapkey shows a QR code y
 ## Install
 
 ```bash
-curl -fsSL https://api.github.com/repos/jul-sh/tapkey/releases/latest \
+URL=$(curl -fsSL https://api.github.com/repos/jul-sh/tapkey/releases/latest \
   | grep -o '"browser_download_url": *"[^"]*"' | cut -d '"' -f 4 \
-  | grep "$(uname -s | tr A-Z a-z)-$(uname -m | sed 's/aarch64/arm64/')" \
-  | xargs curl -fLO \
-  && mkdir -p ~/.local/bin && unzip -o tapkey-*-"$(uname -s | tr A-Z a-z)"*.zip tapkey -d ~/.local/bin
+  | grep "$([ "$(uname -s)" = Darwin ] && echo arm64 || echo linux)") \
+  && curl -fLO "$URL" && mkdir -p ~/.local/bin \
+  && if [ "$(uname -s)" = Darwin ]; then
+       mkdir -p ~/.local/share/tapkey && unzip -o tapkey-*-arm64.zip -d ~/.local/share/tapkey \
+       && ln -sf ~/.local/share/tapkey/Tapkey.app/Contents/MacOS/tapkey ~/.local/bin/tapkey
+     else
+       unzip -o tapkey-*-linux*.zip tapkey -d ~/.local/bin
+     fi
 ```
 
 Releases are built in CI with [build attestation](https://docs.github.com/en/actions/security-for-github-actions/using-artifact-attestations). To verify the binary was built from this repo's source (requires [GitHub CLI](https://cli.github.com/)):
