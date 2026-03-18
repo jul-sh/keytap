@@ -27,7 +27,7 @@ decrypt_profile() {
     local age_key
     age_key=$("$SCRIPT_DIR/get-age-key.sh") || return 1
     printf '%s' "$age_key" > /tmp/_tk_age.txt
-    age -d -i /tmp/_tk_age.txt "$PROJECT_ROOT/secrets/PROVISION_PROFILE_BASE64.age" \
+    age -d -i /tmp/_tk_age.txt "$SCRIPT_DIR/secrets/PROVISION_PROFILE_BASE64.age" \
         | base64 --decode > "$PROJECT_ROOT/Tapkey.provisionprofile"
     rm -f /tmp/_tk_age.txt
     echo "Decrypted provisioning profile"
@@ -62,8 +62,8 @@ fi
 
 # Decrypt secrets
 printf '%s' "$AGE_SECRET_KEY" > /tmp/_tk_age.txt
-P12_PASS=$(age -d -i /tmp/_tk_age.txt "$PROJECT_ROOT/secrets/MACOS_P12_PASSWORD.age")
-age -d -i /tmp/_tk_age.txt "$PROJECT_ROOT/secrets/MACOS_P12_BASE64.age" \
+P12_PASS=$(age -d -i /tmp/_tk_age.txt "$SCRIPT_DIR/secrets/MACOS_P12_PASSWORD.age")
+age -d -i /tmp/_tk_age.txt "$SCRIPT_DIR/secrets/MACOS_P12_BASE64.age" \
     | base64 --decode > /tmp/_tk_dev.p12
 rm -f /tmp/_tk_age.txt
 

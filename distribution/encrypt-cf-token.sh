@@ -11,8 +11,8 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-RECIPIENTS="$PROJECT_ROOT/secrets/age-recipients.txt"
-OUTPUT="$PROJECT_ROOT/secrets/CLOUDFLARE_API_TOKEN.age"
+RECIPIENTS="$PROJECT_ROOT/distribution/secrets/age-recipients.txt"
+OUTPUT="$PROJECT_ROOT/distribution/secrets/CLOUDFLARE_API_TOKEN.age"
 
 if [ ! -f "$RECIPIENTS" ]; then
     echo "error: $RECIPIENTS not found" >&2

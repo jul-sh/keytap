@@ -2,8 +2,9 @@ Tapkey.app/
 Tapkey.provisionprofile
 target/
 .claude/
-mac/swift-lib/.build/
+macos/swift-lib/.build/
 .DS_Store
 *.zip
 .mcp.json
 .wrangler/
+result

@@ -1,4 +1,4 @@
-mod auth;
+#[cfg(not(feature = "native-macos"))]
 mod nearby;
 
 use clap::{Parser, Subcommand, ValueEnum};
@@ -49,49 +49,49 @@ fn main() {
     let cli = Cli::parse();
 
     match cli.command {
-        Cmd::Register => {
-            if cfg!(target_os = "macos") {
-                auth::start_registration(Box::new(|outcome| match outcome {
-                    auth::RegistrationOutcome::Success { .. } => {
-                        eprintln!("Passkey registered successfully.");
-                        std::process::exit(0);
-                    }
-                    auth::RegistrationOutcome::Error(msg) => die(&msg),
-                }));
-            } else {
-                nearby::start_nearby_flow("register", "default", Format::Hex, false);
-            }
-        }
-        Cmd::Derive { name, format } => {
-            if cfg!(target_os = "macos") {
-                start_assertion(&name, format, false);
-            } else {
-                nearby::start_nearby_flow("assert", &name, format, false);
-            }
-        }
+        Cmd::Register => register(),
+        Cmd::Derive { name, format } => derive(&name, format, false),
         Cmd::PublicKey { name, format } => {
             if matches!(format, Format::Raw) {
                 die("--format raw is not supported for public-key");
             }
-            if cfg!(target_os = "macos") {
-                start_assertion(&name, format, true);
-            } else {
-                nearby::start_nearby_flow("assert", &name, format, true);
-            }
+            derive(&name, format, true);
         }
     }
 }
 
-fn start_assertion(name: &str, format: Format, is_public: bool) {
-    auth::start_assertion(
+#[cfg(feature = "native-macos")]
+fn register() {
+    tapkey_macos::start_registration(Box::new(|outcome| match outcome {
+        tapkey_macos::RegistrationOutcome::Success => {
+            eprintln!("Passkey registered successfully.");
+            std::process::exit(0);
+        }
+        tapkey_macos::RegistrationOutcome::Error(msg) => die(&msg),
+    }));
+}
+
+#[cfg(not(feature = "native-macos"))]
+fn register() {
+    nearby::start_nearby_flow("register", "default", Format::Hex, false);
+}
+
+#[cfg(feature = "native-macos")]
+fn derive(name: &str, format: Format, is_public: bool) {
+    tapkey_macos::start_assertion(
         name,
         Box::new(move |outcome| match outcome {
-            auth::AssertionOutcome::Success { prf_output, .. } => {
+            tapkey_macos::AssertionOutcome::Success { prf_output, .. } => {
                 emit_key(&prf_output, format, is_public);
             }
-            auth::AssertionOutcome::Error(msg) => die(&msg),
+            tapkey_macos::AssertionOutcome::Error(msg) => die(&msg),
         }),
     );
+}
+
+#[cfg(not(feature = "native-macos"))]
+fn derive(name: &str, format: Format, is_public: bool) {
+    nearby::start_nearby_flow("assert", name, format, is_public);
 }
 
 pub(crate) fn emit_key(prf_output: &[u8], format: Format, is_public: bool) {

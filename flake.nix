@@ -1,5 +1,5 @@
 {
-  description = "tapkey - derive keys from iCloud Keychain passkeys via Touch ID";
+  description = "tapkey - derive keys from passkeys";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
@@ -7,11 +7,27 @@
   };
 
   outputs = { self, nixpkgs, flake-utils }:
-    flake-utils.lib.eachSystem [ "aarch64-darwin" "x86_64-darwin" ] (system:
+    flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = nixpkgs.legacyPackages.${system};
+        isDarwin = pkgs.stdenv.isDarwin;
       in
       {
+        packages.default = pkgs.rustPlatform.buildRustPackage {
+          pname = "tapkey";
+          version = "1.2.0";
+          src = ./.;
+          cargoLock.lockFile = ./Cargo.lock;
+          # Only build the CLI crate; macos/ requires Swift and Apple SDKs.
+          buildAndTestSubdir = "cli";
+          cargoBuildFlags = [ "-p" "tapkey" "--no-default-features" ];
+          doCheck = false;
+          # Exclude macos crate from workspace (its build.rs needs Swift/Xcode)
+          postPatch = ''
+            sed -i 's|members = \["core", "cli", "macos"\]|members = ["core", "cli"]|' Cargo.toml
+          '';
+        };
+
         devShells.default = pkgs.mkShell {
           buildInputs = with pkgs; [
             age
@@ -23,16 +39,10 @@
             nodePackages.wrangler
           ];
 
-          # Ensure system Swift (from Xcode) is available — nix Swift
-          # lacks the macOS 15 SDK needed for AuthenticationServices PRF.
-          shellHook = ''
+          shellHook = if isDarwin then ''
             export PATH="/usr/bin:$PATH"
             unset SDKROOT DEVELOPER_DIR
-            echo "tapkey dev shell"
-            echo "  make build   - build macOS app"
-            echo "  make test    - run tests"
-            echo "  make install - build, sign, and symlink to ~/.local/bin"
-          '';
+          '' else "";
         };
       });
 }

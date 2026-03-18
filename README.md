@@ -1,6 +1,6 @@
 # tapkey
 
-<img src="tapkey.icon/Assets/icon.png" width="128" alt="tapkey icon" />
+<img src="macos/tapkey.icon/Assets/icon.png" width="128" alt="tapkey icon" />
 
 tapkey is a smol CLI that lets you recover the same SSH key, `age` identity, or app secret on any machine where you can unlock the same passkey.
 
@@ -12,7 +12,21 @@ On systems without native passkey support (like Linux), tapkey shows a QR code y
 
 ## Install
 
-### From release
+### Nix
+
+```bash
+nix profile install github:jul-sh/tapkey
+```
+
+Or add to a flake:
+
+```nix
+{
+  inputs.tapkey.url = "github:jul-sh/tapkey";
+}
+```
+
+### macOS (from release)
 
 Download the latest release:
 
@@ -25,27 +39,25 @@ mv Tapkey.app ~/.local/share/tapkey/
 ln -sf ~/.local/share/tapkey/Tapkey.app/Contents/MacOS/tapkey ~/.local/bin/tapkey
 ```
 
-Release artifacts are signed, notarized, and can be verified against GitHub Actions build attestation, so you can check that the release binary was built securely from the public, auditable source code in this repository:
+Release artifacts are signed, notarized, and can be verified against GitHub Actions build attestation:
 
 ```bash
 gh attestation verify tapkey-*.zip -R jul-sh/tapkey
 ```
 
-The verification step requires the [GitHub CLI](https://cli.github.com/). It is optional but recommended.
-
 ### From source
-
-Requires macOS 15+, Xcode Command Line Tools, and a [paid Apple Developer Program membership](https://developer.apple.com/programs/) for the Associated Domains entitlement. If you do not have one, use the release build instead; releases are already signed and notarized with my Apple Developer account. A Nix flake is provided for the Rust toolchain; system Swift (from Xcode) is used for the macOS 15 SDK.
 
 ```bash
 git clone https://github.com/jul-sh/tapkey.git
 cd tapkey
-make install
+cargo install --path cli
 ```
+
+On macOS, `make install` builds with code signing and creates a notarized app bundle. This requires macOS 15+, Xcode Command Line Tools, and a [paid Apple Developer Program membership](https://developer.apple.com/programs/) for the Associated Domains entitlement.
 
 ## Usage
 
-Create the passkey once, only needed on the first Mac:
+Create the passkey once:
 
 ```bash
 tapkey register
@@ -140,7 +152,7 @@ In other words: tapkey is not a vault. It is a deterministic derivation tool bui
 - A passkey provider with PRF support (like Apple's built-in Password Manager)
 
 ### Linux / other platforms (QR relay)
-- A Rust toolchain to build from source
+- A Rust toolchain, or Nix
 - A phone with a passkey provider that supports the PRF extension
 
 ## Development
@@ -152,14 +164,11 @@ nix develop
 # Run tests
 make test
 
-# Build and sign
+# Build and sign (macOS)
 make
 
-# Build, sign, and install
+# Build, sign, and install (macOS)
 make install
-
-# Verify codesigning
-make verify
 
 # Clean
 make clean
@@ -168,10 +177,10 @@ make clean
 ### Encrypting Secrets For CI
 
 ```bash
-echo -n "secret-value" | age -R secrets/age-recipients.txt -o secrets/SECRET_NAME.age
+echo -n "secret-value" | age -R distribution/secrets/age-recipients.txt -o distribution/secrets/SECRET_NAME.age
 
 AGE_SECRET_KEY=$(./distribution/get-age-key.sh)
-echo "$AGE_SECRET_KEY" | age -d -i - secrets/SECRET_NAME.age
+echo "$AGE_SECRET_KEY" | age -d -i - distribution/secrets/SECRET_NAME.age
 ```
 
 ## License

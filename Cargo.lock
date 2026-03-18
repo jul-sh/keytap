@@ -1171,8 +1171,8 @@ dependencies = [
  "rustls",
  "serde_json",
  "sha2",
- "swift-rs",
  "tapkey-core",
+ "tapkey-macos",
  "tungstenite",
  "x25519-dalek",
 ]
@@ -1194,6 +1194,14 @@ dependencies = [
  "ssh-key",
  "thiserror 2.0.18",
  "x25519-dalek",
+]
+
+[[package]]
+name = "tapkey-macos"
+version = "0.1.0"
+dependencies = [
+ "swift-rs",
+ "tapkey-core",
 ]
 
 [[package]]

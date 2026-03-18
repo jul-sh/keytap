@@ -5,7 +5,7 @@ on:
     branches:
       - main
     paths:
-      - relay/**
+      - web/relay/**
       - .github/workflows/deploy-relay.yml
   workflow_dispatch:
 
@@ -20,14 +20,14 @@ jobs:
       - name: Decrypt Cloudflare API token
         run: |
           nix profile install nixpkgs#age
-          CLOUDFLARE_API_TOKEN=$(echo "$AGE_SECRET_KEY" | age -d -i - secrets/CLOUDFLARE_API_TOKEN.age)
+          CLOUDFLARE_API_TOKEN=$(echo "$AGE_SECRET_KEY" | age -d -i - distribution/secrets/CLOUDFLARE_API_TOKEN.age)
           echo "::add-mask::$CLOUDFLARE_API_TOKEN"
           echo "CLOUDFLARE_API_TOKEN=$CLOUDFLARE_API_TOKEN" >> "$GITHUB_ENV"
         env:
           AGE_SECRET_KEY: ${{ secrets.AGE_SECRET_KEY }}
 
       - name: Deploy relay worker
-        working-directory: relay
+        working-directory: web/relay
         run: nix run nixpkgs#nodePackages.wrangler -- deploy
         env:
           CLOUDFLARE_API_TOKEN: ${{ env.CLOUDFLARE_API_TOKEN }}
