@@ -13,21 +13,6 @@
         isDarwin = pkgs.stdenv.isDarwin;
       in
       {
-        packages.default = pkgs.rustPlatform.buildRustPackage {
-          pname = "tapkey";
-          version = "1.2.0";
-          src = ./.;
-          cargoLock.lockFile = ./Cargo.lock;
-          # Only build the CLI crate; macos/ requires Swift and Apple SDKs.
-          buildAndTestSubdir = "cli";
-          cargoBuildFlags = [ "--no-default-features" ];
-          doCheck = false;
-          # Exclude macos crate from workspace (its build.rs needs Swift/Xcode)
-          postPatch = ''
-            sed -i 's|members = \["cli", "macos"\]|members = ["cli"]|' Cargo.toml
-          '';
-        };
-
         devShells.default = pkgs.mkShell {
           buildInputs = with pkgs; [
             age

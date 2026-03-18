@@ -12,38 +12,11 @@ On systems without native passkey support (like Linux), tapkey shows a QR code y
 
 ## Install
 
-### Nix
-
 ```bash
-nix profile install github:jul-sh/tapkey
+curl -fsSL https://tapkey.jul.sh/install.sh | sh
 ```
 
-Or add to a flake:
-
-```nix
-{
-  inputs.tapkey.url = "github:jul-sh/tapkey";
-}
-```
-
-### macOS (from release)
-
-Download the latest release:
-
-```bash
-curl -fLO "$(curl -fsSL https://api.github.com/repos/jul-sh/tapkey/releases/latest | grep browser_download_url | cut -d '"' -f 4)"
-unzip tapkey-*.zip
-mkdir -p ~/.local/share/tapkey ~/.local/bin
-rm -rf ~/.local/share/tapkey/Tapkey.app
-mv Tapkey.app ~/.local/share/tapkey/
-ln -sf ~/.local/share/tapkey/Tapkey.app/Contents/MacOS/tapkey ~/.local/bin/tapkey
-```
-
-Release artifacts are signed, notarized, and can be verified against GitHub Actions build attestation:
-
-```bash
-gh attestation verify tapkey-*.zip -R jul-sh/tapkey
-```
+Installs to `~/.local/bin/tapkey` on all platforms. Release binaries are built in CI with [build attestation](https://docs.github.com/en/actions/security-for-github-actions/using-artifact-attestations).
 
 ### From source
 
