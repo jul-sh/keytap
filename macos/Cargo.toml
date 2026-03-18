@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-tapkey-core = { path = "../core" }
+sha2 = "0.10"
 
 [build-dependencies]
 swift-rs = { version = "1.0", features = ["build"] }

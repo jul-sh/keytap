@@ -24,7 +24,7 @@
           doCheck = false;
           # Exclude macos crate from workspace (its build.rs needs Swift/Xcode)
           postPatch = ''
-            sed -i 's|members = \["core", "cli", "macos"\]|members = ["core", "cli"]|' Cargo.toml
+            sed -i 's|members = \["cli", "macos"\]|members = ["cli"]|' Cargo.toml
           '';
         };
 

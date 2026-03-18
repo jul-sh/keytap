@@ -61,7 +61,7 @@ verify:
 	codesign -d --entitlements :- $(BUNDLE)
 
 test:
-	cargo test -p tapkey-core
+	cargo test --lib --test e2e_crypto
 	@echo "All tests passed."
 
 clean:

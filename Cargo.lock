@@ -1164,35 +1164,21 @@ version = "1.2.0"
 dependencies = [
  "aes-gcm",
  "base64 0.22.1",
- "clap",
- "getrandom",
- "hkdf",
- "qr2term",
- "rustls",
- "serde_json",
- "sha2",
- "tapkey-core",
- "tapkey-macos",
- "tungstenite",
- "x25519-dalek",
-]
-
-[[package]]
-name = "tapkey-core"
-version = "0.1.0"
-dependencies = [
- "aes-gcm",
- "base64 0.22.1",
  "bech32",
+ "clap",
  "ed25519-dalek",
  "getrandom",
  "hex",
  "hkdf",
+ "qr2term",
+ "rustls",
  "serde",
  "serde_json",
  "sha2",
  "ssh-key",
+ "tapkey-macos",
  "thiserror 2.0.18",
+ "tungstenite",
  "x25519-dalek",
 ]
 
@@ -1200,8 +1186,8 @@ dependencies = [
 name = "tapkey-macos"
 version = "0.1.0"
 dependencies = [
+ "sha2",
  "swift-rs",
- "tapkey-core",
 ]
 
 [[package]]
