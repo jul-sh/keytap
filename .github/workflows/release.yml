@@ -45,3 +45,24 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SHA: ${{ steps.package.outputs.sha }}
           ZIP_NAME: ${{ steps.package.outputs.zip_name }}
+
+      - name: Update flake.nix with new release
+        run: |
+          SHA="${{ steps.package.outputs.sha }}"
+          ZIP="${{ steps.package.outputs.zip_name }}"
+          URL="https://github.com/jul-sh/tapkey/releases/download/${SHA}/${ZIP}"
+          SRI_HASH=$(nix hash file --sri "$ZIP")
+
+          sed -i '' "s|url = \".*\";|url = \"${URL}\";|" flake.nix
+          sed -i '' "s|hash = \".*\";|hash = \"${SRI_HASH}\";|" flake.nix
+
+          VERSION=$(grep '^version' cli/Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+          sed -i '' "s|version = \".*\";|version = \"${VERSION}\";|" flake.nix
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add flake.nix
+          git commit -m "Update flake.nix with release ${SHA}" || true
+          git push
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
