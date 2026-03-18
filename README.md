@@ -17,7 +17,7 @@ curl -fLO "$(curl -fsSL https://api.github.com/repos/jul-sh/tapkey/releases/late
 mkdir -p ~/.local/bin && unzip -o tapkey-*.zip -d ~/.local/bin
 ```
 
-Releases are built in CI with [build attestation](https://docs.github.com/en/actions/security-for-github-actions/using-artifact-attestations). To verify the binary was built from this repo's source:
+Releases are built in CI with [build attestation](https://docs.github.com/en/actions/security-for-github-actions/using-artifact-attestations). To verify the binary was built from this repo's source (requires [GitHub CLI](https://cli.github.com/)):
 
 ```bash
 gh attestation verify tapkey-*.zip -R jul-sh/tapkey
