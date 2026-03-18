@@ -8,7 +8,7 @@ Passkey providers sync passkeys. They usually do not sync arbitrary private keys
 
 For example, iCloud Keychain syncs passkeys tied to your Apple account, but it will not sync an SSH private key. tapkey lets that synced passkey act as the root, so the SSH key can be re-derived locally on each of your Macs. If the passkey is on your iPhone and not on the Mac in front of you, macOS will natively show a QR code for cross-device authentication.
 
-On systems without native passkey support (like Linux), tapkey authenticates via your phone over an encrypted relay. It shows a QR code, you scan it on your phone, approve with your passkey, and the result is sent back over an end-to-end encrypted channel (X25519 + AES-256-GCM). The relay never sees plaintext key material.
+On systems without native passkey support (like Linux), tapkey authenticates via your phone over an encrypted relay. It prints a QR code to stderr, you scan it on your phone, approve with your passkey, and the result is sent back over an end-to-end encrypted channel (X25519 + AES-256-GCM). The relay never sees plaintext key material.
 
 ## Install
 
