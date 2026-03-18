@@ -27,16 +27,6 @@ Releases are built in CI with [build attestation](https://docs.github.com/en/act
 gh attestation verify tapkey-*.zip -R jul-sh/tapkey
 ```
 
-## Requirements
-
-### macOS (native passkey)
-- macOS 15.0 or later
-- Apple Silicon (`arm64`)
-- A passkey provider with PRF support (like Apple's built-in Password Manager)
-
-### Linux / other platforms (auth via phone)
-- A phone with a passkey provider that supports the PRF extension
-
 ## Usage
 
 Create the passkey once:
@@ -73,6 +63,16 @@ Get the public key for a derived key, e.g. a key named `smolSshKey`:
 ```bash
 tapkey public-key smolSshKey --format ssh
 ```
+
+## Requirements
+
+### macOS (native passkey)
+- macOS 15.0 or later
+- Apple Silicon (`arm64`)
+- A passkey provider with PRF support (like Apple's built-in Password Manager)
+
+### Linux / other platforms (auth via phone)
+- A phone with a passkey provider that supports the PRF extension
 
 ## How It Works
 
