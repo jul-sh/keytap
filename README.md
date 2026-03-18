@@ -8,7 +8,7 @@ Passkey providers sync passkeys. They usually do not sync arbitrary private keys
 
 For example, iCloud Keychain syncs passkeys tied to your Apple account, but it will not sync an SSH private key. tapkey lets that synced passkey act as the root, so the SSH key can be re-derived locally on each of your Macs. If the passkey is on your iPhone and not on the Mac in front of you, macOS will natively show a QR code for cross-device authentication.
 
-On systems without native passkey support (like Linux), tapkey shows a QR code you scan on your phone. The phone performs the passkey ceremony and relays the result back over an end-to-end encrypted channel (X25519 + AES-256-GCM). The relay never sees plaintext key material.
+On systems without native passkey support (like Linux), tapkey authenticates via your phone over an encrypted relay. It shows a QR code, you scan it on your phone, approve with your passkey, and the result is sent back over an end-to-end encrypted channel (X25519 + AES-256-GCM). The relay never sees plaintext key material.
 
 ## Install
 
@@ -38,7 +38,7 @@ gh attestation verify tapkey-*.zip -R jul-sh/tapkey
 - Apple Silicon (`arm64`)
 - A passkey provider with PRF support (like Apple's built-in Password Manager)
 
-### Linux / other platforms (QR relay)
+### Linux / other platforms (auth via phone)
 - A phone with a passkey provider that supports the PRF extension
 
 ## Usage
@@ -99,9 +99,9 @@ tapkey's security model is simple: the passkey is the root secret.
 - The PRF inputs are public and derived from the key name. They provide stable derivation and domain separation, not secrecy.
 - Replacing the registered passkey changes every key derived from it. Treat the passkey as the root of your derived identities.
 
-### QR relay mode (non-macOS)
+### Auth via phone over relay (non-macOS)
 
-When tapkey uses the QR relay flow, additional trust considerations apply:
+When tapkey authenticates via your phone, additional trust considerations apply:
 
 - **You trust the web page served to your phone.** The website served by `tapkey.jul.sh` performs the WebAuthn ceremony, receives the PRF output, encrypts it, and posts back to the host, via the relay. You trust its functionality and integrity. The web page is served inspectable, but in practice you are unlikely to review it each time.
 - The Cloudflare relay (`tapkey-relay.julsh.workers.dev`) forwards opaque encrypted blobs. It never sees plaintext key material. The channel is end-to-end encrypted with X25519 ECDH + HKDF-SHA256 + AES-256-GCM. An attacker who controls the relay can deny service but cannot decrypt the payload.
