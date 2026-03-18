@@ -6,10 +6,6 @@ tapkey is a smol CLI that lets you recover the same SSH key, `age` identity, or 
 
 Passkey providers sync passkeys. They usually do not sync arbitrary private keys such as SSH keys. tapkey bridges that gap by deriving the key locally after passkey authentication, without manually copying private key files between machines.
 
-For example, iCloud Keychain syncs passkeys tied to your Apple account, but it will not sync an SSH private key. tapkey lets that synced passkey act as the root, so the SSH key can be re-derived locally on each of your Macs. If the passkey is on your iPhone and not on the Mac in front of you, macOS will natively show a QR code for cross-device authentication.
-
-On systems without native passkey support (like Linux), tapkey authenticates via your phone over an encrypted relay. It prints a QR code to stderr, you scan it on your phone, approve with your passkey, and the result is sent back over an end-to-end encrypted channel (X25519 + AES-256-GCM). The relay never sees plaintext key material.
-
 ## Install
 
 ```bash
@@ -87,7 +83,11 @@ tapkey public-key smolSshKey --format ssh
 
 Same passkey, same name, same derived key. Different names derive different keys.
 
-If you ever intentionally want to replace the tapkey passkey root, just run `tapkey register` again.
+### Platforms
+
+On macOS passkey support is native, authentication is as simple as touching Touch ID. 
+
+On systems without native passkey support (like Linux), tapkey authenticates via your phone over an encrypted relay. It prints a QR code to stderr, you scan it on your phone, approve with your passkey, and the result is sent back over an end-to-end encrypted channel (X25519 + AES-256-GCM). The relay never sees plaintext key material.
 
 ## Security
 
@@ -106,8 +106,6 @@ When tapkey authenticates via your phone, additional trust considerations apply:
 - **You trust the web page served to your phone.** The website served by `tapkey.jul.sh` performs the WebAuthn ceremony, receives the PRF output, encrypts it, and posts back to the host, via the relay. You trust its functionality and integrity. The web page is served inspectable, but in practice you are unlikely to review it each time.
 - The Cloudflare relay (`tapkey-relay.julsh.workers.dev`) forwards opaque encrypted blobs. It never sees plaintext key material. The channel is end-to-end encrypted with X25519 ECDH + HKDF-SHA256 + AES-256-GCM. An attacker who controls the relay can deny service but cannot decrypt the payload.
 - On macOS hosts, none of this applies. The native passkey flow uses the hosts passkeys, or alternatively a native QR code with that opens a native direct device-to-device channel.
-
-In other words: tapkey is not a vault. It is a deterministic derivation tool built on top of passkey security.
 
 ## Tips
 
