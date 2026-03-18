@@ -21,8 +21,8 @@ setup-signing:
 build:
 	cargo build --release -p tapkey
 	@mkdir -p $(BUNDLE)/Contents/MacOS $(BUNDLE)/Contents/Resources
-	@cp mac/Info.plist $(BUNDLE)/Contents/Info.plist
-	@cp tapkey.icns $(BUNDLE)/Contents/Resources/tapkey.icns
+	@cp macos/Info.plist $(BUNDLE)/Contents/Info.plist
+	@cp macos/tapkey.icns $(BUNDLE)/Contents/Resources/tapkey.icns
 	@cp target/release/tapkey $(BIN)
 	@echo "Built $(BUNDLE)"
 
@@ -36,7 +36,7 @@ sign:
 	fi
 	codesign --force --options runtime --timestamp \
 		--sign "$(IDENTITY)" \
-		--entitlements mac/tapkey.entitlements $(BUNDLE)
+		--entitlements macos/tapkey.entitlements $(BUNDLE)
 	@echo "Signed $(BUNDLE)"
 
 notarize:
@@ -61,7 +61,7 @@ verify:
 	codesign -d --entitlements :- $(BUNDLE)
 
 test:
-	cargo test -p tapkey-core
+	cargo test --lib --test e2e_crypto
 	@echo "All tests passed."
 
 clean:

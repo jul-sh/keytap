@@ -12,10 +12,10 @@ TMPDIR_TK=$(mktemp -d)
 trap 'rm -rf "$TMPDIR_TK"' EXIT
 
 printf '%s' "$AGE_KEY" > "$TMPDIR_TK/age-key.txt"
-age -d -i "$TMPDIR_TK/age-key.txt" "$SCRIPT_DIR/../secrets/NOTARY_KEY_BASE64.age" \
+age -d -i "$TMPDIR_TK/age-key.txt" "$SCRIPT_DIR/secrets/NOTARY_KEY_BASE64.age" \
   | base64 --decode > "$TMPDIR_TK/auth_key.p8"
-NOTARY_KEY_ID=$(age -d -i "$TMPDIR_TK/age-key.txt" "$SCRIPT_DIR/../secrets/NOTARY_KEY_ID.age")
-NOTARY_ISSUER_ID=$(age -d -i "$TMPDIR_TK/age-key.txt" "$SCRIPT_DIR/../secrets/NOTARY_ISSUER_ID.age")
+NOTARY_KEY_ID=$(age -d -i "$TMPDIR_TK/age-key.txt" "$SCRIPT_DIR/secrets/NOTARY_KEY_ID.age")
+NOTARY_ISSUER_ID=$(age -d -i "$TMPDIR_TK/age-key.txt" "$SCRIPT_DIR/secrets/NOTARY_ISSUER_ID.age")
 rm -f "$TMPDIR_TK/age-key.txt"
 
 ditto -c -k --keepParent "$BUNDLE" "$TMPDIR_TK/notarize.zip"

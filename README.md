@@ -1,8 +1,8 @@
 # tapkey
 
-<img src="tapkey.icon/Assets/icon.png" width="128" alt="tapkey icon" />
+<img src="macos/tapkey.icon/Assets/icon.png" width="128" alt="tapkey icon" />
 
-tapkey is a tiny CLI that lets you recover the same SSH key, `age` identity, or app secret on any machine where you can unlock the same passkey.
+tapkey is a smol CLI that lets you recover the same SSH key, `age` identity, or app secret on any machine where you can unlock the same passkey.
 
 Passkey providers sync passkeys. They usually do not sync arbitrary private keys such as SSH keys. tapkey bridges that gap by deriving the key locally after passkey authentication, without manually copying private key files between machines.
 
@@ -12,40 +12,38 @@ On systems without native passkey support (like Linux), tapkey shows a QR code y
 
 ## Install
 
-### From release
-
-Download the latest release:
-
 ```bash
-curl -fLO "$(curl -fsSL https://api.github.com/repos/jul-sh/tapkey/releases/latest | grep browser_download_url | cut -d '"' -f 4)"
-unzip tapkey-*.zip
-mkdir -p ~/.local/share/tapkey ~/.local/bin
-rm -rf ~/.local/share/tapkey/Tapkey.app
-mv Tapkey.app ~/.local/share/tapkey/
-ln -sf ~/.local/share/tapkey/Tapkey.app/Contents/MacOS/tapkey ~/.local/bin/tapkey
+URL=$(curl -fsSL https://api.github.com/repos/jul-sh/tapkey/releases/latest \
+  | grep -o '"browser_download_url": *"[^"]*"' | cut -d '"' -f 4 \
+  | grep "$([ "$(uname -s)" = Darwin ] && echo arm64 || echo linux)") \
+  && curl -fLO "$URL" && mkdir -p ~/.local/bin \
+  && if [ "$(uname -s)" = Darwin ]; then
+       mkdir -p ~/.local/share/tapkey && unzip -o tapkey-*-arm64.zip -d ~/.local/share/tapkey \
+       && ln -sf ~/.local/share/tapkey/Tapkey.app/Contents/MacOS/tapkey ~/.local/bin/tapkey
+     else
+       unzip -o tapkey-*-linux*.zip tapkey -d ~/.local/bin
+     fi
 ```
 
-Release artifacts are signed, notarized, and can be verified against GitHub Actions build attestation, so you can check that the release binary was built securely from the public, auditable source code in this repository:
+Releases are built in CI with [build attestation](https://docs.github.com/en/actions/security-for-github-actions/using-artifact-attestations). To verify the binary was built from this repo's source (requires [GitHub CLI](https://cli.github.com/)):
 
 ```bash
 gh attestation verify tapkey-*.zip -R jul-sh/tapkey
 ```
 
-The verification step requires the [GitHub CLI](https://cli.github.com/). It is optional but recommended.
+## Requirements
 
-### From source
+### macOS (native passkey)
+- macOS 15.0 or later
+- Apple Silicon (`arm64`)
+- A passkey provider with PRF support (like Apple's built-in Password Manager)
 
-Requires macOS 15+, Xcode Command Line Tools, and a [paid Apple Developer Program membership](https://developer.apple.com/programs/) for the Associated Domains entitlement. If you do not have one, use the release build instead; releases are already signed and notarized with my Apple Developer account. A Nix flake is provided for the Rust toolchain; system Swift (from Xcode) is used for the macOS 15 SDK.
-
-```bash
-git clone https://github.com/jul-sh/tapkey.git
-cd tapkey
-make install
-```
+### Linux / other platforms (QR relay)
+- A phone with a passkey provider that supports the PRF extension
 
 ## Usage
 
-Create the passkey once, only needed on the first Mac:
+Create the passkey once:
 
 ```bash
 tapkey register
@@ -62,7 +60,7 @@ Use a name to derive different keys from the same passkey:
 ```bash
 tapkey derive backup
 tapkey derive deploy
-# The default name is `default`.
+tapkey derive # The default name is `default`.
 ```
 
 Derive key material in different formats:
@@ -78,27 +76,6 @@ Get the public key for a derived key, e.g. a key named `smolSshKey`:
 
 ```bash
 tapkey public-key smolSshKey --format ssh
-```
-
-### Linux / non-macOS
-
-On systems without native passkey support, all commands automatically show a QR code. Scan it on your phone, approve the passkey, and the output is printed to stdout as usual. The same commands work everywhere — no extra flags needed.
-
-### age
-
-E.g. using an age key called `smolSecrets`
-
-```bash
-echo "secret" | age -r "$(tapkey public-key smolSecrets)" > secret.age
-age -d -i <(tapkey derive smolSecrets --format age) secret.age
-```
-
-### Storing a derived key in macOS Keychain
-
-If you want to avoid re-authenticating every time, you can store a derived key in the macOS Keychain:
-
-```bash
-security add-generic-password -s tapkey -a AGE_SECRET_KEY -w "$(tapkey derive myKey --format age)"
 ```
 
 ## How It Works
@@ -132,46 +109,37 @@ When tapkey uses the QR relay flow, additional trust considerations apply:
 
 In other words: tapkey is not a vault. It is a deterministic derivation tool built on top of passkey security.
 
-## Requirements
+## Tips
 
-### macOS (native passkey)
-- macOS 15.0 or later
-- Apple Silicon (`arm64`)
-- A passkey provider with PRF support (like Apple's built-in Password Manager)
+### Nix flake
 
-### Linux / other platforms (QR relay)
-- A Rust toolchain to build from source
-- A phone with a passkey provider that supports the PRF extension
+Add tapkey to a Nix shell using the attested, signed release:
 
-## Development
+```nix
+{
+  inputs.tapkey.url = "github:jul-sh/tapkey";
 
-```bash
-# Enter dev shell
-nix develop
-
-# Run tests
-make test
-
-# Build and sign
-make
-
-# Build, sign, and install
-make install
-
-# Verify codesigning
-make verify
-
-# Clean
-make clean
+  outputs = { tapkey, ... }: {
+    # add tapkey.packages.${system}.default to your buildInputs
+  };
+}
 ```
 
-### Encrypting Secrets For CI
+### Storing a derived key in macOS Keychain
+
+If you want to avoid re-authenticating every time, you can store a derived key in the macOS Keychain:
 
 ```bash
-echo -n "secret-value" | age -R secrets/age-recipients.txt -o secrets/SECRET_NAME.age
+security add-generic-password -s tapkey -a AGE_SECRET_KEY -w "$(tapkey derive myKey --format age)"
+```
 
-AGE_SECRET_KEY=$(./distribution/get-age-key.sh)
-echo "$AGE_SECRET_KEY" | age -d -i - secrets/SECRET_NAME.age
+### Usage with age
+
+E.g. using an age key called `smolSecrets`
+
+```bash
+echo "secret" | age -r "$(tapkey public-key smolSecrets)" > secret.age
+age -d -i <(tapkey derive smolSecrets --format age) secret.age
 ```
 
 ## License

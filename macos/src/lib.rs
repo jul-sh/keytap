@@ -76,7 +76,8 @@ pub fn start_assertion(
     key_name: &str,
     callback: Box<dyn Fn(AssertionOutcome)>,
 ) {
-    let prf_salt = tapkey_core::prf_salt_for_name(key_name).expect("invalid key name");
+    use sha2::{Digest, Sha256};
+    let prf_salt = Sha256::digest(format!("tapkey:prf:{key_name}")).to_vec();
     let ctx = Box::into_raw(Box::new(callback)) as u64;
     unsafe {
         tapkey_assert(
