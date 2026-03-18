@@ -113,7 +113,7 @@ In other words: tapkey is not a vault. It is a deterministic derivation tool bui
 
 ### Nix flake
 
-Add tapkey to a Nix shell using the pre-built release binary:
+Add tapkey to a Nix shell using the attested, signed release:
 
 ```nix
 {
