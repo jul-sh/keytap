@@ -4,6 +4,8 @@ on:
   push:
     tags:
       - 'v*'
+  release:
+    types: [created]
 
 permissions:
   contents: write
@@ -12,6 +14,7 @@ permissions:
 
 jobs:
   build-macos:
+    if: github.event_name == 'push' || startsWith(github.event.release.tag_name, 'v')
     runs-on: macos-15
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -86,21 +89,21 @@ jobs:
         with:
           path: artifacts
 
-      - name: Create release
+      - name: Create or update release
         run: |
-          # Delete existing release if it has no assets (e.g. manually created)
           if gh release view "$TAG" &>/dev/null; then
-            ASSET_COUNT=$(gh release view "$TAG" --json assets --jq '.assets | length')
-            if [ "$ASSET_COUNT" = "0" ]; then
-              gh release delete "$TAG" --yes
-            fi
+            # Release exists (e.g. created via UI) — upload assets to it
+            gh release upload "$TAG" \
+              "artifacts/macos-arm64/$MACOS_ZIP" \
+              "artifacts/linux-x86_64/$LINUX_ZIP" \
+              --clobber
+          else
+            gh release create "$TAG" \
+              "artifacts/macos-arm64/$MACOS_ZIP" \
+              "artifacts/linux-x86_64/$LINUX_ZIP" \
+              --title "tapkey $TAG" \
+              --generate-notes
           fi
-
-          gh release create "$TAG" \
-            "artifacts/macos-arm64/$MACOS_ZIP" \
-            "artifacts/linux-x86_64/$LINUX_ZIP" \
-            --title "tapkey $TAG" \
-            --generate-notes
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ needs.build-macos.outputs.tag }}
