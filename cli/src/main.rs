@@ -7,23 +7,24 @@ use tapkey_core::{PrivateKeyFormat, PublicKeyFormat};
 #[derive(Parser)]
 #[command(name = "tapkey", version)]
 struct Cli {
+    /// Create the passkey (only needed once)
+    #[arg(long)]
+    init: bool,
+
     #[command(subcommand)]
-    command: Cmd,
+    command: Option<Cmd>,
+
+    /// Key name for domain separation
+    #[arg(default_value = "default", conflicts_with = "init")]
+    name: Option<String>,
+
+    /// Output format
+    #[arg(long, default_value = "hex", conflicts_with = "init")]
+    format: Format,
 }
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Create the passkey root
-    Register,
-    /// Derive key material from your passkey
-    Derive {
-        /// Key name for domain separation
-        #[arg(default_value = "default")]
-        name: String,
-        /// Output format
-        #[arg(long, default_value = "hex")]
-        format: Format,
-    },
     /// Show the public key for a derived key
     PublicKey {
         /// Key name for domain separation
@@ -47,15 +48,16 @@ pub(crate) enum Format {
 fn main() {
     let cli = Cli::parse();
 
-    match cli.command {
-        Cmd::Register => register(),
-        Cmd::Derive { name, format } => derive(&name, format, false),
-        Cmd::PublicKey { name, format } => {
-            if matches!(format, Format::Raw) {
-                die("--format raw is not supported for public-key");
-            }
-            derive(&name, format, true);
+    if cli.init {
+        register();
+    } else if let Some(Cmd::PublicKey { name, format }) = cli.command {
+        if matches!(format, Format::Raw) {
+            die("--format raw is not supported for public-key");
         }
+        derive(&name, format, true);
+    } else {
+        let name = cli.name.as_deref().unwrap_or("default");
+        derive(name, cli.format, false);
     }
 }
 

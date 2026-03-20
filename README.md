@@ -32,30 +32,30 @@ gh attestation verify tapkey-*.zip -R jul-sh/tapkey
 Create the passkey once:
 
 ```bash
-tapkey register
+tapkey --init
 ```
 
 Then derive key material:
 
 ```bash
-tapkey derive [name]
+tapkey [name]
 ```
 
 Use a name to derive different keys from the same passkey:
 
 ```bash
-tapkey derive backup
-tapkey derive deploy
-tapkey derive # The default name is `default`.
+tapkey backup
+tapkey deploy
+tapkey # The default name is `default`.
 ```
 
 Derive key material in different formats:
 
 ```bash
-tapkey derive myBase64Key --format base64
-tapkey derive myRawKey --format raw
-tapkey derive smolSecrets --format age
-tapkey derive smolSshKey --format ssh
+tapkey myBase64Key --format base64
+tapkey myRawKey --format raw
+tapkey smolSecrets --format age
+tapkey smolSshKey --format ssh
 ```
 
 Get the public key for a derived key, e.g. a key named `smolSshKey`:
@@ -76,8 +76,8 @@ tapkey public-key smolSshKey --format ssh
 
 ## How It Works
 
-1. `tapkey register` creates a passkey for the relying party `tapkey.jul.sh`. The passkey lives in your chosen passkey provider.
-2. `tapkey derive` performs a WebAuthn assertion using the PRF extension. The PRF input is `SHA256("tapkey:prf:<name>")`, so each name requests a different PRF output directly from the passkey.
+1. `tapkey --init` creates a passkey for the relying party `tapkey.jul.sh`. The passkey lives in your chosen passkey provider.
+2. `tapkey [name]` performs a WebAuthn assertion using the PRF extension. The PRF input is `SHA256("tapkey:prf:<name>")`, so each name requests a different PRF output directly from the passkey.
 3. The PRF output is expanded with HKDF-SHA256 using a fixed tapkey info string to produce 32 bytes of key material.
 4. The result is formatted as raw bytes, hex, base64, an `age` secret key, or an OpenSSH Ed25519 key.
 
@@ -128,7 +128,7 @@ Add tapkey to a Nix shell using the attested, signed release:
 If you want to avoid re-authenticating every time, you can store a derived key in the macOS Keychain:
 
 ```bash
-security add-generic-password -s tapkey -a AGE_SECRET_KEY -w "$(tapkey derive myKey --format age)"
+security add-generic-password -s tapkey -a AGE_SECRET_KEY -w "$(tapkey myKey --format age)"
 ```
 
 ### Usage with age
@@ -137,7 +137,7 @@ E.g. using an age key called `smolSecrets`
 
 ```bash
 echo "secret" | age -r "$(tapkey public-key smolSecrets)" > secret.age
-age -d -i <(tapkey derive smolSecrets --format age) secret.age
+age -d -i <(tapkey smolSecrets --format age) secret.age
 ```
 
 ## License
