@@ -16,6 +16,8 @@
     <p class="eyebrow">tapkey</p>
     <h1 id="title">Loading…</h1>
     <p class="summary" id="summary"></p>
+    <p class="summary" id="explainer">Authenticate with your passkey on this device to send the derived key material back to your CLI.</p>
+    <p class="details" id="details">Your CLI uploaded a one-time X25519 public key to the relay along with the session config. This page fetched it, so both sides can compute a shared secret. When you approve below, the derived key material is encrypted with AES-256-GCM using that shared secret and posted back through a Cloudflare Worker relay. The relay only ever sees ciphertext.</p>
     <button class="action" id="start" type="button" disabled>Loading…</button>
     <p class="status" id="status" aria-live="polite"></p>
   </main>

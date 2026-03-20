@@ -17,12 +17,28 @@ function encodeBase64URL(buf) {
   return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
 }
 
-function parseConfig() {
+async function fetchConfig() {
   const hash = location.hash.startsWith('#') ? location.hash.slice(1) : '';
-  const token = new URLSearchParams(hash).get('cfg');
-  if (!token) throw new Error('No config in URL fragment.');
+  const params = new URLSearchParams(hash);
 
-  const raw = JSON.parse(new TextDecoder().decode(decodeBase64URL(token)));
+  // Legacy: inline config
+  const token = params.get('cfg');
+  if (token) {
+    const raw = JSON.parse(new TextDecoder().decode(decodeBase64URL(token)));
+    return parseRawConfig(raw);
+  }
+
+  // New: fetch config from relay by session ID
+  const sessionId = params.get('s');
+  if (!sessionId) throw new Error('No session in URL.');
+
+  const resp = await fetch(`${RELAY_URL}/relay/${sessionId}`);
+  if (!resp.ok) throw new Error(`Failed to fetch config: ${resp.status}`);
+  const raw = await resp.json();
+  return parseRawConfig(raw);
+}
+
+function parseRawConfig(raw) {
   return {
     operation: raw.o === 'r' ? 'register' : 'assert',
     sessionId: raw.s,
@@ -118,7 +134,7 @@ async function main() {
 
   let config;
   try {
-    config = parseConfig();
+    config = await fetchConfig();
   } catch (e) {
     status.textContent = e.message;
     return;

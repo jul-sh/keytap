@@ -11,7 +11,7 @@ function corsHeaders(request) {
   const allowed = CORS_ORIGINS.has(origin) ? origin : "";
   return {
     "Access-Control-Allow-Origin": allowed,
-    "Access-Control-Allow-Methods": "POST, OPTIONS",
+    "Access-Control-Allow-Methods": "GET, PUT, POST, OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type",
   };
 }
@@ -60,6 +60,36 @@ export class RelaySession {
       const [client, server] = Object.values(pair);
       this.state.acceptWebSocket(server);
       return new Response(null, { status: 101, webSocket: client });
+    }
+
+    // PUT config from CLI
+    if (request.method === "PUT") {
+      const cors = corsHeaders(request);
+      const body = await request.text();
+
+      try {
+        JSON.parse(body);
+      } catch {
+        return new Response("Invalid JSON", { status: 400, headers: cors });
+      }
+
+      this.config = body;
+      return new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { ...cors, "Content-Type": "application/json" },
+      });
+    }
+
+    // GET config (phone fetches it)
+    if (request.method === "GET") {
+      const cors = corsHeaders(request);
+      if (!this.config) {
+        return new Response("No config", { status: 404, headers: cors });
+      }
+      return new Response(this.config, {
+        status: 200,
+        headers: { ...cors, "Content-Type": "application/json" },
+      });
     }
 
     // POST from phone with encrypted blob

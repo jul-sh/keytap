@@ -1,4 +1,3 @@
-#[cfg(not(feature = "native-passkey"))]
 mod nearby;
 
 use clap::{Parser, Subcommand, ValueEnum};
@@ -62,13 +61,19 @@ fn main() {
 
 #[cfg(feature = "native-passkey")]
 fn register() {
-    tapkey_macos::start_registration(Box::new(|outcome| match outcome {
+    match tapkey_macos::register() {
         tapkey_macos::RegistrationOutcome::Success => {
             eprintln!("Passkey registered successfully.");
-            std::process::exit(0);
         }
-        tapkey_macos::RegistrationOutcome::Error(msg) => die(&msg),
-    }));
+        tapkey_macos::RegistrationOutcome::Error(msg) if msg == "cancelled" => {
+            die(&msg);
+        }
+        tapkey_macos::RegistrationOutcome::Error(msg) => {
+            eprintln!("Native passkey failed: {msg}");
+            eprintln!("Falling back to QR code flow…");
+            nearby::start_nearby_flow("register", "default", Format::Hex, false);
+        }
+    }
 }
 
 #[cfg(not(feature = "native-passkey"))]
@@ -78,15 +83,19 @@ fn register() {
 
 #[cfg(feature = "native-passkey")]
 fn derive(name: &str, format: Format, is_public: bool) {
-    tapkey_macos::start_assertion(
-        name,
-        Box::new(move |outcome| match outcome {
-            tapkey_macos::AssertionOutcome::Success { prf_output, .. } => {
-                emit_key(&prf_output, format, is_public);
-            }
-            tapkey_macos::AssertionOutcome::Error(msg) => die(&msg),
-        }),
-    );
+    match tapkey_macos::assert(name) {
+        tapkey_macos::AssertionOutcome::Success { prf_output, .. } => {
+            emit_key(&prf_output, format, is_public);
+        }
+        tapkey_macos::AssertionOutcome::Error(msg) if msg == "cancelled" => {
+            die(&msg);
+        }
+        tapkey_macos::AssertionOutcome::Error(msg) => {
+            eprintln!("Native passkey failed: {msg}");
+            eprintln!("Falling back to QR code flow…");
+            nearby::start_nearby_flow("assert", name, format, is_public);
+        }
+    }
 }
 
 #[cfg(not(feature = "native-passkey"))]
@@ -111,7 +120,6 @@ pub(crate) fn emit_key(prf_output: &[u8], format: Format, is_public: bool) {
         match tapkey_core::format_public_key(&raw_key, pub_format) {
             Ok(s) => {
                 println!("{s}");
-                std::process::exit(0);
             }
             Err(e) => die(&format!("format error: {e}")),
         }
@@ -132,7 +140,6 @@ pub(crate) fn emit_key(prf_output: &[u8], format: Format, is_public: bool) {
                 } else {
                     println!("{}", String::from_utf8(bytes).unwrap());
                 }
-                std::process::exit(0);
             }
             Err(e) => die(&format!("format error: {e}")),
         }

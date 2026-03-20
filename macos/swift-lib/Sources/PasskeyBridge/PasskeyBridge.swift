@@ -133,6 +133,7 @@ private class PasskeyDelegate: NSObject, ASAuthorizationControllerDelegate,
                    nil, 0)
             }
         }
+        stopRunLoop()
     }
 
     private func fail(_ message: String) {
@@ -140,6 +141,26 @@ private class PasskeyDelegate: NSObject, ASAuthorizationControllerDelegate,
         bytes.withUnsafeBufferPointer { buf in
             cb(context, 1, buf.baseAddress, UInt(buf.count), nil, 0)
         }
+        stopRunLoop()
+    }
+
+    private func stopRunLoop() {
+        let app = NSApplication.shared
+        app.stop(nil)
+        // NSApplication.stop(_:) sets a flag but doesn't unblock the run loop
+        // immediately. Post a dummy event so the loop wakes up and exits.
+        let event = NSEvent.otherEvent(
+            with: .applicationDefined,
+            location: .zero,
+            modifierFlags: [],
+            timestamp: 0,
+            windowNumber: 0,
+            context: nil,
+            subtype: 0,
+            data1: 0,
+            data2: 0
+        )
+        if let event { app.postEvent(event, atStart: true) }
     }
 }
 

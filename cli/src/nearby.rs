@@ -50,8 +50,23 @@ pub fn start_nearby_flow(operation: &str, name: &str, format: Format, is_public:
         &challenge_bytes,
     );
 
-    let cfg_b64 = URL_SAFE_NO_PAD.encode(config.as_bytes());
-    let url = format!("{PAGE_URL}#cfg={cfg_b64}");
+    // Upload config to relay
+    let config_url = format!(
+        "{}/relay/{}",
+        relay_url.replace("wss://", "https://").replace("ws://", "http://"),
+        session_id
+    );
+    let resp = ureq::put(&config_url)
+        .content_type("application/json")
+        .send(config.as_bytes())
+        .unwrap_or_else(|e| {
+            crate::die(&format!("failed to upload config to relay: {e}"));
+        });
+    if resp.status() != 200 {
+        crate::die(&format!("relay rejected config: {}", resp.status()));
+    }
+
+    let url = format!("{PAGE_URL}#s={session_id}");
 
     // Connect WebSocket to relay
     let ws_url = format!("{relay_url}/relay/{session_id}");

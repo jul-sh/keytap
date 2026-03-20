@@ -37,12 +37,12 @@ unsafe extern "C" fn on_registration(
     _extra: *const u8,
     _extra_len: usize,
 ) {
-    let cb = unsafe { Box::from_raw(context as *mut Box<dyn Fn(RegistrationOutcome)>) };
+    let slot = unsafe { &mut *(context as *mut Option<RegistrationOutcome>) };
     if status != 0 {
         let msg = unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(data, data_len)) };
-        cb(RegistrationOutcome::Error(msg.to_string()));
+        *slot = Some(RegistrationOutcome::Error(msg.to_string()));
     } else {
-        cb(RegistrationOutcome::Success);
+        *slot = Some(RegistrationOutcome::Success);
     }
 }
 
@@ -54,31 +54,35 @@ unsafe extern "C" fn on_assertion(
     extra: *const u8,
     extra_len: usize,
 ) {
-    let cb = unsafe { Box::from_raw(context as *mut Box<dyn Fn(AssertionOutcome)>) };
+    let slot = unsafe { &mut *(context as *mut Option<AssertionOutcome>) };
     if status != 0 {
         let msg = unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(data, data_len)) };
-        cb(AssertionOutcome::Error(msg.to_string()));
+        *slot = Some(AssertionOutcome::Error(msg.to_string()));
     } else {
         let _cred_id = unsafe { std::slice::from_raw_parts(data, data_len) };
         let prf = unsafe { std::slice::from_raw_parts(extra, extra_len) }.to_vec();
-        cb(AssertionOutcome::Success {
+        *slot = Some(AssertionOutcome::Success {
             prf_output: prf,
         });
     }
 }
 
-pub fn start_registration(callback: Box<dyn Fn(RegistrationOutcome)>) {
-    let ctx = Box::into_raw(Box::new(callback)) as u64;
+/// Runs the native macOS passkey registration ceremony.
+/// Blocks until the user completes or cancels, then returns the outcome.
+pub fn register() -> RegistrationOutcome {
+    let mut outcome: Option<RegistrationOutcome> = None;
+    let ctx = &mut outcome as *mut Option<RegistrationOutcome> as u64;
     unsafe { tapkey_register(ctx, on_registration) };
+    outcome.expect("passkey callback was not invoked")
 }
 
-pub fn start_assertion(
-    key_name: &str,
-    callback: Box<dyn Fn(AssertionOutcome)>,
-) {
+/// Runs the native macOS passkey assertion ceremony.
+/// Blocks until the user completes or cancels, then returns the outcome.
+pub fn assert(key_name: &str) -> AssertionOutcome {
     use sha2::{Digest, Sha256};
     let prf_salt = Sha256::digest(format!("tapkey:prf:{key_name}")).to_vec();
-    let ctx = Box::into_raw(Box::new(callback)) as u64;
+    let mut outcome: Option<AssertionOutcome> = None;
+    let ctx = &mut outcome as *mut Option<AssertionOutcome> as u64;
     unsafe {
         tapkey_assert(
             prf_salt.as_ptr(),
@@ -87,4 +91,5 @@ pub fn start_assertion(
             on_assertion,
         );
     }
+    outcome.expect("passkey callback was not invoked")
 }
