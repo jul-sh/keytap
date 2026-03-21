@@ -98,7 +98,7 @@ fn test_base64url_roundtrip() {
 #[test]
 fn test_qr_config_compact_format() {
     // Verify the compact QR config format is valid JSON with expected fields
-    let session_id = URL_SAFE_NO_PAD.encode([0u8; 16]);
+    let session_id = URL_SAFE_NO_PAD.encode([0u8; 6]);
     let cli_public_b64 = URL_SAFE_NO_PAD.encode([0u8; 32]);
     let prf_salt_b64 = URL_SAFE_NO_PAD.encode([0u8; 32]);
     let challenge_b64 = URL_SAFE_NO_PAD.encode([0u8; 32]);
@@ -114,7 +114,7 @@ fn test_qr_config_compact_format() {
 
     let config_str = config.to_string();
     let config_b64 = URL_SAFE_NO_PAD.encode(config_str.as_bytes());
-    let url = format!("https://tapkey.jul.sh/nearby#cfg={}", config_b64);
+    let url = format!("https://tapkey.jul.sh/n/{}#cfg={}", session_id, config_b64);
 
     // Verify URL is reasonably short for QR
     assert!(

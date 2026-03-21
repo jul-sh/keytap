@@ -10,7 +10,7 @@ use tungstenite::{connect, Message, WebSocket};
 use x25519_dalek::{EphemeralSecret, PublicKey};
 
 const DEFAULT_RELAY_URL: &str = "wss://tapkey-relay.julsh.workers.dev";
-const PAGE_URL: &str = "https://tapkey.jul.sh/nearby";
+const PAGE_URL: &str = "https://tapkey.jul.sh/n";
 const WS_TIMEOUT_SECS: u64 = 300; // 5 minutes
 
 /// Authenticate via nearby device and return the PRF output.
@@ -38,8 +38,8 @@ fn run_nearby_flow(operation: &str, name: &str) -> (Vec<u8>, Vec<u8>) {
     let cli_secret = EphemeralSecret::random_from_rng(OsRng);
     let cli_public = PublicKey::from(&cli_secret);
 
-    // Generate random session ID (22 base64url chars = 16 bytes)
-    let mut session_bytes = [0u8; 16];
+    // Generate random session ID (8 base64url chars = 6 bytes)
+    let mut session_bytes = [0u8; 6];
     getrandom::getrandom(&mut session_bytes).expect("failed to generate random session ID");
     let session_id = URL_SAFE_NO_PAD.encode(session_bytes);
 
@@ -76,7 +76,8 @@ fn run_nearby_flow(operation: &str, name: &str) -> (Vec<u8>, Vec<u8>) {
         crate::die(&format!("relay rejected config: {}", resp.status()));
     }
 
-    let url = format!("{PAGE_URL}#s={session_id}");
+    let url = format!("{PAGE_URL}/{session_id}");
+    // GitHub Pages 404.html redirects /n/{id} → /nearby#s={id}
 
     // Connect WebSocket to relay
     let ws_url = format!("{relay_url}/relay/{session_id}");

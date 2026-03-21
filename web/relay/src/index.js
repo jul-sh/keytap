@@ -24,7 +24,7 @@ export default {
    */
   async fetch(request, env) {
     const url = new URL(request.url);
-    const match = url.pathname.match(/^\/relay\/([a-zA-Z0-9_-]{22,44})$/);
+    const match = url.pathname.match(/^\/relay\/([a-zA-Z0-9_-]{8,44})$/);
     if (!match) {
       return new Response("Not found", { status: 404 });
     }
