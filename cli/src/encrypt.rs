@@ -4,7 +4,7 @@ use std::io::{Read, Write};
 use std::str::FromStr;
 use zeroize::Zeroizing;
 
-const MAX_FILE_SIZE: u64 = 1 << 30; // 1 GiB
+const MAX_FILE_SIZE: u64 = 5 << 30; // 5 GiB
 
 /// Encrypt a file to self (derived age identity) plus optional additional recipients.
 /// Writes ciphertext to stdout.
