@@ -32,36 +32,32 @@ gh attestation verify keytap-*.zip -R jul-sh/keytap
 Create the passkey once:
 
 ```bash
-keytap --init
+keytap init
 ```
 
-Then derive key material:
+Then derive a key.
 
 ```bash
-keytap [name]
+keytap public myKey             # public key (safe to share)
+keytap reveal myKey             # private key material (sensitive)
 ```
 
 Use a name to derive different keys from the same passkey:
 
 ```bash
-keytap backup
-keytap deploy
-keytap # The default name is `default`.
+keytap public backup
+keytap public deploy
+keytap public                   # The default name is `default`.
 ```
 
-Derive key material in different formats:
+Different formats:
 
 ```bash
-keytap myBase64Key --format base64
-keytap myRawKey --format raw
-keytap smolSecrets --format age
-keytap smolSshKey --format ssh
-```
-
-Get the public key for a derived key:
-
-```bash
-keytap smolSshKey --format ssh --public
+keytap public myKey --format age
+keytap public myKey --format ssh
+keytap reveal myKey --format age
+keytap reveal myKey --format ssh
+keytap reveal myKey --format raw
 ```
 
 ### Encrypt and decrypt files
@@ -69,38 +65,38 @@ keytap smolSshKey --format ssh --public
 Encrypt a file with your derived age identity:
 
 ```bash
-keytap --encrypt secrets.env > secrets.env.age
+keytap encrypt secrets.env > secrets.env.age
 ```
 
 Decrypt it:
 
 ```bash
-keytap --decrypt secrets.env.age > secrets.env
+keytap decrypt secrets.env.age > secrets.env
 ```
 
 Encrypt to yourself and others:
 
 ```bash
-keytap --encrypt secrets.env --to age1abc... > secrets.env.age
+keytap encrypt secrets.env --to age1abc... > secrets.env.age
 ```
 
 Or use a recipients file (one age public key per line):
 
 ```bash
-keytap --encrypt secrets.env -R age-recipients.txt > secrets.env.age
+keytap encrypt secrets.env -R age-recipients.txt > secrets.env.age
 ```
 
 Encrypt to others only, without including yourself:
 
 ```bash
-keytap --encrypt secrets.env --to age1abc... --no-self > secrets.env.age
+keytap encrypt secrets.env --to age1abc... --no-self > secrets.env.age
 ```
 
-The key name works the same way as with key derivation:
+Use a different key name:
 
 ```bash
-keytap backup --encrypt secrets.env > secrets.env.age
-keytap backup --decrypt secrets.env.age > secrets.env
+keytap encrypt secrets.env --key backup > secrets.env.age
+keytap decrypt secrets.env.age --key backup > secrets.env
 ```
 
 ## Requirements
@@ -115,10 +111,10 @@ keytap backup --decrypt secrets.env.age > secrets.env
 
 ## How It Works
 
-1. `keytap --init` creates a passkey for the relying party `keytap.jul.sh`. The passkey lives in your chosen passkey provider.
-2. `keytap [name]` performs a WebAuthn assertion using the PRF extension. The PRF input is `SHA256("keytap:prf:<name>")`, so each name requests a different PRF output directly from the passkey.
+1. `keytap init` creates a passkey for the relying party `keytap.jul.sh`. The passkey lives in your chosen passkey provider.
+2. `keytap public|reveal [name]` performs a WebAuthn assertion using the PRF extension. The PRF input is `SHA256("keytap:prf:<name>")`, so each name requests a different PRF output directly from the passkey.
 3. The PRF output is expanded with HKDF-SHA256 using a fixed keytap info string to produce 32 bytes of key material.
-4. The result is formatted as raw bytes, hex, base64, an `age` secret key, or an OpenSSH Ed25519 key. With `--encrypt`/`--decrypt`, the derived age identity is used to encrypt or decrypt files directly.
+4. `public` outputs the public key (hex, base64, age recipient, or SSH public key). `reveal` outputs private key material. `encrypt`/`decrypt` use the derived age identity to encrypt or decrypt files directly.
 
 Same passkey, same name, same derived key. Different names derive different keys.
 
@@ -130,10 +126,16 @@ On systems without native passkey support (like Linux), keytap authenticates via
 
 ## Security
 
-keytap's security model is simple: the passkey is the root secret.
+keytap is a convenience utility, not a high-assurance security tool. It is designed to make passkey-derived keys easy to use across machines. If your threat model involves nation-state adversaries, targeted attacks, or secrets where compromise has severe consequences, use purpose-built tools instead:
 
-- keytap depends on your passkey provider, WebAuthn PRF, and local device authentication. It does not create a stronger trust boundary than the provider already gives you.
-- keytap does not sync or cache derived keys itself. It derives on demand, writes to stdout, and exits. There are no local config files or cached state.
+- **SSH keys**: Generate directly with `ssh-keygen` and manage per-device keys. Use [FIDO2 resident keys](https://developers.yubico.com/SSH/Securing_git_with_SSH_and_FIDO2.html) on a hardware token for phishing-resistant SSH without syncing private material at all.
+- **age encryption**: Generate standalone identities with `age-keygen`. See [age](https://github.com/FiloSottile/age) and [age-plugin-yubikey](https://github.com/str4d/age-plugin-yubikey) for hardware-bound identities.
+
+keytap ties all derived keys to a single passkey registered under the `keytap.jul.sh` relying party. That means you trust your passkey provider, the WebAuthn PRF extension, and the `keytap.jul.sh` domain. This is a meaningful trust surface that the tools above avoid entirely.
+
+With that said, here is how keytap works within those constraints:
+
+- keytap does not sync or cache derived keys. It derives on demand, writes to stdout, and exits. There are no local config files or cached state.
 - If you save the output, pipe it into another tool, or import it into an agent, that destination now holds the key and must be trusted accordingly.
 - The PRF inputs are public and derived from the key name. They provide stable derivation and domain separation, not secrecy.
 - Replacing the registered passkey changes every key derived from it. Treat the passkey as the root of your derived identities.
@@ -144,7 +146,6 @@ When keytap authenticates via your phone, additional trust considerations apply:
 
 - **You trust the web page served to your phone.** The website served by `keytap.jul.sh` performs the WebAuthn ceremony, receives the PRF output, encrypts it, and posts back to the host, via the relay. You trust its functionality and integrity. The web page is served inspectable, but in practice you are unlikely to review it each time.
 - The Cloudflare relay (`keytap-relay.julsh.workers.dev`) forwards opaque encrypted blobs. It never sees plaintext key material. The channel is end-to-end encrypted with X25519 ECDH + HKDF-SHA256 + AES-256-GCM. An attacker who controls the relay can deny service but cannot decrypt the payload.
-- On macOS hosts, none of this applies. The native passkey flow uses the hosts passkeys, or alternatively a native QR code with that opens a native direct device-to-device channel.
 
 ## Tips
 
@@ -167,16 +168,16 @@ Add keytap to a Nix shell using the attested, signed release:
 If you want to avoid re-authenticating every time, you can store a derived key in the macOS Keychain:
 
 ```bash
-security add-generic-password -s keytap -a AGE_SECRET_KEY -w "$(keytap myKey --format age)"
+security add-generic-password -s keytap -a AGE_SECRET_KEY -w "$(keytap reveal myKey --format age)"
 ```
 
 ### Usage with age CLI
 
-keytap has built-in encryption via `--encrypt` and `--decrypt`, but you can also use the `age` CLI directly with derived keys:
+keytap has built-in encryption via `encrypt` and `decrypt`, but you can also use the `age` CLI directly with derived keys:
 
 ```bash
-echo "secret" | age -r "$(keytap smolSecrets --format age --public)" > secret.age
-age -d -i <(keytap smolSecrets --format age) secret.age
+echo "secret" | age -r "$(keytap public smolSecrets --format age)" > secret.age
+age -d -i <(keytap reveal smolSecrets --format age) secret.age
 ```
 
 ## License

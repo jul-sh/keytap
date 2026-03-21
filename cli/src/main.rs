@@ -1,7 +1,7 @@
 mod encrypt;
 mod nearby;
 
-use clap::{Parser, ValueEnum};
+use clap::{Parser, Subcommand, ValueEnum};
 use std::io::Write;
 use keytap_core::{PrivateKeyFormat, PublicKeyFormat};
 use zeroize::Zeroizing;
@@ -9,41 +9,68 @@ use zeroize::Zeroizing;
 #[derive(Parser)]
 #[command(name = "keytap", version)]
 struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Subcommand)]
+enum Command {
     /// Create the passkey (only needed once)
-    #[arg(long)]
-    init: bool,
+    Init,
 
-    /// Key name for domain separation
-    #[arg(default_value = "default", conflicts_with = "init")]
-    name: Option<String>,
+    /// Output the public key
+    Public {
+        /// Key name for domain separation
+        #[arg(default_value = "default")]
+        name: String,
 
-    /// Output format
-    #[arg(long, default_value = "hex", conflicts_with = "init")]
-    format: Format,
+        /// Output format
+        #[arg(long, default_value = "hex")]
+        format: PublicFormat,
+    },
 
-    /// Output the public key instead of the private key
-    #[arg(long, conflicts_with_all = ["init", "encrypt", "decrypt"])]
-    public: bool,
+    /// Reveal private key material
+    Reveal {
+        /// Key name for domain separation
+        #[arg(default_value = "default")]
+        name: String,
+
+        /// Output format
+        #[arg(long, default_value = "hex")]
+        format: Format,
+    },
 
     /// Encrypt a file with the derived age identity
-    #[arg(long, conflicts_with_all = ["init", "format"])]
-    encrypt: Option<String>,
+    Encrypt {
+        /// File to encrypt
+        file: String,
+
+        /// Key name for domain separation
+        #[arg(long, default_value = "default")]
+        key: String,
+
+        /// Additional age recipient (can be repeated)
+        #[arg(long = "to")]
+        recipients: Vec<String>,
+
+        /// File containing age recipients (one per line)
+        #[arg(short = 'R')]
+        recipients_file: Vec<String>,
+
+        /// Don't include self as a recipient when encrypting
+        #[arg(long)]
+        no_self: bool,
+    },
 
     /// Decrypt an age-encrypted file with the derived age identity
-    #[arg(long, conflicts_with_all = ["init", "format", "encrypt"])]
-    decrypt: Option<String>,
+    Decrypt {
+        /// File to decrypt
+        file: String,
 
-    /// Additional age recipient (can be repeated)
-    #[arg(long = "to", requires = "encrypt", conflicts_with_all = ["init", "decrypt"])]
-    recipients: Vec<String>,
-
-    /// File containing age recipients (one per line)
-    #[arg(short = 'R', requires = "encrypt", conflicts_with_all = ["init", "decrypt"])]
-    recipients_file: Vec<String>,
-
-    /// Don't include self as a recipient when encrypting
-    #[arg(long, requires = "encrypt", conflicts_with_all = ["init", "decrypt"])]
-    no_self: bool,
+        /// Key name for domain separation
+        #[arg(long, default_value = "default")]
+        key: String,
+    },
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -55,32 +82,39 @@ pub(crate) enum Format {
     Ssh,
 }
 
+#[derive(Clone, Copy, ValueEnum)]
+pub(crate) enum PublicFormat {
+    Hex,
+    Base64,
+    Age,
+    Ssh,
+}
+
 fn main() {
     let cli = Cli::parse();
 
-    if cli.init {
-        register();
-        return;
-    }
-
-    let name = cli.name.as_deref().unwrap_or("default");
-    let prf_output = authenticate(name);
-    let raw_key = derive_key(&prf_output);
-
-    if cli.public {
-        if matches!(cli.format, Format::Raw) {
-            die("--format raw is not supported with --public");
+    match cli.command {
+        Command::Init => register(),
+        Command::Public { ref name, format } => {
+            let prf_output = authenticate(name);
+            let raw_key = derive_key(&prf_output);
+            emit_public_key(&raw_key, format);
         }
-        emit_public_key(&raw_key, cli.format);
-        return;
-    }
-
-    if let Some(ref path) = cli.encrypt {
-        encrypt::encrypt_file(&raw_key, path, &cli.recipients, &cli.recipients_file, !cli.no_self);
-    } else if let Some(ref path) = cli.decrypt {
-        encrypt::decrypt_file(&raw_key, path);
-    } else {
-        emit_private_key(&raw_key, cli.format);
+        Command::Reveal { ref name, format } => {
+            let prf_output = authenticate(name);
+            let raw_key = derive_key(&prf_output);
+            emit_private_key(&raw_key, format);
+        }
+        Command::Encrypt { ref file, ref key, ref recipients, ref recipients_file, no_self } => {
+            let prf_output = authenticate(key);
+            let raw_key = derive_key(&prf_output);
+            encrypt::encrypt_file(&raw_key, file, recipients, recipients_file, !no_self);
+        }
+        Command::Decrypt { ref file, ref key } => {
+            let prf_output = authenticate(key);
+            let raw_key = derive_key(&prf_output);
+            encrypt::decrypt_file(&raw_key, file);
+        }
     }
 }
 
@@ -170,13 +204,12 @@ fn emit_private_key(raw_key: &[u8], format: Format) {
     }
 }
 
-fn emit_public_key(raw_key: &[u8], format: Format) {
+fn emit_public_key(raw_key: &[u8], format: PublicFormat) {
     let pub_format = match format {
-        Format::Hex => PublicKeyFormat::Hex,
-        Format::Base64 => PublicKeyFormat::Base64,
-        Format::Age => PublicKeyFormat::AgeRecipient,
-        Format::Ssh => PublicKeyFormat::SshPublicKey,
-        Format::Raw => die("--format raw is not supported with --public"),
+        PublicFormat::Hex => PublicKeyFormat::Hex,
+        PublicFormat::Base64 => PublicKeyFormat::Base64,
+        PublicFormat::Age => PublicKeyFormat::AgeRecipient,
+        PublicFormat::Ssh => PublicKeyFormat::SshPublicKey,
     };
     match keytap_core::format_public_key(raw_key, pub_format) {
         Ok(s) => println!("{s}"),
