@@ -17,11 +17,11 @@
         releases = {
           aarch64-darwin = {
             url = "https://github.com/jul-sh/keytap/releases/download/v3.0.0/keytap-v3.0.0-arm64.zip";
-            hash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+            hash = "sha256-z1ybqH8A44XfMJ66pCv1ZiWGD5Z/LspaXOO+0g9R1HY=";
           };
           x86_64-linux = {
             url = "https://github.com/jul-sh/keytap/releases/download/v3.0.0/keytap-v3.0.0-linux-x86_64.zip";
-            hash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+            hash = "sha256-PymtdxJsM71soLuI0w9ae41Ee+Mtz6d/tXUtTMPwBNw=";
           };
         };
       in
