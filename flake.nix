@@ -16,12 +16,12 @@
         # Updated automatically by the release workflow
         releases = {
           aarch64-darwin = {
-            url = "https://github.com/jul-sh/tapkey/releases/download/v1.3.0/tapkey-v1.3.0-arm64.zip";
-            hash = "sha256-GuTRDZCCc+VxuyVe6nJckRLnJoQOxk/vO3nCc0jsgtA=";
+            url = "https://github.com/jul-sh/tapkey/releases/download/v2.0.0/tapkey-v2.0.0-arm64.zip";
+            hash = "sha256-qG7v9NocPNP40EW97KCgN+4mWmo2f2LB61pJQ2mvRis=";
           };
           x86_64-linux = {
-            url = "https://github.com/jul-sh/tapkey/releases/download/v1.3.0/tapkey-v1.3.0-linux-x86_64.zip";
-            hash = "sha256-uee7rG2ZAuoMJXkifwatmireDCo7xcjjsFHwla+VbFs=";
+            url = "https://github.com/jul-sh/tapkey/releases/download/v2.0.0/tapkey-v2.0.0-linux-x86_64.zip";
+            hash = "sha256-8D3fJpUeH6dSMFe/mFi6Ul6sfr4X0oEt9lHKYJWirTY=";
           };
         };
       in
@@ -29,7 +29,7 @@
         packages = pkgs.lib.optionalAttrs (builtins.hasAttr system releases) {
           default = pkgs.stdenv.mkDerivation {
             pname = "tapkey";
-            version = "1.3.0";
+            version = "2.1.0";
             src = pkgs.fetchurl {
               inherit (releases.${system}) url hash;
             };
