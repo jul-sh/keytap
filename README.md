@@ -28,11 +28,6 @@ They are not designed to sync arbitrary private keys like your SSH key for GitHu
 
 So people fall back to awkward alternatives: manually copying plaintext private keys between machines, storing long-lived secrets in more places than they want, or generating different keys per device and dealing with the sprawl.
 
-`keytap` takes a different approach.
-
-Instead of syncing the derived key, it asks your passkey for a stable PRF output, derives key material locally, prints what you asked for, and exits.
-
-In other words: **sync the passkey once, derive everything else on demand.**
 
 ## How it works
 
@@ -52,7 +47,7 @@ Examples:
 - `github` for GitHub SSH auth
 - `backup` for encrypted backups
 
-The important property is predictability:
+The important property is predictability, across installs:
 
 - same passkey, same name → same derived key
 - same passkey, different name → different derived key
