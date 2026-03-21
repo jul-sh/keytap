@@ -1,13 +1,17 @@
-# keytap
+# Passkeys that turn into real keys.
 
 <img src="macos/keytap.icon/Assets/icon.png" width="128" alt="keytap icon" />
 
-`keytap` is a CLI for turning one passkey into many reproducible keys.
+`keytap` is a CLI that turns one passkey into reproducible keys and built-in file encryption.
 
-If your passkey syncs across your devices, `keytap` lets you re-derive the same:
+The main idea is simple: if your passkey already syncs across your devices, `keytap` lets you use that passkey as the root for stable secrets you can regenerate anywhere.
 
-- SSH key
+That is especially useful for encrypted `.env` files and other small secrets you want to commit to GitHub in encrypted form, then decrypt locally when needed.
+
+It can also re-derive the same:
+
 - `age` identity
+- SSH key
 - 32-byte app secret
 
 …without exporting private key files, copying secrets through a password manager, or keeping a keyfile checked into dotfiles.
@@ -44,17 +48,17 @@ In other words: **sync the passkey once, derive everything else on demand.**
 
 ## What you can do with it
 
-With one passkey, you can derive:
+The main workflow is built in:
 
-- an SSH public/private keypair
+- encrypt a file with a passkey-derived `age` identity
+- commit the encrypted file to GitHub
+- decrypt it later on any machine where you can unlock the same passkey
+
+With the same passkey, you can also derive:
+
 - an `age` recipient or secret key
+- an SSH public/private keypair
 - raw 32-byte key material for your own tooling
-
-You can also use that derived `age` identity directly to:
-
-- encrypt files
-- decrypt files
-- encrypt to yourself and other recipients at the same time
 
 ## How it works
 
@@ -100,8 +104,6 @@ The flow is:
 4. you approve with a passkey on the phone
 5. the PRF result is sent back to the CLI over an end-to-end encrypted relay channel
 
-This matters because the current product is not just “a local passkey CLI.”
-It is also a cross-device bridge when native passkey APIs are not available.
 
 ## Install
 
@@ -135,7 +137,23 @@ keytap init
 
 This creates the passkey that `keytap` will use as the root for future derivations.
 
-### 2. Derive a public key or reveal private material
+### 2. Encrypt a file
+
+```bash
+keytap encrypt .env > .env.age
+```
+
+This is the default mental model for `keytap`: authenticate with your passkey, derive the same `age` identity, encrypt the file, and store only the ciphertext.
+
+### 3. Decrypt it later
+
+```bash
+keytap decrypt .env.age > .env
+```
+
+The same passkey and key name reproduce the same identity, so the file can be decrypted on any machine where you can unlock that passkey.
+
+### 4. Derive a public key or reveal private material
 
 ```bash
 keytap public
@@ -152,7 +170,7 @@ keytap public backup
 keytap reveal deploy
 ```
 
-### 3. Choose an output format
+### 5. Choose an output format
 
 Public key formats:
 
@@ -174,6 +192,46 @@ keytap reveal default --format raw
 ```
 
 ## The most common workflows
+
+### Encrypt and decrypt `.env` files
+
+If your goal is “commit secrets encrypted, decrypt when needed,” this is the happy path:
+
+```bash
+keytap encrypt .env > .env.age
+git add .env.age
+```
+
+Later, on this machine or another one:
+
+```bash
+keytap decrypt .env.age > .env
+```
+
+Use a different key name when you want independent encrypted domains, for example personal vs work or staging vs production:
+
+```bash
+keytap encrypt .env --key work > .env.age
+keytap decrypt .env.age --key work > .env
+```
+
+You can also encrypt to yourself and other recipients at the same time:
+
+```bash
+keytap encrypt .env --to age1abc... > .env.age
+```
+
+Or use a recipients file:
+
+```bash
+keytap encrypt .env -R age-recipients.txt > .env.age
+```
+
+Encrypt to others only, without including yourself:
+
+```bash
+keytap encrypt .env --to age1abc... --no-self > .env.age
+```
 
 ### Derive an SSH key
 
@@ -204,45 +262,6 @@ Reveal the matching secret key:
 
 ```bash
 keytap reveal files --format age
-```
-
-### Encrypt and decrypt files directly
-
-Encrypt a file to your derived `age` identity:
-
-```bash
-keytap encrypt secrets.env > secrets.env.age
-```
-
-Decrypt it later:
-
-```bash
-keytap decrypt secrets.env.age > secrets.env
-```
-
-Use a different derived key name:
-
-```bash
-keytap encrypt secrets.env --key backup > secrets.env.age
-keytap decrypt secrets.env.age --key backup > secrets.env
-```
-
-Encrypt to yourself and someone else:
-
-```bash
-keytap encrypt secrets.env --to age1abc... > secrets.env.age
-```
-
-Encrypt to recipients from a file:
-
-```bash
-keytap encrypt secrets.env -R age-recipients.txt > secrets.env.age
-```
-
-Encrypt to others only, without including yourself:
-
-```bash
-keytap encrypt secrets.env --to age1abc... --no-self > secrets.env.age
 ```
 
 ## Choosing names
@@ -276,8 +295,6 @@ This is cleaner than reusing one key everywhere, and easier to reason about than
 ## Security model
 
 `keytap` is best understood as a convenience tool with a clean deterministic model, not as a maximal-security key management system.
-
-That distinction matters.
 
 If your threat model requires hardware-bound keys, strict per-device isolation, or minimizing trust in synced credentials, then traditional tools are often the better choice:
 
