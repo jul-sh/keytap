@@ -2,7 +2,7 @@
 
 <img src="macos/keytap.icon/Assets/icon.png" width="128" alt="keytap icon" />
 
-`keytap` is a CLI that turns one passkey into reproducible keys and built-in file encryption.
+`keytap` is a CLI that turns one passkey into reproducible keys.
 
 If your passkey already syncs across your devices, `keytap` lets you use that passkey as a stable root secret you can unlock anywhere.
 From that root, it can deterministically derive:
@@ -12,13 +12,6 @@ From that root, it can deterministically derive:
 - a 32-byte app secret
 
 It can also use the derived `age` identity directly to encrypt and decrypt files.
-
-That means you do not need to:
-
-- export private key files between machines
-- keep plaintext secrets in more places than necessary
-- stuff unrelated private keys into your password manager
-- generate a different key on every device and manually manage the sprawl
 
 The mental model is simple:
 
@@ -32,18 +25,9 @@ That makes `keytap` useful when you want portable identity instead of portable k
 ## Why this exists
 
 Passkey providers are good at syncing passkeys.
-They are not designed to sync arbitrary private keys like:
+They are not designed to sync arbitrary private keys like your SSH key for GitHub, your `age` identity for encrypted files, or an app secret used by a script or service.
 
-- your SSH key for GitHub
-- your `age` identity for encrypted files
-- an app secret used by a script or service
-
-So people fall back to a few awkward options:
-
-- manually copying private keys between machines
-- keeping plaintext secrets around longer than they should
-- storing long-lived secrets in more places than they want
-- generating different keys per device and dealing with the sprawl
+So people fall back to awkward alternatives: manually copying private keys between machines, keeping plaintext secrets around longer than they should, storing long-lived secrets in more places than they want, or generating different keys per device and dealing with the sprawl.
 
 `keytap` takes a different approach.
 
