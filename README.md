@@ -96,139 +96,51 @@ gh attestation verify keytap-*.zip -R jul-sh/keytap
 
 ## Quick start
 
-### 1. Create the passkey once
+Create the passkey once
 
 ```bash
 keytap init
 ```
 
-This creates the passkey that `keytap` will use as the root for future derivations.
+This creates the passkey that `keytap` will use as the root. Then you can:
 
-### 2. Derive a key
+### Derive & Format Keys
 
-```bash
-keytap public
-keytap reveal
-```
+Use `keytap public` for public keys and `keytap reveal` for private keys. Both default to the name `default` unless a specific name is provided.
 
-By default, both commands use the name `default`.
+| Action | Command Example | Supported Formats |
+| :--- | :--- | :--- |
+| **Public Key** | `keytap public [name] --format [type]` | `ssh`, `age`, `hex`, `base64` |
+| **Private Key** | `keytap reveal [name] --format [type]` | `ssh`, `age`, `hex`, `base64`, `raw` |
 
-To derive a different key, pass a different name:
+**Examples:**
+* `keytap public github --format ssh`
+* `keytap reveal backup --format age`
 
-```bash
-keytap public github
-keytap public backup
-keytap reveal deploy
-```
+### Encrypt & Decrypt
 
-### 3. Choose an output format
+Encryption and decryption use the `age` identity derived from your passkey. You can specify a custom key name using the optional `--key` argument (defaults to `default`).
 
-Public key formats:
+| Action | Command Example |
+| :--- | :--- |
+| **Encrypt** | `keytap encrypt [file] [--key name]` |
+| **Decrypt** | `keytap decrypt [file] [--key name]` |
 
-```bash
-keytap public github --format ssh
-keytap public backup --format age
-keytap public default --format hex
-keytap public default --format base64
-```
-
-Private key formats:
-
-```bash
-keytap reveal github --format ssh
-keytap reveal backup --format age
-keytap reveal default --format hex
-keytap reveal default --format base64
-keytap reveal default --format raw
-```
-
-### 4. Encrypt a file
-
-```bash
-keytap encrypt .env > .env.age
-```
-
-This derives the same `age` identity from your passkey and uses it immediately for encryption.
-
-### 5. Decrypt it later
-
-```bash
-keytap decrypt .env.age > .env
-```
+**Examples:**
+* `keytap encrypt .env > .env.age`
+* `keytap decrypt .env.age > .env`
 
 The same passkey and key name reproduce the same identity, so the file can be decrypted on any machine where you can unlock that passkey.
 
-## Common workflows
+### Manage Recipients
 
-### Derive an SSH key
+You can encrypt files for yourself, specific recipients, or groups using the `--to` and `-R` flags. By default, your own identity is always included unless `--no-self` is specified.
 
-Get an SSH public key you can paste into GitHub, GitLab, or a server:
-
-```bash
-keytap public github --format ssh
-```
-
-Reveal the corresponding SSH private key when a tool needs it:
-
-```bash
-keytap reveal github --format ssh
-```
-
-Think of `github` here as a stable namespace.
-You can make another independent SSH key by choosing another name.
-
-### Derive an `age` identity
-
-Get your `age` recipient:
-
-```bash
-keytap public files --format age
-```
-
-Reveal the matching secret key:
-
-```bash
-keytap reveal files --format age
-```
-
-### Encrypt and decrypt files
-
-Encrypt a file with your derived age identity:
-
-```bash
-keytap encrypt secrets.env > secrets.env.age
-```
-
-Decrypt it later:
-
-```bash
-keytap decrypt secrets.env.age > secrets.env
-```
-
-Use a different key name when you want an independent encryption domain:
-
-```bash
-keytap encrypt secrets.env --key work > secrets.env.age
-keytap decrypt secrets.env.age --key work > secrets.env
-```
-
-Encrypt to yourself and someone else at the same time:
-
-```bash
-keytap encrypt secrets.env --to age1abc... > secrets.env.age
-```
-
-Or use a recipients file:
-
-```bash
-keytap encrypt secrets.env -R age-recipients.txt > secrets.env.age
-```
-
-Encrypt to others only, without including yourself:
-
-```bash
-keytap encrypt secrets.env --to age1abc... --no-self > secrets.env.age
-```
+| Scenario | Command Example |
+| :--- | :--- |
+| **Add Recipients** | `keytap encrypt [file] --to [age-pubkey] > [output]` |
+| **Recipients File** | `keytap encrypt [file] -R [recipients.txt] > [output]` |
+| **Exclude Self** | `keytap encrypt [file] --to [age-pubkey] --no-self > [output]` |
 
 ## Choosing names
 
