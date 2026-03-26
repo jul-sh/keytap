@@ -16,7 +16,7 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
-      - uses: cachix/install-nix-action@v31
+      - uses: cachix/install-nix-action@51f3067b56fe8ae331890c77d4e454f6d60615ff # v31
 
       - name: Build, sign, notarize, and package
         id: package
@@ -34,7 +34,7 @@ jobs:
         with:
           subject-path: ${{ steps.package.outputs.zip_name }}
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: macos-arm64
           path: ${{ steps.package.outputs.zip_name }}
@@ -63,7 +63,7 @@ jobs:
         with:
           subject-path: ${{ steps.package.outputs.zip_name }}
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: linux-x86_64
           path: ${{ steps.package.outputs.zip_name }}
@@ -75,7 +75,7 @@ jobs:
     needs: [build-macos, build-linux]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: artifacts
 
