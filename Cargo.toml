@@ -1,3 +1,3 @@
 [workspace]
-members = ["cli", "macos"]
+members = ["core", "cli", "macos", "web/wasm"]
 resolver = "2"

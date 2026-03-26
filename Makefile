@@ -4,7 +4,7 @@ BIN = $(BUNDLE)/Contents/MacOS/keytap
 IDENTITY ?= $(shell security find-identity -v -p codesigning 2>/dev/null | grep -q "Developer ID Application" && echo "Developer ID Application" || echo "-")
 PROVISIONING_PROFILE ?=
 
-.PHONY: all build sign notarize setup-signing install verify package test clean
+.PHONY: all build build-wasm sign notarize setup-signing install verify package test test-core test-cli clean
 
 all: build sign notarize
 
@@ -60,9 +60,17 @@ verify:
 	@echo ""
 	codesign -d --entitlements :- $(BUNDLE)
 
-test:
-	cargo test --lib --test e2e_crypto
+build-wasm:
+	wasm-pack build --target web web/wasm --out-dir ../pkg --out-name keytap_web
+
+test: test-core test-cli
 	@echo "All tests passed."
+
+test-core:
+	cargo test -p keytap-core
+
+test-cli:
+	cargo test -p keytap --no-default-features --test e2e_crypto
 
 clean:
 	cargo clean

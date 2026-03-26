@@ -8,4 +8,5 @@ macos/swift-lib/.build/
 *.zip
 .mcp.json
 .wrangler/
+web/pkg/
 result

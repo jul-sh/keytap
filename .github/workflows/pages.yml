@@ -8,6 +8,7 @@ on:
       - .github/workflows/pages.yml
       - .well-known/**
       - web/**
+      - core/**
   workflow_dispatch:
 
 permissions:
@@ -28,12 +29,19 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      - name: Build WASM
+        run: wasm-pack build --target web web/wasm --out-dir ../pkg --out-name keytap_web
+
       - name: Prepare site
         run: |
           mkdir -p _site/.well-known
           cp .well-known/apple-app-site-association _site/.well-known/
           cp web/CNAME _site/
           cp web/*.html web/*.js web/*.css _site/ 2>/dev/null || true
+          cp -r web/pkg _site/pkg
 
       - uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5.0.0
 

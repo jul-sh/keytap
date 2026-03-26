@@ -3,7 +3,6 @@ use bech32::{Bech32, Hrp};
 use hkdf::Hkdf;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
-use zeroize::Zeroize;
 
 mod ssh;
 
@@ -76,9 +75,7 @@ pub fn derive_raw_key(prf_output: &[u8]) -> Result<Vec<u8>, KeytapError> {
     Hkdf::<Sha256>::new(None, prf_output)
         .expand(HKDF_INFO, &mut okm)
         .map_err(|e| KeytapError::Internal { message: e.to_string() })?;
-    let result = okm.to_vec();
-    okm.zeroize();
-    Ok(result)
+    Ok(okm.to_vec())
 }
 
 pub fn format_private_key(raw_key: &[u8], format: PrivateKeyFormat) -> Result<Vec<u8>, KeytapError> {
