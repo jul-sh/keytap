@@ -3,10 +3,6 @@ name = "keytap"
 version = "4.1.0"
 edition = "2021"
 
-[lib]
-name = "keytap_core"
-path = "src/lib.rs"
-
 [[bin]]
 name = "keytap"
 path = "src/main.rs"
@@ -16,6 +12,7 @@ default = ["native-passkey"]
 native-passkey = ["keytap-macos"]
 
 [dependencies]
+keytap-core = { path = "../core" }
 age = { version = "0.11", default-features = false }
 keytap-macos = { path = "../macos", optional = true }
 clap = { version = "4", features = ["derive"] }
@@ -23,13 +20,9 @@ serde_json = "1"
 base64 = "0.22"
 hkdf = "0.12"
 sha2 = "0.10"
-ed25519-dalek = "2"
 x25519-dalek = { version = "2", features = ["static_secrets"] }
-ssh-key = { version = "0.6", features = ["ed25519"] }
 bech32 = "0.11"
 hex = "0.4"
-serde = { version = "1", features = ["derive"] }
-thiserror = "2"
 qr2term = "0.3"
 tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }

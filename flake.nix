@@ -56,6 +56,7 @@
             cargo
             rustfmt
             clippy
+            wasm-pack
             nodePackages.wrangler
           ];
 

@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'none'; connect-src 'none'; form-action 'none'; frame-ancestors 'none'; base-uri 'none'; manifest-src 'none'; worker-src 'blob:'; script-src-elem 'self' blob:">
+  <title>keytap</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Iosevka+Charon&family=Pixelify+Sans:wght@400..700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="./nearby.css">
+  <link rel="stylesheet" href="./app.css">
+  <script type="module" src="./app.js"></script>
+</head>
+<body>
+  <main class="shell" id="page">
+    <p class="eyebrow">keytap</p>
+    <h1>Derive keys from a passkey.</h1>
+    <p class="summary">Register a passkey, then derive SSH keys, <code>age</code> identities, or raw secrets — entirely in your browser.</p>
+
+    <section class="panel" aria-labelledby="flow-title">
+      <div class="panel-header">
+        <p class="panel-label" id="flow-title">Operation</p>
+      </div>
+      <div class="form-row">
+        <select id="flow-select" class="input-select">
+          <option value="register">Register passkey</option>
+          <option value="derive" selected>Derive private key</option>
+          <option value="public-key">Get public key</option>
+        </select>
+      </div>
+
+      <div class="form-row" id="key-name-group">
+        <label for="key-name" class="input-label">Key name</label>
+        <input id="key-name" type="text" class="input-text" value="default" placeholder="default" autocomplete="off" spellcheck="false">
+      </div>
+
+      <div class="form-row" id="format-group">
+        <label for="format-select" class="input-label">Format</label>
+        <select id="format-select" class="input-select">
+          <option value="hex">hex</option>
+          <option value="base64">base64</option>
+          <option value="age">age</option>
+          <option value="ssh">ssh</option>
+        </select>
+      </div>
+    </section>
+
+    <button class="action" id="action-btn" type="button">Derive key</button>
+    <p class="status" id="status" aria-live="polite">Loading WASM&hellip;</p>
+
+    <section class="result-section" id="result-section" hidden>
+      <pre class="result-output" id="result-output"></pre>
+      <div class="result-actions">
+        <button class="action action-sm" id="copy-btn" type="button">Copy</button>
+        <button class="action action-sm" id="download-btn" type="button">Download</button>
+        <button class="action action-sm action-muted" id="new-btn" type="button">New</button>
+      </div>
+    </section>
+  </main>
+</body>
+</html>

@@ -1,0 +1,89 @@
+/* ─── app.html specific styles ─── */
+
+.form-row {
+  margin-top: 16px;
+}
+
+.form-row:first-of-type {
+  margin-top: 12px;
+}
+
+.input-label {
+  display: block;
+  font-family: var(--display);
+  text-transform: uppercase;
+  letter-spacing: 0.15em;
+  font-size: 0.8rem;
+  font-weight: 700;
+  color: var(--muted);
+  margin-bottom: 6px;
+}
+
+.input-select,
+.input-text {
+  appearance: none;
+  font: 1rem var(--body);
+  color: var(--fg);
+  background: hsla(240, 100%, 28%, 0.5);
+  border: 1px solid var(--line);
+  padding: 10px 14px;
+  width: 100%;
+  max-width: 320px;
+}
+
+.input-select:focus,
+.input-text:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.input-select {
+  cursor: pointer;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8'%3E%3Cpath d='M1 1l5 5 5-5' stroke='%2300ff66' stroke-width='2' fill='none'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 14px center;
+  padding-right: 38px;
+}
+
+/* ─── result ─── */
+
+.result-section {
+  margin-top: 24px;
+}
+
+.result-output {
+  font: 0.9rem/1.6 var(--body);
+  color: var(--accent);
+  background: hsla(240, 100%, 12%, 0.6);
+  border: 1px solid var(--line);
+  padding: 16px 20px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 320px;
+  overflow-y: auto;
+  user-select: all;
+}
+
+.result-actions {
+  display: flex;
+  gap: 12px;
+  margin-top: 12px;
+  flex-wrap: wrap;
+}
+
+.action-sm {
+  margin-top: 0;
+  padding: 8px 18px;
+  font-size: 0.9rem;
+  min-width: 0;
+}
+
+.action-muted {
+  border-color: var(--muted);
+  color: var(--muted);
+}
+
+.action-muted:hover:enabled {
+  background: var(--muted);
+  color: var(--accent-fg);
+}
