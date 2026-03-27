@@ -36,6 +36,7 @@ func keytapRegister(context: UInt64, callback: Callback) {
     controller.presentationContextProvider = delegate
     delegate.retainController(controller)
     controller.performRequests()
+    activateAfterDelay()
 
     app.run()
 }
@@ -65,6 +66,7 @@ func keytapAssert(
     } else {
         controller.performRequests()
     }
+    activateAfterDelay()
 
     app.run()
 }
@@ -187,6 +189,23 @@ private func setupApp() -> (NSApplication, NSWindow) {
     }
 
     return (app, window)
+}
+
+/// Re-activate the app after the authorization UI has been presented,
+/// ensuring the TouchID dialog is focused and the sensor engages.
+private func activateAfterDelay() {
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+        let app = NSApplication.shared
+        if #available(macOS 14.0, *) {
+            app.activate()
+        } else {
+            app.activate(ignoringOtherApps: true)
+        }
+        // Also bring any authorization windows to the front
+        for window in app.windows where window.isVisible {
+            window.makeKeyAndOrderFront(nil)
+        }
+    }
 }
 
 private func randomChallenge() -> Data {
