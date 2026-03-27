@@ -61,11 +61,7 @@ func keytapAssert(
     controller.presentationContextProvider = delegate
     delegate.retainController(controller)
 
-    if #available(macOS 14.0, *) {
-        controller.performRequests(options: .preferImmediatelyAvailableCredentials)
-    } else {
-        controller.performRequests()
-    }
+    controller.performRequests()
     activateAfterDelay()
 
     app.run()
@@ -177,7 +173,7 @@ private func setupApp() -> (NSApplication, NSWindow) {
     )
     window.center()
     window.makeKeyAndOrderFront(nil)
-    app.activate(ignoringOtherApps: true)
+    forceActivate()
 
     // Pump the run loop briefly so NSApplication and the authorization
     // framework finish lazy initialization before we issue a passkey
@@ -191,18 +187,19 @@ private func setupApp() -> (NSApplication, NSWindow) {
     return (app, window)
 }
 
+/// Force the app to the foreground using NSRunningApplication, which is
+/// more reliable than NSApplication.activate() for CLI-spawned processes.
+private func forceActivate() {
+    let app = NSRunningApplication.current
+    app.activate(options: [.activateIgnoringOtherApps])
+}
+
 /// Re-activate the app after the authorization UI has been presented,
 /// ensuring the TouchID dialog is focused and the sensor engages.
 private func activateAfterDelay() {
     DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-        let app = NSApplication.shared
-        if #available(macOS 14.0, *) {
-            app.activate()
-        } else {
-            app.activate(ignoringOtherApps: true)
-        }
-        // Also bring any authorization windows to the front
-        for window in app.windows where window.isVisible {
+        forceActivate()
+        for window in NSApplication.shared.windows where window.isVisible {
             window.makeKeyAndOrderFront(nil)
         }
     }
