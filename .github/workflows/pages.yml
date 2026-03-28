@@ -40,7 +40,7 @@ jobs:
           mkdir -p _site/.well-known
           cp .well-known/apple-app-site-association _site/.well-known/
           cp web/CNAME _site/
-          cp web/*.html web/*.js web/*.css _site/ 2>/dev/null || true
+          cp web/*.html web/*.js web/*.css web/*.png _site/ 2>/dev/null || true
           cp -r web/pkg _site/pkg
 
       - uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5.0.0
