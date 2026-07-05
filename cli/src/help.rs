@@ -50,11 +50,19 @@ pub fn overview(cli: &Command) -> String {
         out.push_str(&legend);
     }
 
+    out.push_str(SESSIONS);
+
     out.push_str("\nRun `");
     out.push_str(bin);
     out.push_str(" <COMMAND> --help` for the full details of any command.\n");
     out
 }
+
+/// Reuse-without-re-auth guidance. keytap derives on demand and never caches;
+/// to avoid a passkey prompt on every use, hand the key to a standard agent or
+/// keychain and let *it* hold the key. This section is the discoverable pointer
+/// to that pattern (the tool has no session/agent of its own by design).
+const SESSIONS: &str = "\nReusing a key without re-authenticating each time\n  keytap derives on demand and never caches. Let a standard agent hold the key:\n\n  SSH (many connections, one prompt):\n    eval \"$(ssh-agent -s)\"\n    keytap reveal ha --as ssh | ssh-add -t 900 -     # 15-min hold, then gone\n\n  A secret reused within one script (bounded to the process):\n    KEY=$(keytap reveal deploy --as hex); use \"$KEY\"; unset KEY\n\n  A secret reused across shells (the OS keychain holds it, not keytap):\n    security add-generic-password -a \"$USER\" -s keytap-deploy \\\n      -w \"$(keytap reveal deploy --as hex)\"        # macOS; secret-tool on Linux\n\n  Batch files in one prompt (no agent needed):\n    keytap encrypt *.env --key backup                # one auth, each -> <file>.age\n\n  Whatever you pipe into now holds the key—trust it accordingly.\n";
 
 /// Arguments intentionally kept out of the at-a-glance overview (still shown by
 /// each subcommand's own `--help`). Niche switches that would only add noise.
@@ -65,7 +73,7 @@ fn in_overview(arg: &Arg) -> bool {
     !arg.is_hide_set() && !is_builtin(arg) && !OVERVIEW_SKIP.contains(&arg.get_id().as_str())
 }
 
-/// A command's inline signature, e.g. `reveal [NAME] [--format VAL]`.
+/// A command's inline signature, e.g. `reveal [NAME] [--as VAL]`.
 fn command_usage(cmd: &Command) -> String {
     let mut parts = vec![cmd.get_name().to_string()];
 
@@ -102,7 +110,7 @@ fn token(arg: &Arg) -> String {
 }
 
 /// Build the legend describing each distinct optional argument once. When the
-/// same argument appears on several commands (e.g. `--format` on both `public`
+/// same argument appears on several commands (e.g. `--as` on both `public`
 /// and `reveal`), its accepted values are merged into the union so the overview
 /// never understates the choices a command actually supports.
 fn build_legend(commands: &[(&Command, String, String)]) -> String {

@@ -27,19 +27,39 @@ Derive keys and encrypt files from a passkey.
 Usage: keytap <COMMAND> [ARGS]
 
 Commands
-  init                                          Create the passkey (only needed once)
-  public [NAME] [--format VAL]                  Output the public key
-  reveal [NAME] [--format VAL]                  Reveal private key material
-  encrypt FILE [--key VAL] [--to VAL] [-R VAL]  Encrypt a file with the derived age identity
-  decrypt FILE [--key VAL]                      Decrypt an age-encrypted file with the derived age identity
+  init                                                           Create the passkey (only needed once)
+  public [NAME] [--as VAL]                                       Output the public key
+  reveal [NAME] [--as VAL]                                       Reveal private key material
+  encrypt [FILE] [--output VAL] [--key VAL] [--to VAL] [-R VAL]  Encrypt with the derived age identity (stdin/stdout by default)
+  decrypt [FILE] [--output VAL] [--key VAL]                      Decrypt an age file with the derived age identity (stdin/stdout by default)
 
 Arguments & options
   NAME          Key name for domain separation  [default: default]
-  --format VAL  Output format  (hex | base64 | age | ssh)  [default: hex]
-  FILE          File to encrypt
+  --as VAL      Output format  (hex | base64 | age | ssh)  [default: hex]
+  FILE          Files to encrypt ('-' or omitted = stdin). Multiple files are each written to `<file>.age` (one authentication for the whole batch)
+  --output VAL  Write ciphertext here ('-' = stdout). Only valid with a single input
   --key VAL     Key name for domain separation  [default: default]
   --to VAL      Additional age recipient (can be repeated)
   -R VAL        File containing age recipients (one per line)
+
+Reusing a key without re-authenticating each time
+  keytap derives on demand and never caches. Let a standard agent hold the key:
+
+  SSH (many connections, one prompt):
+    eval "$(ssh-agent -s)"
+    keytap reveal ha --as ssh | ssh-add -t 900 -     # 15-min hold, then gone
+
+  A secret reused within one script (bounded to the process):
+    KEY=$(keytap reveal deploy --as hex); use "$KEY"; unset KEY
+
+  A secret reused across shells (the OS keychain holds it, not keytap):
+    security add-generic-password -a "$USER" -s keytap-deploy \
+      -w "$(keytap reveal deploy --as hex)"        # macOS; secret-tool on Linux
+
+  Batch files in one prompt (no agent needed):
+    keytap encrypt *.env --key backup                # one auth, each -> <file>.age
+
+  Whatever you pipe into now holds the key—trust it accordingly.
 
 Run `keytap <COMMAND> --help` for the full details of any command.
 ```
@@ -157,26 +177,79 @@ When keytap authenticates via your phone, additional trust considerations apply:
 - **You trust the web page served to your phone.** The website served by `keytap.jul.sh` performs the WebAuthn ceremony, receives the PRF output, encrypts it, and posts back to the host, via the relay. You trust its functionality and integrity. The web page is served inspectable, but in practice you are unlikely to review it each time.
 - The Cloudflare relay (`keytap-relay.julsh.workers.dev`) forwards opaque encrypted blobs. It never sees plaintext key material. The channel is end-to-end encrypted with X25519 ECDH + HKDF-SHA256 + AES-256-GCM. An attacker who controls the relay can deny service but cannot decrypt the payload.
 
+## Sessions
+
+`keytap` derives keys on demand and **never caches** them. That keeps the tool
+simple and leaves nothing sensitive at rest — but it means each derivation costs
+one passkey authentication. When you need to reuse a key without re-authenticating,
+don't reach for a keytap daemon (there isn't one, by design): hand the derived key
+to a **standard agent or keychain** and let *it* hold the key.
+
+### SSH: pipe into `ssh-agent`
+
+For many SSH connections, load the derived key into `ssh-agent` once. Every
+`ssh` afterward is silent until the (optional) TTL expires:
+
+```bash
+eval "$(ssh-agent -s)"
+keytap reveal ha --as ssh | ssh-add -t 900 -   # one auth, 15-minute hold
+# ssh … ssh …  → no prompts
+```
+
+This is the intended path for repeated SSH — keytap produces the key, `ssh-agent`
+holds it. There is deliberately no `keytap ssh` command; `ssh-agent` already does
+that job, with better hardening.
+
+### A secret reused within one script
+
+Bind it to a shell variable for the process lifetime — one auth, no persistence:
+
+```bash
+KEY=$(keytap reveal deploy --as hex)
+use "$KEY"; use "$KEY"
+unset KEY
+```
+
+### A secret reused across shells: the OS keychain
+
+For arbitrary secrets (API tokens, `age` keys) that outlive one process, the OS
+keychain is the right holder — it enforces ACLs keytap can't:
+
+```bash
+# macOS
+security add-generic-password -a "$USER" -s keytap-deploy -w "$(keytap reveal deploy --as age)"
+security find-generic-password -a "$USER" -s keytap-deploy -w   # read back
+
+# Linux (libsecret)
+keytap reveal deploy --as age | secret-tool store --label=keytap-deploy service keytap key deploy
+```
+
+This trades keytap's zero-persistence for a larger footprint — an explicit,
+auditable one, in a store designed to hold secrets.
+
+Whatever you pipe into now holds the key, and must be trusted accordingly.
+
 ## Tips
+
+### Streaming and batching
+
+`encrypt`/`decrypt` read stdin and write stdout by default, so they compose in
+pipelines with no plaintext temp files, at any size:
+
+```bash
+printf '%s' "$SECRET" | keytap encrypt --key backup > secret.age   # stdin → stdout
+keytap decrypt secret.age --key backup -o >(load-into-env)          # → a consumer, no temp file
+keytap encrypt *.env --key backup                                   # batch: one auth, each → <file>.age
+```
 
 ### Use with the `age` CLI
 
 `keytap` has built-in `encrypt` and `decrypt`, but you can also use derived keys with the regular `age` CLI:
 
 ```bash
-echo "secret" | age -r "$(keytap public notes --format age)" > secret.age
-age -d -i <(keytap reveal notes --format age) secret.age
+echo "secret" | age -r "$(keytap public notes --as age)" > secret.age
+age -d -i <(keytap reveal notes --as age) secret.age
 ```
-
-### Store a derived key in macOS Keychain
-
-If you want fewer auth prompts, you can store a derived secret in Keychain yourself:
-
-```bash
-security add-generic-password -s keytap -a AGE_SECRET_KEY -w "$(keytap reveal myKey --format age)"
-```
-
-This trades convenience for a larger persistence footprint.
 
 ### Nix flake
 

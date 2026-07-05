@@ -32,7 +32,10 @@ enum Command {
         name: String,
 
         /// Output format
-        #[arg(long, default_value = "hex")]
+        // `--as` is the documented flag; `--format` stays as a hidden alias so
+        // existing scripts keep working. (`as` is a Rust keyword, hence the
+        // field is still named `format`.)
+        #[arg(long = "as", alias = "format", value_name = "FORMAT", default_value = "hex")]
         format: PublicFormat,
     },
 
@@ -43,14 +46,19 @@ enum Command {
         name: String,
 
         /// Output format
-        #[arg(long, default_value = "hex")]
+        #[arg(long = "as", alias = "format", value_name = "FORMAT", default_value = "hex")]
         format: Format,
     },
 
-    /// Encrypt a file with the derived age identity
+    /// Encrypt with the derived age identity (stdin/stdout by default)
     Encrypt {
-        /// File to encrypt
-        file: String,
+        /// Files to encrypt ('-' or omitted = stdin). Multiple files are each
+        /// written to `<file>.age` (one authentication for the whole batch).
+        file: Vec<String>,
+
+        /// Write ciphertext here ('-' = stdout). Only valid with a single input.
+        #[arg(short = 'o', long = "output")]
+        output: Option<String>,
 
         /// Key name for domain separation
         #[arg(long, default_value = "default")]
@@ -69,10 +77,15 @@ enum Command {
         no_self: bool,
     },
 
-    /// Decrypt an age-encrypted file with the derived age identity
+    /// Decrypt an age file with the derived age identity (stdin/stdout by default)
     Decrypt {
-        /// File to decrypt
-        file: String,
+        /// Files to decrypt ('-' or omitted = stdin). Multiple files each have
+        /// their `.age` suffix stripped for output (one authentication).
+        file: Vec<String>,
+
+        /// Write plaintext here ('-' = stdout). Only valid with a single input.
+        #[arg(short = 'o', long = "output")]
+        output: Option<String>,
 
         /// Key name for domain separation
         #[arg(long, default_value = "default")]
@@ -119,15 +132,19 @@ fn main() {
             let raw_key = derive_key(&prf_output);
             emit_private_key(&raw_key, format);
         }
-        Command::Encrypt { ref file, ref key, ref recipients, ref recipients_file, no_self } => {
+        Command::Encrypt { ref file, ref output, ref key, ref recipients, ref recipients_file, no_self } => {
+            // Validate flags BEFORE authenticating so a bad invocation fails fast
+            // instead of after a Touch ID / phone approval.
+            encrypt::validate_io(file, output.as_deref());
             let prf_output = authenticate(key);
             let raw_key = derive_key(&prf_output);
-            encrypt::encrypt_file(&raw_key, file, recipients, recipients_file, !no_self);
+            encrypt::encrypt(&raw_key, file, output.as_deref(), recipients, recipients_file, !no_self);
         }
-        Command::Decrypt { ref file, ref key } => {
+        Command::Decrypt { ref file, ref output, ref key } => {
+            encrypt::validate_io(file, output.as_deref());
             let prf_output = authenticate(key);
             let raw_key = derive_key(&prf_output);
-            encrypt::decrypt_file(&raw_key, file);
+            encrypt::decrypt(&raw_key, file, output.as_deref());
         }
     }
 }
