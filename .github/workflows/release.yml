@@ -12,7 +12,9 @@ permissions:
 
 jobs:
   build-macos:
-    runs-on: macos-15
+    # macos-26: compiling the .icon bundle needs Xcode 26's actool AND a
+    # matching OS — its asset runtime agent crashes on macOS 15.
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
