@@ -22,7 +22,10 @@ build:
 	cargo build --release -p keytap
 	@mkdir -p $(BUNDLE)/Contents/MacOS $(BUNDLE)/Contents/Resources
 	@cp macos/Info.plist $(BUNDLE)/Contents/Info.plist
-	@cp -R macos/keytap.icon $(BUNDLE)/Contents/Resources/keytap.icon
+	@xcrun actool macos/keytap.icon --compile $(BUNDLE)/Contents/Resources \
+		--platform macosx --minimum-deployment-target 15.0 \
+		--app-icon keytap --include-all-app-icons \
+		--output-partial-info-plist /dev/null > /dev/null
 	@cp target/release/keytap $(BIN)
 	@echo "Built $(BUNDLE)"
 

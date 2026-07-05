@@ -21,6 +21,9 @@ jobs:
 
       - uses: cachix/install-nix-action@51f3067b56fe8ae331890c77d4e454f6d60615ff # v31
 
+      - name: Select newest Xcode (actool needs >= 26 to compile .icon)
+        run: sudo xcode-select -s "$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)"
+
       - name: Build, sign, notarize, and package
         id: package
         run: |
