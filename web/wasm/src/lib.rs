@@ -43,9 +43,10 @@ pub fn format_private_key(raw_key: &[u8], format: &str) -> Result<Vec<u8>, JsErr
 }
 
 #[wasm_bindgen(js_name = formatPublicKey)]
-pub fn format_public_key(raw_key: &[u8], format: &str) -> Result<String, JsError> {
+pub fn format_public_key(raw_key: &[u8], format: &str, name: Option<String>) -> Result<String, JsError> {
     let fmt = parse_public_format(format)?;
-    keytap_core::format_public_key(raw_key, fmt).map_err(|e| JsError::new(&e.to_string()))
+    keytap_core::format_public_key(raw_key, fmt, name.as_deref())
+        .map_err(|e| JsError::new(&e.to_string()))
 }
 
 fn parse_private_format(s: &str) -> Result<keytap_core::PrivateKeyFormat, JsError> {

@@ -89,10 +89,10 @@ pub fn format_private_key(raw_key: &[u8], format: PrivateKeyFormat) -> Result<Ve
     }
 }
 
-pub fn format_public_key(raw_key: &[u8], format: PublicKeyFormat) -> Result<String, KeytapError> {
+pub fn format_public_key(raw_key: &[u8], format: PublicKeyFormat, name: Option<&str>) -> Result<String, KeytapError> {
     let key = to_32(raw_key)?;
     match format {
-        PublicKeyFormat::SshPublicKey => Ok(ssh::public_key_line(key)),
+        PublicKeyFormat::SshPublicKey => Ok(ssh::public_key_line(key, name)),
         _ => {
             let pub_bytes = x25519_public(key);
             match format {

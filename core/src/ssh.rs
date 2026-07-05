@@ -6,12 +6,16 @@ fn ed25519_public_key(seed: &[u8; 32]) -> ed25519_dalek::VerifyingKey {
     ed25519_dalek::SigningKey::from_bytes(seed).verifying_key()
 }
 
-pub fn public_key_line(seed: &[u8]) -> String {
+pub fn public_key_line(seed: &[u8], name: Option<&str>) -> String {
     let seed: &[u8; 32] = seed.try_into().unwrap();
     let vk = ed25519_public_key(seed);
     let key = ssh_key::PublicKey::from(ssh_key::public::Ed25519PublicKey::from(vk));
     let openssh = key.to_openssh().unwrap();
-    format!("{} keytap", openssh)
+    let comment = match name {
+        Some(name) => format!("keytap:{name}"),
+        None => "keytap".to_string(),
+    };
+    format!("{openssh} {comment}")
 }
 
 /// OpenSSH private key PEM with deterministic check-int.

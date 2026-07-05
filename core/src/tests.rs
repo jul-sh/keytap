@@ -120,15 +120,29 @@ fn test_format_private_key_ssh() {
 #[test]
 fn test_format_public_key_ssh() {
     let raw = [0u8; 32];
-    let result = format_public_key(&raw, PublicKeyFormat::SshPublicKey).unwrap();
+    let result = format_public_key(&raw, PublicKeyFormat::SshPublicKey, None).unwrap();
     assert!(result.starts_with("ssh-ed25519 "));
     assert!(result.ends_with(" keytap"));
 }
 
 #[test]
+fn test_format_public_key_ssh_with_name() {
+    let raw = [0u8; 32];
+    let result = format_public_key(&raw, PublicKeyFormat::SshPublicKey, Some("foo")).unwrap();
+    assert!(result.starts_with("ssh-ed25519 "));
+    assert!(result.ends_with(" keytap:foo"));
+    // The key body must be unaffected by the comment.
+    let unnamed = format_public_key(&raw, PublicKeyFormat::SshPublicKey, None).unwrap();
+    assert_eq!(
+        result.rsplit_once(' ').unwrap().0,
+        unnamed.rsplit_once(' ').unwrap().0,
+    );
+}
+
+#[test]
 fn test_format_public_key_age() {
     let raw = [0u8; 32];
-    let result = format_public_key(&raw, PublicKeyFormat::AgeRecipient).unwrap();
+    let result = format_public_key(&raw, PublicKeyFormat::AgeRecipient, None).unwrap();
     assert!(result.starts_with("age1"));
 }
 
@@ -226,28 +240,28 @@ fn test_golden_vectors() {
         // Verify public key formats
         let public_formats = vector["public"].as_object().unwrap();
 
-        let hex_pub = format_public_key(&raw_key, PublicKeyFormat::Hex).unwrap();
+        let hex_pub = format_public_key(&raw_key, PublicKeyFormat::Hex, None).unwrap();
         assert_eq!(
             hex_pub,
             public_formats["hex"].as_str().unwrap(),
             "hex public key mismatch"
         );
 
-        let b64_pub = format_public_key(&raw_key, PublicKeyFormat::Base64).unwrap();
+        let b64_pub = format_public_key(&raw_key, PublicKeyFormat::Base64, None).unwrap();
         assert_eq!(
             b64_pub,
             public_formats["base64"].as_str().unwrap(),
             "base64 public key mismatch"
         );
 
-        let age_pub = format_public_key(&raw_key, PublicKeyFormat::AgeRecipient).unwrap();
+        let age_pub = format_public_key(&raw_key, PublicKeyFormat::AgeRecipient, None).unwrap();
         assert_eq!(
             age_pub,
             public_formats["age"].as_str().unwrap(),
             "age public key mismatch"
         );
 
-        let ssh_pub = format_public_key(&raw_key, PublicKeyFormat::SshPublicKey).unwrap();
+        let ssh_pub = format_public_key(&raw_key, PublicKeyFormat::SshPublicKey, None).unwrap();
         assert_eq!(
             ssh_pub,
             public_formats["ssh"].as_str().unwrap(),

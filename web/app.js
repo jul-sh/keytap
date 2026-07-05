@@ -208,7 +208,7 @@ async function runPublicKey(keyName, format) {
   saveCredentialId(encodeBase64URL(new Uint8Array(credential.rawId)));
 
   const rawKey = deriveRawKey(new Uint8Array(prfFirst));
-  const output = formatPublicKey(new Uint8Array(rawKey), format);
+  const output = formatPublicKey(new Uint8Array(rawKey), format, keyName);
   return { output, format, keyName };
 }
 

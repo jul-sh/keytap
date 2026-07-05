@@ -52,15 +52,23 @@ fn test_format_private_key_ssh() {
 #[wasm_bindgen_test]
 fn test_format_public_key_ssh() {
     let raw = vec![0u8; 32];
-    let result = keytap_web::format_public_key(&raw, "ssh").unwrap();
+    let result = keytap_web::format_public_key(&raw, "ssh", None).unwrap();
     assert!(result.starts_with("ssh-ed25519 "));
     assert!(result.ends_with(" keytap"));
 }
 
 #[wasm_bindgen_test]
+fn test_format_public_key_ssh_with_name() {
+    let raw = vec![0u8; 32];
+    let result = keytap_web::format_public_key(&raw, "ssh", Some("foo".into())).unwrap();
+    assert!(result.starts_with("ssh-ed25519 "));
+    assert!(result.ends_with(" keytap:foo"));
+}
+
+#[wasm_bindgen_test]
 fn test_format_public_key_age() {
     let raw = vec![0u8; 32];
-    let result = keytap_web::format_public_key(&raw, "age").unwrap();
+    let result = keytap_web::format_public_key(&raw, "age", None).unwrap();
     assert!(result.starts_with("age1"));
 }
 
@@ -68,7 +76,7 @@ fn test_format_public_key_age() {
 fn test_format_invalid_format() {
     let raw = vec![0u8; 32];
     assert!(keytap_web::format_private_key(&raw, "invalid").is_err());
-    assert!(keytap_web::format_public_key(&raw, "invalid").is_err());
+    assert!(keytap_web::format_public_key(&raw, "invalid", None).is_err());
 }
 
 #[wasm_bindgen_test]
@@ -99,16 +107,16 @@ fn test_golden_parity() {
         let ssh_priv = keytap_web::format_private_key(&raw_key, "ssh").unwrap();
         assert_eq!(String::from_utf8(ssh_priv).unwrap(), v.private.ssh);
 
-        let hex_pub = keytap_web::format_public_key(&raw_key, "hex").unwrap();
+        let hex_pub = keytap_web::format_public_key(&raw_key, "hex", None).unwrap();
         assert_eq!(hex_pub, v.public.hex);
 
-        let b64_pub = keytap_web::format_public_key(&raw_key, "base64").unwrap();
+        let b64_pub = keytap_web::format_public_key(&raw_key, "base64", None).unwrap();
         assert_eq!(b64_pub, v.public.base64);
 
-        let age_pub = keytap_web::format_public_key(&raw_key, "age").unwrap();
+        let age_pub = keytap_web::format_public_key(&raw_key, "age", None).unwrap();
         assert_eq!(age_pub, v.public.age);
 
-        let ssh_pub = keytap_web::format_public_key(&raw_key, "ssh").unwrap();
+        let ssh_pub = keytap_web::format_public_key(&raw_key, "ssh", None).unwrap();
         assert_eq!(ssh_pub, v.public.ssh);
     }
 }

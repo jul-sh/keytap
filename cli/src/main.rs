@@ -112,7 +112,7 @@ fn main() {
         Command::Public { ref name, format } => {
             let prf_output = authenticate(name);
             let raw_key = derive_key(&prf_output);
-            emit_public_key(&raw_key, format);
+            emit_public_key(&raw_key, format, name);
         }
         Command::Reveal { ref name, format } => {
             let prf_output = authenticate(name);
@@ -212,14 +212,16 @@ fn emit_private_key(raw_key: &[u8], format: Format) {
     }
 }
 
-fn emit_public_key(raw_key: &[u8], format: PublicFormat) {
+fn emit_public_key(raw_key: &[u8], format: PublicFormat, name: &str) {
     let pub_format = match format {
         PublicFormat::Hex => PublicKeyFormat::Hex,
         PublicFormat::Base64 => PublicKeyFormat::Base64,
         PublicFormat::Age => PublicKeyFormat::AgeRecipient,
         PublicFormat::Ssh => PublicKeyFormat::SshPublicKey,
     };
-    match keytap_core::format_public_key(raw_key, pub_format) {
+    // The name is only meaningful as the SSH key comment; other formats ignore it.
+    let comment = matches!(format, PublicFormat::Ssh).then_some(name);
+    match keytap_core::format_public_key(raw_key, pub_format, comment) {
         Ok(s) => println!("{s}"),
         Err(e) => die(&format!("format error: {e}")),
     }
