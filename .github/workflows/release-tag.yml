@@ -128,7 +128,7 @@ jobs:
           git fetch origin main
           git checkout main
 
-          VERSION=$(grep '^version' cli/Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+          VERSION="${TAG#v}"
 
           python3 -c "
           import re, sys
