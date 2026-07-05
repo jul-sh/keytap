@@ -1,0 +1,56 @@
+name: README help
+
+# Keep the embedded `keytap --help` block in README.md in sync with the CLI.
+# On push to main it self-heals: regenerate the block and, if it drifted,
+# commit the fix back. On pull requests it only checks (no write access to
+# forks), failing with instructions to run the update script locally.
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "cli/**"
+      - "core/**"
+      - "README.md"
+      - "scripts/update-readme-help.sh"
+      - ".github/workflows/readme-help.yml"
+  pull_request:
+    paths:
+      - "cli/**"
+      - "core/**"
+      - "README.md"
+      - "scripts/update-readme-help.sh"
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      # Pull requests: check only. A stale block fails CI and tells the
+      # contributor how to fix it (we can't push to fork branches).
+      - name: Check README help block is current
+        if: github.event_name == 'pull_request'
+        run: ./scripts/update-readme-help.sh --check
+
+      # main: regenerate and auto-commit the fix if it drifted.
+      - name: Regenerate README help block
+        if: github.event_name == 'push'
+        run: ./scripts/update-readme-help.sh
+
+      - name: Commit fix if stale
+        if: github.event_name == 'push'
+        run: |
+          if git diff --quiet -- README.md; then
+            echo "README help block already up to date."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add README.md
+          git commit -m "docs: sync README help block with keytap --help"
+          git push

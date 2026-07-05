@@ -1,13 +1,20 @@
 mod encrypt;
+mod help;
 mod nearby;
 
-use clap::{Parser, Subcommand, ValueEnum};
-use std::io::Write;
+use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use keytap_core::{PrivateKeyFormat, PublicKeyFormat};
 use zeroize::Zeroizing;
 
 #[derive(Parser)]
-#[command(name = "keytap", version)]
+#[command(
+    name = "keytap",
+    version,
+    about = "Derive keys and encrypt files from a passkey.",
+    // The top-level help is our own generated single-screen overview (see
+    // `main`); clap keeps its default `--help` on each subcommand.
+    disable_help_subcommand = true
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -78,7 +85,6 @@ pub(crate) enum Format {
     Hex,
     Base64,
     Age,
-    Raw,
     Ssh,
 }
 
@@ -91,6 +97,14 @@ pub(crate) enum PublicFormat {
 }
 
 fn main() {
+    // Intercept the top-level help ourselves (bare `keytap`, `keytap -h`,
+    // `keytap --help`, `keytap help`) so it renders our single-screen overview.
+    // Subcommand help (`keytap reveal --help`) still falls through to clap.
+    if wants_top_level_help() {
+        print!("{}", help::overview(&Cli::command()));
+        return;
+    }
+
     let cli = Cli::parse();
 
     match cli.command {
@@ -115,6 +129,17 @@ fn main() {
             let raw_key = derive_key(&prf_output);
             encrypt::decrypt_file(&raw_key, file);
         }
+    }
+}
+
+/// True when the invocation asks for top-level help: no subcommand at all, or
+/// a help token (`-h`/`--help`/`help`) before any subcommand is named.
+fn wants_top_level_help() -> bool {
+    let mut args = std::env::args().skip(1);
+    match args.next().as_deref() {
+        None => true,
+        Some("-h" | "--help" | "help") => true,
+        _ => false,
     }
 }
 
@@ -172,14 +197,12 @@ fn emit_private_key(raw_key: &[u8], format: Format) {
         Format::Hex => PrivateKeyFormat::Hex,
         Format::Base64 => PrivateKeyFormat::Base64,
         Format::Age => PrivateKeyFormat::AgeSecretKey,
-        Format::Raw => PrivateKeyFormat::Raw,
         Format::Ssh => PrivateKeyFormat::SshPrivateKey,
     };
     match keytap_core::format_private_key(raw_key, priv_format) {
         Ok(bytes) => {
-            if matches!(format, Format::Raw) {
-                std::io::stdout().write_all(&bytes).unwrap();
-            } else if matches!(format, Format::Ssh) {
+            // SSH PEM already ends in a newline; others are single-line values.
+            if matches!(format, Format::Ssh) {
                 print!("{}", String::from_utf8(bytes).unwrap());
             } else {
                 println!("{}", String::from_utf8(bytes).unwrap());
