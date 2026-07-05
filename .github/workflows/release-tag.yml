@@ -15,14 +15,13 @@ permissions:
 jobs:
   build-macos:
     if: github.event_name == 'push' || startsWith(github.event.release.tag_name, 'v')
-    runs-on: macos-15
+    # macos-26: compiling the .icon bundle needs Xcode 26's actool AND a
+    # matching OS — its asset runtime agent crashes on macOS 15.
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - uses: cachix/install-nix-action@51f3067b56fe8ae331890c77d4e454f6d60615ff # v31
-
-      - name: Select newest Xcode (actool needs >= 26 to compile .icon)
-        run: sudo xcode-select -s "$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)"
 
       - name: Build, sign, notarize, and package
         id: package
@@ -129,7 +128,7 @@ jobs:
           git fetch origin main
           git checkout main
 
-          VERSION=$(grep '^version' cli/Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+          VERSION="${TAG#v}"
 
           python3 -c "
           import re, sys
