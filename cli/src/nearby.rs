@@ -16,7 +16,9 @@ const WS_TIMEOUT_SECS: u64 = 300; // 5 minutes
 /// Authenticate via nearby device and return the PRF output.
 pub fn authenticate_nearby(name: &str) -> Vec<u8> {
     let (_credential_id, prf_first) = run_nearby_flow("assert", name);
-    prf_first
+    prf_first.unwrap_or_else(|| {
+        crate::die("passkey provider did not return PRF output — it may not support the PRF extension");
+    })
 }
 
 /// Register a passkey via nearby device.
@@ -25,7 +27,7 @@ pub fn register_nearby() {
     eprintln!("Passkey registered successfully via nearby device.");
 }
 
-fn run_nearby_flow(operation: &str, name: &str) -> (Vec<u8>, Vec<u8>) {
+fn run_nearby_flow(operation: &str, name: &str) -> (Vec<u8>, Option<Vec<u8>>) {
     // Install rustls crypto provider
     rustls::crypto::ring::default_provider()
         .install_default()
@@ -207,7 +209,7 @@ fn decrypt_response(
     cli_secret: EphemeralSecret,
     response: &RelayResponse,
     session_id: &str,
-) -> (Vec<u8>, Vec<u8>) {
+) -> (Vec<u8>, Option<Vec<u8>>) {
     let phone_pk_bytes: [u8; 32] = response.phone_pk[..].try_into().unwrap_or_else(|_| {
         crate::die("phone public key must be 32 bytes");
     });
@@ -241,7 +243,9 @@ fn decrypt_response(
         .decode(cred_id_b64)
         .unwrap_or_else(|e| crate::die(&format!("invalid credentialId: {e}")));
 
-    let prf_first = if let Some(prf_b64) = payload["prfFirst"].as_str() {
+    // Registration responses carry no PRF output; assertions must. The caller
+    // enforces presence so this stays a pure protocol decoder.
+    let prf_first = payload["prfFirst"].as_str().map(|prf_b64| {
         let decoded = URL_SAFE_NO_PAD
             .decode(prf_b64)
             .unwrap_or_else(|e| crate::die(&format!("invalid prfFirst: {e}")));
@@ -249,9 +253,7 @@ fn decrypt_response(
             crate::die("passkey provider returned empty PRF output — it may not support the PRF extension");
         }
         decoded
-    } else {
-        crate::die("passkey provider did not return PRF output — it may not support the PRF extension");
-    };
+    });
 
     (credential_id, prf_first)
 }
