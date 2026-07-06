@@ -15,4 +15,5 @@ jobs:
       - name: Run tests
         run: |
           cargo test -p keytap-core
+          cargo test -p keytap --no-default-features --bins
           cargo test -p keytap --no-default-features --test e2e_crypto

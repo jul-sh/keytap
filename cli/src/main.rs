@@ -1,6 +1,7 @@
 mod encrypt;
 mod help;
 mod nearby;
+mod session;
 
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use keytap_core::{PrivateKeyFormat, PublicKeyFormat};
@@ -40,7 +41,7 @@ enum Command {
     },
 
     /// Reveal private key material
-    #[command(after_help = help::REUSE)]
+    #[command(after_help = help::SESSIONS)]
     Reveal {
         /// Key name for domain separation
         #[arg(default_value = "default")]
@@ -92,6 +93,13 @@ enum Command {
         #[arg(long, default_value = "default")]
         key: String,
     },
+
+    /// End a key's session (the next use prompts again)
+    Forget {
+        /// Key name for domain separation
+        #[arg(default_value = "default")]
+        name: String,
+    },
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -124,30 +132,45 @@ fn main() {
     match cli.command {
         Command::Init => register(),
         Command::Public { ref name, format } => {
-            let prf_output = authenticate(name);
-            let raw_key = derive_key(&prf_output);
+            let raw_key = obtain_key(name);
             emit_public_key(&raw_key, format, name);
         }
         Command::Reveal { ref name, format } => {
-            let prf_output = authenticate(name);
-            let raw_key = derive_key(&prf_output);
+            let raw_key = obtain_key(name);
             emit_private_key(&raw_key, format);
         }
         Command::Encrypt { ref file, ref output, ref key, ref recipients, ref recipients_file, no_self } => {
             // Validate flags BEFORE authenticating so a bad invocation fails fast
             // instead of after a Touch ID / phone approval.
             encrypt::validate_io(file, output.as_deref());
-            let prf_output = authenticate(key);
-            let raw_key = derive_key(&prf_output);
+            let raw_key = obtain_key(key);
             encrypt::encrypt(&raw_key, file, output.as_deref(), recipients, recipients_file, !no_self);
         }
         Command::Decrypt { ref file, ref output, ref key } => {
             encrypt::validate_io(file, output.as_deref());
-            let prf_output = authenticate(key);
-            let raw_key = derive_key(&prf_output);
+            let raw_key = obtain_key(key);
             encrypt::decrypt(&raw_key, file, output.as_deref());
         }
+        Command::Forget { ref name } => match session::forget(name) {
+            Ok(true) => eprintln!("Session for '{name}' ended."),
+            Ok(false) => eprintln!("No session for '{name}'."),
+            Err(e) => die(&format!("couldn't end the session for '{name}': {e}")),
+        },
     }
+}
+
+/// The raw key for `name`: from a live session when one exists, else via a
+/// passkey ceremony (starting a session unless KEYTAP_SESSION=off). Safe to
+/// serve from the session because derivation is deterministic — a hit is
+/// byte-identical to a fresh ceremony.
+fn obtain_key(name: &str) -> Zeroizing<Vec<u8>> {
+    if let Some(raw_key) = session::load(name) {
+        return raw_key;
+    }
+    let prf_output = authenticate(name);
+    let raw_key = derive_key(&prf_output);
+    session::store(name, &raw_key);
+    raw_key
 }
 
 /// True when the invocation asks for top-level help: no subcommand at all, or

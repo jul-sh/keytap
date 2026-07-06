@@ -32,6 +32,7 @@ Commands
   reveal [NAME] [--as VAL]                                       Reveal private key material
   encrypt [FILE] [--output VAL] [--key VAL] [--to VAL] [-R VAL]  Encrypt with the derived age identity (stdin/stdout by default)
   decrypt [FILE] [--output VAL] [--key VAL]                      Decrypt an age file with the derived age identity (stdin/stdout by default)
+  forget [NAME]                                                  End a key's session (the next use prompts again)
 
 Arguments & options
   NAME          Key name for domain separation  [default: default]
@@ -42,7 +43,8 @@ Arguments & options
   --to VAL      Additional age recipient (can be repeated)
   -R VAL        File containing age recipients (one per line)
 
-Reusing a key without re-authenticating each time: see `keytap reveal --help`.
+Sessions: a key's first use holds it in your OS keychain for 12h (like sudo),
+so repeat uses don't re-prompt. Details and controls: `keytap reveal --help`.
 Run `keytap <COMMAND> --help` for the full details of any command.
 ```
 <!--HELP:END-->
@@ -147,7 +149,7 @@ keytap ties all derived keys to a single passkey registered under the `keytap.ju
 
 With that said, here is how keytap works within those constraints:
 
-- keytap does not sync or cache derived keys. It derives on demand, writes to stdout, and exits. There are no local config files or cached state.
+- keytap does not sync derived keys and has no config files or state of its own. By default it holds each derived key in your OS keychain for a 12-hour [session](#sessions) so repeat use doesn't re-prompt; `KEYTAP_SESSION=off` restores zero persistence, and `keytap forget NAME` ends a session early.
 - If you save the output, pipe it into another tool, or import it into an agent, that destination now holds the key and must be trusted accordingly.
 - The PRF inputs are public and derived from the key name. They provide stable derivation and domain separation, not secrecy.
 - Replacing the registered passkey changes every key derived from it. Treat the passkey as the root of your derived identities.
@@ -161,16 +163,44 @@ When keytap authenticates via your phone, additional trust considerations apply:
 
 ## Sessions
 
-`keytap` derives keys on demand and **never caches** them. That keeps the tool
-simple and leaves nothing sensitive at rest — but it means each derivation costs
-one passkey authentication. When you need to reuse a key without re-authenticating,
-don't reach for a keytap daemon (there isn't one, by design): hand the derived key
-to a **standard agent or keychain** and let *it* hold the key.
+The first use of a key name runs the passkey ceremony, then holds the derived
+key in your **OS keychain** for 12 hours — like `sudo` remembering your
+password. Repeat uses of that name, across commands and shells, are silent
+until the session expires or you end it:
+
+```bash
+keytap reveal deploy                # passkey prompt; 12h session starts
+keytap reveal deploy                # silent
+keytap encrypt *.env --key deploy   # still silent
+keytap forget deploy                # session over; next use prompts again
+```
+
+A session hit is byte-identical to a fresh derivation — keys are deterministic,
+so holding one can never change what you get, only whether you're prompted.
+
+Control the window with `KEYTAP_SESSION`:
+
+```bash
+export KEYTAP_SESSION=30m                 # shorter sessions
+KEYTAP_SESSION=off keytap reveal deploy   # hold nothing (a prompt per derivation)
+```
+
+**The trade, stated plainly:** while a session is live, any process running as
+your user can read that key by invoking keytap — the same trade `sudo` makes
+during its grace period. The held key lives in your OS keychain (service
+`keytap`, account = key name), encrypted at rest and visible in Keychain
+Access / seahorse; other apps reading the entry directly still hit the
+keychain's own ACL prompt. If that trade is wrong for a key, run
+`keytap forget NAME` right after use, or set `KEYTAP_SESSION=off`.
+
+On Linux, sessions need `secret-tool` (package `libsecret-tools`) and a running
+secret service; without one, keytap silently falls back to a ceremony per
+derivation.
 
 ### SSH: pipe into `ssh-agent`
 
-For many SSH connections, load the derived key into `ssh-agent` once. Every
-`ssh` afterward is silent until the (optional) TTL expires:
+For SSH connections, `ssh-agent` is still the better holder — it was built for
+exactly this job, with its own timeout and hardening:
 
 ```bash
 eval "$(ssh-agent -s)"
@@ -178,41 +208,8 @@ keytap reveal ha --as ssh | ssh-add -t 900 -   # one auth, 15-minute hold
 # ssh … ssh …  → no prompts
 ```
 
-This is the intended path for repeated SSH — keytap produces the key, `ssh-agent`
-holds it. There is deliberately no `keytap ssh` command; `ssh-agent` already does
-that job, with better hardening.
-
-### A secret reused within one script
-
-Bind it to a shell variable for the process lifetime — one auth, no persistence:
-
-```bash
-KEY=$(keytap reveal deploy --as hex)
-use "$KEY"; use "$KEY"
-unset KEY
-```
-
-### A secret reused across shells: the OS keychain
-
-For arbitrary secrets (API tokens, `age` keys) that outlive one process, the OS
-keychain is the right holder — it enforces ACLs keytap can't. Write through
-stdin (never argv, which is visible in the process list), under service
-`keytap` with the key name as the account so entries stay recognizable:
-
-```bash
-# macOS (`security -i` reads the command from stdin)
-security -i <<<"add-generic-password -U -s keytap -a deploy -w $(keytap reveal deploy --as age)"
-security find-generic-password -s keytap -a deploy -w        # read back
-
-# Linux (libsecret)
-keytap reveal deploy --as age | secret-tool store --label=keytap service keytap key deploy
-secret-tool lookup service keytap key deploy                 # read back
-```
-
-This trades keytap's zero-persistence for a larger footprint — an explicit,
-auditable one, in a store designed to hold secrets.
-
-Whatever you pipe into now holds the key, and must be trusted accordingly.
+There is deliberately no `keytap ssh` command; `ssh-agent` already does that
+job better.
 
 ## Tips
 
