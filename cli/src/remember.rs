@@ -89,15 +89,21 @@ pub struct WriteTarget {
 /// silently upgraded to the OS keychain when this machine has one. The
 /// success message reports which of the two actually holds the key.
 pub fn write_target() -> WriteTarget {
+    resolve_write_target().unwrap_or_else(|e| crate::die(&e.to_string()))
+}
+
+fn resolve_write_target() -> Result<WriteTarget, KeychainError> {
     match keychain::open() {
-        Ok(kc) => WriteTarget { store: Box::new(kc), location: "the OS keychain".to_string() },
-        Err(_) => match keychain::file::open_default() {
-            Ok(store) => WriteTarget {
+        Ok(kc) => {
+            Ok(WriteTarget { store: Box::new(kc), location: "the OS keychain".to_string() })
+        }
+        Err(_) => {
+            let store = keychain::file::open_default()?;
+            Ok(WriteTarget {
                 location: format!("{} (a plain file, not encrypted at rest)", store.path().display()),
                 store: Box::new(store),
-            },
-            Err(e) => crate::die(&e.to_string()),
-        },
+            })
+        }
     }
 }
 
@@ -117,6 +123,36 @@ pub fn remember(target: &mut WriteTarget, name: &str, credential_id: &[u8], raw_
              root (that clears existing remembered keys)",
         ),
         Err(e) => crate::die(&e.to_string()),
+    }
+}
+
+/// Honor a remember opt-in that arrived with a nearby assertion (the user
+/// ticked the checkbox on the phone page). Unlike `keytap remember`, storing
+/// is best-effort: the command's real job is the key it just derived, so
+/// trouble remembering warns and the command carries on.
+pub fn remember_requested_nearby(name: &str, credential_id: &[u8], raw_key: &[u8]) {
+    let could_not = |why: &str| {
+        eprintln!(
+            "warning: you asked on your phone to remember '{name}' on this machine, but {why}"
+        );
+    };
+    let mut target = match resolve_write_target() {
+        Ok(target) => target,
+        Err(e) => return could_not(&e.to_string()),
+    };
+    match remember_in(target.store.as_mut(), name, credential_id, raw_key) {
+        Ok(RememberOutcome::Stored) => eprintln!(
+            "Remembered '{name}' in {location}, as requested on your phone. Future keytap \
+             commands for this name will not prompt until you run `keytap forget {name}` or \
+             replace the passkey.",
+            location = target.location
+        ),
+        Ok(RememberOutcome::RootMismatch) => could_not(
+            "the passkey you just used is not this machine's active keytap root, so the stored \
+             key would never be used. Run `keytap init` to make this passkey the root (that \
+             clears existing remembered keys)",
+        ),
+        Err(e) => could_not(&e.to_string()),
     }
 }
 

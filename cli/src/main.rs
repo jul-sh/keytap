@@ -167,7 +167,7 @@ fn main() {
                 die(&e.to_string());
             }
             let mut target = remember::write_target();
-            let assertion = authenticate(name);
+            let assertion = authenticate(name, SUPPRESS_REMEMBER);
             let raw_key = derive_key(&assertion.prf_output);
             remember::remember(&mut target, name, &assertion.credential_id, &raw_key);
         }
@@ -184,12 +184,19 @@ fn main() {
 
 /// Resolve the raw key for `name`: a key remembered on this machine (under
 /// the active passkey root) is used as-is; otherwise run the passkey ceremony
-/// and derive on demand, storing nothing.
+/// and derive on demand. Nothing is stored unless the user opted in on the
+/// nearby page ("remember this key on this machine"); that request arrives
+/// with the assertion and is honored here, best-effort.
 fn obtain_key(name: &str) -> Zeroizing<Vec<u8>> {
     if let Some(raw_key) = remember::lookup(name) {
         return raw_key;
     }
-    derive_key(&authenticate(name).prf_output)
+    let assertion = authenticate(name, OFFER_REMEMBER);
+    let raw_key = derive_key(&assertion.prf_output);
+    if assertion.remember_requested {
+        remember::remember_requested_nearby(name, &assertion.credential_id, &raw_key);
+    }
+    raw_key
 }
 
 /// True when the invocation asks for top-level help: no subcommand at all, or
@@ -203,41 +210,61 @@ fn wants_top_level_help() -> bool {
     }
 }
 
+/// Values for `authenticate`'s `offer_remember`, named so call sites read as
+/// policy: derivation commands offer the nearby page's remember checkbox;
+/// `keytap remember` suppresses it (that command already stores the key).
+const OFFER_REMEMBER: bool = true;
+const SUPPRESS_REMEMBER: bool = false;
+
 /// A completed passkey ceremony: the PRF output plus the ID of the credential
 /// that produced it (the latter identifies the root for remembered keys).
 struct Assertion {
     prf_output: Zeroizing<Vec<u8>>,
     credential_id: Vec<u8>,
+    /// The user ticked "remember this key on this machine" on the nearby
+    /// page. Never set by the native flow, which has no such control.
+    remember_requested: bool,
 }
 
 impl Assertion {
-    fn new(prf_output: Vec<u8>, credential_id: Vec<u8>) -> Self {
-        Assertion { prf_output: Zeroizing::new(prf_output), credential_id }
+    #[cfg(feature = "native-passkey")]
+    fn native(prf_output: Vec<u8>, credential_id: Vec<u8>) -> Self {
+        Assertion {
+            prf_output: Zeroizing::new(prf_output),
+            credential_id,
+            remember_requested: false,
+        }
+    }
+
+    fn nearby(assertion: nearby::NearbyAssertion) -> Self {
+        Assertion {
+            prf_output: Zeroizing::new(assertion.prf_output),
+            credential_id: assertion.credential_id,
+            remember_requested: assertion.remember_requested,
+        }
     }
 }
 
 /// Authenticate with a passkey ceremony.
 #[cfg(feature = "native-passkey")]
-fn authenticate(name: &str) -> Assertion {
+fn authenticate(name: &str, offer_remember: bool) -> Assertion {
     match keytap_macos::assert(name) {
         keytap_macos::AssertionOutcome::Success { prf_output, credential_id } => {
-            Assertion::new(prf_output, credential_id)
+            Assertion::native(prf_output, credential_id)
         }
         keytap_macos::AssertionOutcome::Error(msg) if msg == "cancelled" => {
             die(&msg);
         }
         keytap_macos::AssertionOutcome::Error(msg) => {
             eprintln!("Couldn't open native passkey flow: {msg}");
-            let (prf_output, credential_id) = nearby::authenticate_nearby(name);
-            Assertion::new(prf_output, credential_id)
+            Assertion::nearby(nearby::authenticate_nearby(name, offer_remember))
         }
     }
 }
 
 #[cfg(not(feature = "native-passkey"))]
-fn authenticate(name: &str) -> Assertion {
-    let (prf_output, credential_id) = nearby::authenticate_nearby(name);
-    Assertion::new(prf_output, credential_id)
+fn authenticate(name: &str, offer_remember: bool) -> Assertion {
+    Assertion::nearby(nearby::authenticate_nearby(name, offer_remember))
 }
 
 fn derive_key(prf_output: &[u8]) -> Zeroizing<Vec<u8>> {
