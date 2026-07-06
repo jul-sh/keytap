@@ -125,7 +125,7 @@ mod platform {
 #[cfg(target_os = "linux")]
 mod platform {
     use super::{Keychain, KeychainError, SERVICE};
-    use dbus_secret_service::{EncryptionType, Item, SecretService};
+    use dbus_secret_service::{Collection, EncryptionType, Item, SecretService};
     use std::collections::HashMap;
     use zeroize::Zeroizing;
 
@@ -148,22 +148,33 @@ mod platform {
     }
 
     impl LinuxKeychain {
-        /// Items in the default collection matching our service attribute,
-        /// optionally narrowed to one account.
-        fn search(&self, account: Option<&str>) -> Result<Vec<Item<'_>>, KeychainError> {
+        /// The default collection, unlocked. Items searched out of it borrow
+        /// it, so each operation opens the collection and finishes with it in
+        /// the same scope.
+        fn collection(&self) -> Result<Collection<'_>, KeychainError> {
             let collection = self.service.get_default_collection().map_err(backend_err)?;
             collection.ensure_unlocked().map_err(backend_err)?;
-            let mut attributes = HashMap::from([("service", SERVICE)]);
-            if let Some(account) = account {
-                attributes.insert("account", account);
-            }
-            collection.search_items(attributes).map_err(backend_err)
+            Ok(collection)
         }
+    }
+
+    /// Items in `collection` carrying our service attribute, optionally
+    /// narrowed to one account.
+    fn find<'c>(
+        collection: &'c Collection<'_>,
+        account: Option<&str>,
+    ) -> Result<Vec<Item<'c>>, KeychainError> {
+        let mut attributes = HashMap::from([("service", SERVICE)]);
+        if let Some(account) = account {
+            attributes.insert("account", account);
+        }
+        collection.search_items(attributes).map_err(backend_err)
     }
 
     impl Keychain for LinuxKeychain {
         fn get(&self, account: &str) -> Result<Option<Zeroizing<Vec<u8>>>, KeychainError> {
-            match self.search(Some(account))?.first() {
+            let collection = self.collection()?;
+            match find(&collection, Some(account))?.first() {
                 Some(item) => {
                     item.ensure_unlocked().map_err(backend_err)?;
                     Ok(Some(Zeroizing::new(item.get_secret().map_err(backend_err)?)))
@@ -173,10 +184,8 @@ mod platform {
         }
 
         fn set(&mut self, account: &str, value: &[u8]) -> Result<(), KeychainError> {
-            let collection = self.service.get_default_collection().map_err(backend_err)?;
-            collection.ensure_unlocked().map_err(backend_err)?;
             let attributes = HashMap::from([("service", SERVICE), ("account", account)]);
-            collection
+            self.collection()?
                 .create_item(
                     &format!("{SERVICE}: {account}"),
                     attributes,
@@ -189,7 +198,8 @@ mod platform {
         }
 
         fn delete(&mut self, account: &str) -> Result<bool, KeychainError> {
-            let items = self.search(Some(account))?;
+            let collection = self.collection()?;
+            let items = find(&collection, Some(account))?;
             let existed = !items.is_empty();
             for item in items {
                 item.delete().map_err(backend_err)?;
@@ -200,8 +210,8 @@ mod platform {
         fn accounts(&self) -> Result<Vec<String>, KeychainError> {
             // User-managed entries under the same service (e.g. the README's
             // secret-tool recipe) may lack an `account` attribute; skip them.
-            Ok(self
-                .search(None)?
+            let collection = self.collection()?;
+            Ok(find(&collection, None)?
                 .iter()
                 .filter_map(|item| item.get_attributes().ok())
                 .filter_map(|attrs| attrs.get("account").cloned())
