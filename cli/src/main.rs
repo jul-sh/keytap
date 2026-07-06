@@ -53,16 +53,8 @@ enum Command {
         format: Format,
     },
 
-    /// Encrypt with the derived age identity (stdin/stdout by default)
+    /// Encrypt stdin to stdout with the derived age identity
     Encrypt {
-        /// Files to encrypt ('-' or omitted = stdin). Multiple files are each
-        /// written to `<file>.age` (one authentication for the whole batch).
-        file: Vec<String>,
-
-        /// Write ciphertext here ('-' = stdout). Only valid with a single input.
-        #[arg(short = 'o', long = "output")]
-        output: Option<String>,
-
         /// Key name for domain separation
         #[arg(long, default_value = "default")]
         key: String,
@@ -80,16 +72,8 @@ enum Command {
         no_self: bool,
     },
 
-    /// Decrypt an age file with the derived age identity (stdin/stdout by default)
+    /// Decrypt age input from stdin to stdout with the derived age identity
     Decrypt {
-        /// Files to decrypt ('-' or omitted = stdin). Multiple files each have
-        /// their `.age` suffix stripped for output (one authentication).
-        file: Vec<String>,
-
-        /// Write plaintext here ('-' = stdout). Only valid with a single input.
-        #[arg(short = 'o', long = "output")]
-        output: Option<String>,
-
         /// Key name for domain separation
         #[arg(long, default_value = "default")]
         key: String,
@@ -158,17 +142,13 @@ fn main() {
             let raw_key = obtain_key(name);
             emit_private_key(&raw_key, format);
         }
-        Command::Encrypt { ref file, ref output, ref key, ref recipients, ref recipients_file, no_self } => {
-            // Validate flags BEFORE authenticating so a bad invocation fails fast
-            // instead of after a Touch ID / phone approval.
-            encrypt::validate_io(file, output.as_deref());
+        Command::Encrypt { ref key, ref recipients, ref recipients_file, no_self } => {
             let raw_key = obtain_key(key);
-            encrypt::encrypt(&raw_key, file, output.as_deref(), recipients, recipients_file, !no_self);
+            encrypt::encrypt(&raw_key, recipients, recipients_file, !no_self);
         }
-        Command::Decrypt { ref file, ref output, ref key } => {
-            encrypt::validate_io(file, output.as_deref());
+        Command::Decrypt { ref key } => {
             let raw_key = obtain_key(key);
-            encrypt::decrypt(&raw_key, file, output.as_deref());
+            encrypt::decrypt(&raw_key);
         }
         Command::Remember { ref name } => {
             // Fail fast on names derivation would reject, and on machines

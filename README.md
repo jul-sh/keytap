@@ -11,7 +11,7 @@ From that root, it can deterministically derive:
 - an SSH keypair
 - a 32-byte app secret
 
-It can also use the derived `age` identity directly to encrypt and decrypt files.
+It can also use the derived `age` identity directly to encrypt and decrypt data (stdin to stdout; point the shell at files).
 
 The mental model is simple:
 
@@ -27,24 +27,22 @@ Derive keys and encrypt files from a passkey.
 Usage: keytap <COMMAND> [ARGS]
 
 Commands
-  init                                                           Create the passkey (only needed once)
-  public [NAME] [--as VAL]                                       Output the public key
-  reveal [NAME] [--as VAL]                                       Reveal private key material
-  encrypt [FILE] [--output VAL] [--key VAL] [--to VAL] [-R VAL]  Encrypt with the derived age identity (stdin/stdout by default)
-  decrypt [FILE] [--output VAL] [--key VAL]                      Decrypt an age file with the derived age identity (stdin/stdout by default)
-  remember [NAME]                                                Remember a derived key on this machine (no more prompts for it)
-  forget [NAME] [--all]                                          Forget a remembered key
-  remembered                                                     List keys remembered on this machine (never prints key material)
+  init                                     Create the passkey (only needed once)
+  public [NAME] [--as VAL]                 Output the public key
+  reveal [NAME] [--as VAL]                 Reveal private key material
+  encrypt [--key VAL] [--to VAL] [-R VAL]  Encrypt stdin to stdout with the derived age identity
+  decrypt [--key VAL]                      Decrypt age input from stdin to stdout with the derived age identity
+  remember [NAME]                          Remember a derived key on this machine (no more prompts for it)
+  forget [NAME] [--all]                    Forget a remembered key
+  remembered                               List keys remembered on this machine (never prints key material)
 
 Arguments & options
-  NAME          Key name for domain separation  [default: default]
-  --as VAL      Output format  (hex | base64 | age | ssh)  [default: hex]
-  FILE          Files to encrypt ('-' or omitted = stdin). Multiple files are each written to `<file>.age` (one authentication for the whole batch)
-  --output VAL  Write ciphertext here ('-' = stdout). Only valid with a single input
-  --key VAL     Key name for domain separation  [default: default]
-  --to VAL      Additional age recipient (can be repeated)
-  -R VAL        File containing age recipients (one per line)
-  --all         Forget every remembered key, including ones from previous passkeys
+  NAME       Key name for domain separation  [default: default]
+  --as VAL   Output format  (hex | base64 | age | ssh)  [default: hex]
+  --key VAL  Key name for domain separation  [default: default]
+  --to VAL   Additional age recipient (can be repeated)
+  -R VAL     File containing age recipients (one per line)
+  --all      Forget every remembered key, including ones from previous passkeys
 
 Skip repeated prompts for a key: `keytap remember NAME` (see `keytap remember --help`).
 Holds that expire instead (ssh-agent, TTLs): see `keytap reveal --help`.
@@ -243,16 +241,18 @@ Whatever holds the key must be trusted accordingly.
 
 ## Tips
 
-### Streaming and batching
+### Streaming
 
-`encrypt`/`decrypt` read stdin and write stdout by default, so they compose in
-pipelines with no plaintext temp files, at any size:
+`encrypt`/`decrypt` are pure filters: stdin in, stdout out, streamed at any
+size. Files are the shell's job, so pipelines never need plaintext temp files:
 
 ```bash
 printf '%s' "$SECRET" | keytap encrypt --key backup > secret.age   # stdin → stdout
-keytap decrypt secret.age --key backup -o >(load-into-env)          # → a consumer, no temp file
-keytap encrypt *.env --key backup                                   # batch: one auth, each → <file>.age
+keytap decrypt --key backup < secret.age | load-into-env           # → a consumer, no temp file
 ```
+
+(Older keytaps had a multi-file batch mode to amortize one ceremony across
+many files; `keytap remember` made that redundant, so v6 removed it.)
 
 ### Use with the `age` CLI
 
