@@ -56,8 +56,8 @@ enum Command {
     /// Encrypt stdin to stdout with the derived age identity
     Encrypt {
         /// Key name for domain separation
-        #[arg(long, default_value = "default")]
-        key: String,
+        #[arg(default_value = "default")]
+        name: String,
 
         /// Additional age recipient (can be repeated)
         #[arg(long = "to")]
@@ -75,8 +75,8 @@ enum Command {
     /// Decrypt age input from stdin to stdout with the derived age identity
     Decrypt {
         /// Key name for domain separation
-        #[arg(long, default_value = "default")]
-        key: String,
+        #[arg(default_value = "default")]
+        name: String,
     },
 
     /// Remember a derived key on this machine (no more prompts for it)
@@ -142,12 +142,12 @@ fn main() {
             let raw_key = obtain_key(name);
             emit_private_key(&raw_key, format);
         }
-        Command::Encrypt { ref key, ref recipients, ref recipients_file, no_self } => {
-            let raw_key = obtain_key(key);
+        Command::Encrypt { ref name, ref recipients, ref recipients_file, no_self } => {
+            let raw_key = obtain_key(name);
             encrypt::encrypt(&raw_key, recipients, recipients_file, !no_self);
         }
-        Command::Decrypt { ref key } => {
-            let raw_key = obtain_key(key);
+        Command::Decrypt { ref name } => {
+            let raw_key = obtain_key(name);
             encrypt::decrypt(&raw_key);
         }
         Command::Remember { ref name } => {

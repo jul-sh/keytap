@@ -27,22 +27,21 @@ Derive keys and encrypt files from a passkey.
 Usage: keytap <COMMAND> [ARGS]
 
 Commands
-  init                                     Create the passkey (only needed once)
-  public [NAME] [--as VAL]                 Output the public key
-  reveal [NAME] [--as VAL]                 Reveal private key material
-  encrypt [--key VAL] [--to VAL] [-R VAL]  Encrypt stdin to stdout with the derived age identity
-  decrypt [--key VAL]                      Decrypt age input from stdin to stdout with the derived age identity
-  remember [NAME]                          Remember a derived key on this machine (no more prompts for it)
-  forget [NAME] [--all]                    Forget a remembered key
-  remembered                               List keys remembered on this machine (never prints key material)
+  init                                Create the passkey (only needed once)
+  public [NAME] [--as VAL]            Output the public key
+  reveal [NAME] [--as VAL]            Reveal private key material
+  encrypt [NAME] [--to VAL] [-R VAL]  Encrypt stdin to stdout with the derived age identity
+  decrypt [NAME]                      Decrypt age input from stdin to stdout with the derived age identity
+  remember [NAME]                     Remember a derived key on this machine (no more prompts for it)
+  forget [NAME] [--all]               Forget a remembered key
+  remembered                          List keys remembered on this machine (never prints key material)
 
 Arguments & options
-  NAME       Key name for domain separation  [default: default]
-  --as VAL   Output format  (hex | base64 | age | ssh)  [default: hex]
-  --key VAL  Key name for domain separation  [default: default]
-  --to VAL   Additional age recipient (can be repeated)
-  -R VAL     File containing age recipients (one per line)
-  --all      Forget every remembered key, including ones from previous passkeys
+  NAME      Key name for domain separation  [default: default]
+  --as VAL  Output format  (hex | base64 | age | ssh)  [default: hex]
+  --to VAL  Additional age recipient (can be repeated)
+  -R VAL    File containing age recipients (one per line)
+  --all     Forget every remembered key, including ones from previous passkeys
 
 Skip repeated prompts for a key: `keytap remember NAME` (see `keytap remember --help`).
 Holds that expire instead (ssh-agent, TTLs): see `keytap reveal --help`.
@@ -247,8 +246,8 @@ Whatever holds the key must be trusted accordingly.
 size. Files are the shell's job, so pipelines never need plaintext temp files:
 
 ```bash
-printf '%s' "$SECRET" | keytap encrypt --key backup > secret.age   # stdin → stdout
-keytap decrypt --key backup < secret.age | load-into-env           # → a consumer, no temp file
+printf '%s' "$SECRET" | keytap encrypt backup > secret.age   # stdin → stdout
+keytap decrypt backup < secret.age | load-into-env           # → a consumer, no temp file
 ```
 
 (Older keytaps had a multi-file batch mode to amortize one ceremony across
