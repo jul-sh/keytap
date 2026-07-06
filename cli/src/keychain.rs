@@ -253,6 +253,39 @@ mod platform {
     }
 }
 
+/// Live test against the real platform keychain: the full trait surface,
+/// round-tripped through the actual backend. Ignored by default because it
+/// needs a live store and writes to it (under a test-only account it cleans
+/// up). CI runs it on Linux inside `dbus-run-session` with an unlocked GNOME
+/// Keyring; on macOS run it manually with
+/// `cargo test -p keytap --bins -- --ignored`.
+#[cfg(test)]
+mod live_tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "needs a live OS keychain"]
+    fn platform_backend_round_trip() {
+        let mut kc = open().expect("open platform keychain");
+        let account = "remember:live-test-root:round-trip";
+
+        kc.set(account, b"keytap-remember-v1:aa").unwrap();
+        assert_eq!(&kc.get(account).unwrap().unwrap()[..], b"keytap-remember-v1:aa");
+
+        // Setting again overwrites in place.
+        kc.set(account, b"keytap-remember-v1:bb").unwrap();
+        assert_eq!(&kc.get(account).unwrap().unwrap()[..], b"keytap-remember-v1:bb");
+
+        // Enumeration sees the entry.
+        assert!(kc.accounts().unwrap().contains(&account.to_string()));
+
+        // Deletion reports existence exactly once, then reads miss.
+        assert!(kc.delete(account).unwrap());
+        assert!(!kc.delete(account).unwrap());
+        assert!(kc.get(account).unwrap().is_none());
+    }
+}
+
 /// In-memory store for exercising `remember.rs` logic without a real keychain.
 #[cfg(test)]
 pub mod memory {

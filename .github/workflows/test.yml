@@ -16,3 +16,14 @@ jobs:
         run: |
           cargo test -p keytap-core
           cargo test -p keytap --no-default-features --bins --test e2e_crypto
+
+      # Remembered keys: exercise the real Secret Service backend against a
+      # live GNOME Keyring inside an isolated D-Bus session.
+      - name: Live Secret Service test
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gnome-keyring
+          dbus-run-session -- bash -c '
+            echo -n "ci" | gnome-keyring-daemon --unlock --components=secrets
+            cargo test -p keytap --no-default-features --bins -- --ignored
+          '
