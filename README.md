@@ -32,7 +32,7 @@ Commands
   reveal [NAME] [--as VAL]            Reveal private key material
   encrypt [NAME] [--to VAL] [-R VAL]  Encrypt stdin to stdout with the derived age identity
   decrypt [NAME]                      Decrypt age input from stdin to stdout with the derived age identity
-  remember [NAME]                     Remember a derived key on this machine (no more prompts for it)
+  remember NAME                       Remember a derived key on this machine (no more prompts for it)
   forget [NAME] [--all]               Forget a remembered key
   remembered                          List keys remembered on this machine (never prints key material)
 

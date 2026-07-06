@@ -82,8 +82,8 @@ enum Command {
     /// Remember a derived key on this machine (no more prompts for it)
     #[command(after_help = help::REMEMBER)]
     Remember {
-        /// Key name for domain separation
-        #[arg(default_value = "default")]
+        /// Key name for domain separation. Required: persisting a key should
+        /// name it deliberately, never land on 'default' by accident.
         name: String,
     },
 
@@ -125,6 +125,16 @@ fn main() {
     if wants_top_level_help() {
         print!("{}", help::overview(&Cli::command()));
         return;
+    }
+
+    // `remember` requires an explicit name (persisting a key should never
+    // target 'default' by accident), but the bare invocation deserves a
+    // better answer than clap's generic missing-argument error.
+    if std::env::args().skip(1).eq(["remember"]) {
+        die(
+            "`keytap remember` needs a key name. Did you mean `keytap remember default`? \
+             ('default' is the key every other command uses when you don't give a name)",
+        );
     }
 
     let cli = Cli::parse();
