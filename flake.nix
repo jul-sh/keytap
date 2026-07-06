@@ -16,12 +16,12 @@
         # Updated automatically by the release workflow
         releases = {
           aarch64-darwin = {
-            url = "https://github.com/jul-sh/keytap/releases/download/v4.2.1/keytap-v4.2.1-arm64.zip";
-            hash = "sha256-8kESXFm9EKxE8wQaQCz3nr3aLLe6gmCj4ZKNet6dCps=";
+            url = "https://github.com/jul-sh/keytap/releases/download/v4.2.2/keytap-v4.2.2-arm64.zip";
+            hash = "sha256-CvGlylMeK3dwPU1MH4xHaOBrrR09hBHLT9aBLAhoFf4=";
           };
           x86_64-linux = {
-            url = "https://github.com/jul-sh/keytap/releases/download/v4.2.1/keytap-v4.2.1-linux-x86_64.zip";
-            hash = "sha256-Fqk0jb+0XWsoa332SakdgtlP10cKr6CumUP/QHx0SVA=";
+            url = "https://github.com/jul-sh/keytap/releases/download/v4.2.2/keytap-v4.2.2-linux-x86_64.zip";
+            hash = "sha256-CtUA6wtdo8PJALYwggh0IFzBhjgG/RuGC/K2XJNcMcA=";
           };
         };
       in
@@ -29,7 +29,7 @@
         packages = pkgs.lib.optionalAttrs (builtins.hasAttr system releases) {
           default = pkgs.stdenv.mkDerivation {
             pname = "keytap";
-            version = "4.2.1";
+            version = "4.2.2";
             src = pkgs.fetchurl {
               inherit (releases.${system}) url hash;
             };
