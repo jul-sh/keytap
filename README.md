@@ -32,6 +32,9 @@ Commands
   reveal [NAME] [--as VAL]                                       Reveal private key material
   encrypt [FILE] [--output VAL] [--key VAL] [--to VAL] [-R VAL]  Encrypt with the derived age identity (stdin/stdout by default)
   decrypt [FILE] [--output VAL] [--key VAL]                      Decrypt an age file with the derived age identity (stdin/stdout by default)
+  remember [NAME]                                                Remember a derived key in the OS keychain (no more prompts for it)
+  forget [NAME] [--all]                                          Forget a remembered key
+  remembered                                                     List keys remembered on this machine (never prints key material)
 
 Arguments & options
   NAME          Key name for domain separation  [default: default]
@@ -41,8 +44,10 @@ Arguments & options
   --key VAL     Key name for domain separation  [default: default]
   --to VAL      Additional age recipient (can be repeated)
   -R VAL        File containing age recipients (one per line)
+  --all         Forget every remembered key, including ones from previous passkeys
 
-Reusing a key without re-authenticating each time: see `keytap reveal --help`.
+Skip repeated prompts for a key: `keytap remember NAME` (see `keytap remember --help`).
+Holds that expire instead (ssh-agent, TTLs): see `keytap reveal --help`.
 Run `keytap <COMMAND> --help` for the full details of any command.
 ```
 <!--HELP:END-->
@@ -79,6 +84,11 @@ The important property is predictability, across installs:
 - same passkey, same name → same derived key
 - same passkey, different name → different derived key
 - different passkey → completely different keys
+
+By default nothing is stored; run the same command on another machine and you
+get the same key there. If a prompt per use is too much friction,
+`keytap remember NAME` keeps that derived key in the OS keychain on that
+machine (see [Skipping repeated prompts](#skipping-repeated-prompts)).
 
 ## Platform model
 
@@ -147,7 +157,9 @@ keytap ties all derived keys to a single passkey registered under the `keytap.ju
 
 With that said, here is how keytap works within those constraints:
 
-- keytap does not sync or cache derived keys. It derives on demand, writes to stdout, and exits. There are no local config files or cached state.
+- By default keytap does not sync or cache derived keys. It derives on demand, writes to stdout, and exits. There are no local config files, and no state is stored implicitly.
+- The one explicit exception is `keytap remember NAME`: it stores that derived key in the OS keychain on this machine, with no TTL, until `keytap forget`, `keytap forget --all`, or passkey replacement. Remembered keys are encrypted at rest by the keychain, but any process running as your user may be able to invoke keytap and use them without a ceremony.
+- Remembered keys are tied to a fingerprint of the registered passkey credential. `keytap init` is a root boundary: it wipes all remembered entries, and lookups are scoped to the current root, so keys remembered under a replaced passkey are never used.
 - If you save the output, pipe it into another tool, or import it into an agent, that destination now holds the key and must be trusted accordingly.
 - The PRF inputs are public and derived from the key name. They provide stable derivation and domain separation, not secrecy.
 - Replacing the registered passkey changes every key derived from it. Treat the passkey as the root of your derived identities.
@@ -159,32 +171,53 @@ When keytap authenticates via your phone, additional trust considerations apply:
 - **You trust the web page served to your phone.** The website served by `keytap.jul.sh` performs the WebAuthn ceremony, receives the PRF output, encrypts it, and posts back to the host, via the relay. You trust its functionality and integrity. The web page is served inspectable, but in practice you are unlikely to review it each time.
 - The Cloudflare relay (`keytap-relay.julsh.workers.dev`) forwards opaque encrypted blobs. It never sees plaintext key material. The channel is end-to-end encrypted with X25519 ECDH + HKDF-SHA256 + AES-256-GCM. An attacker who controls the relay can deny service but cannot decrypt the payload.
 
-## Sessions
+## Skipping repeated prompts
 
-`keytap` derives keys on demand and **never caches** them. That keeps the tool
-simple and leaves nothing sensitive at rest — but it means each derivation costs
-one passkey authentication. When you need to reuse a key without re-authenticating,
-don't reach for a keytap daemon (there isn't one, by design): hand the derived key
-to a **standard agent or keychain** and let *it* hold the key.
+By default every command derives on demand; each use costs one passkey prompt.
+When that is too much friction, pick a holder for the key.
 
-### SSH: pipe into `ssh-agent`
+### Remember the key on this machine
 
-For many SSH connections, load the derived key into `ssh-agent` once. Every
-`ssh` afterward is silent until the (optional) TTL expires:
+`keytap remember` runs one ceremony, then stores the derived raw key in the OS
+keychain (macOS Keychain; Secret Service on Linux). Later keytap commands for
+that name stop prompting. There is no TTL; the key stays until you forget it
+or replace the passkey.
+
+```bash
+keytap remember deploy      # one ceremony; 'deploy' stops prompting on this machine
+keytap reveal deploy        # instant, no prompt
+keytap remembered           # list remembered names (never key material)
+keytap forget deploy        # back to prompting; or: keytap forget --all
+```
+
+Remembered keys are bound to the passkey that produced them. `keytap init`
+replaces the root and wipes every remembered entry; keys remembered under an
+old passkey are never used. Remembering is per machine.
+
+Entries are auditable in your keychain under service `keytap`, account
+`remember:<root>:<name>`; the value is the raw derived key, encrypted at rest
+by the OS keychain.
+
+The trade-off: any process running as your user may be able to invoke keytap
+and use a remembered key without a ceremony. If you want a hold that expires
+instead, use an agent:
+
+### SSH via `ssh-agent`
+
+Load the derived key into `ssh-agent` once; every `ssh` afterward is silent
+until the TTL runs out:
 
 ```bash
 eval "$(ssh-agent -s)"
 keytap reveal ha --as ssh | ssh-add -t 900 -   # one auth, 15-minute hold
-# ssh … ssh …  → no prompts
 ```
 
-This is the intended path for repeated SSH — keytap produces the key, `ssh-agent`
-holds it. There is deliberately no `keytap ssh` command; `ssh-agent` already does
-that job, with better hardening.
+There is deliberately no `keytap ssh` command; `ssh-agent` already does that
+job, with better hardening.
 
 ### A secret reused within one script
 
-Bind it to a shell variable for the process lifetime — one auth, no persistence:
+Bind it to a shell variable for the process lifetime:
 
 ```bash
 KEY=$(keytap reveal deploy --as hex)
@@ -192,27 +225,14 @@ use "$KEY"; use "$KEY"
 unset KEY
 ```
 
-### A secret reused across shells: the OS keychain
+### Other tools that read secrets from the OS keychain
 
-For arbitrary secrets (API tokens, `age` keys) that outlive one process, the OS
-keychain is the right holder — it enforces ACLs keytap can't. Write through
-stdin (never argv, which is visible in the process list), under service
-`keytap` with the key name as the account so entries stay recognizable:
+You can write revealed keys into the keychain yourself
+(`security add-generic-password`, `secret-tool store`); keytap never touches
+entries it didn't create. Usually simpler: remember the key and have the other
+tool run `keytap reveal`, which no longer prompts.
 
-```bash
-# macOS (`security -i` reads the command from stdin)
-security -i <<<"add-generic-password -U -s keytap -a deploy -w $(keytap reveal deploy --as age)"
-security find-generic-password -s keytap -a deploy -w        # read back
-
-# Linux (libsecret)
-keytap reveal deploy --as age | secret-tool store --label=keytap service keytap key deploy
-secret-tool lookup service keytap key deploy                 # read back
-```
-
-This trades keytap's zero-persistence for a larger footprint — an explicit,
-auditable one, in a store designed to hold secrets.
-
-Whatever you pipe into now holds the key, and must be trusted accordingly.
+Whatever holds the key must be trusted accordingly.
 
 ## Tips
 

@@ -1,6 +1,8 @@
 mod encrypt;
 mod help;
+mod keychain;
 mod nearby;
+mod remember;
 
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use keytap_core::{PrivateKeyFormat, PublicKeyFormat};
@@ -92,6 +94,28 @@ enum Command {
         #[arg(long, default_value = "default")]
         key: String,
     },
+
+    /// Remember a derived key in the OS keychain (no more prompts for it)
+    #[command(after_help = help::REMEMBER)]
+    Remember {
+        /// Key name for domain separation
+        #[arg(default_value = "default")]
+        name: String,
+    },
+
+    /// Forget a remembered key
+    Forget {
+        /// Key name for domain separation
+        #[arg(default_value = "default")]
+        name: String,
+
+        /// Forget every remembered key, including ones from previous passkeys
+        #[arg(long, conflicts_with = "name")]
+        all: bool,
+    },
+
+    /// List keys remembered on this machine (never prints key material)
+    Remembered,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -122,32 +146,58 @@ fn main() {
     let cli = Cli::parse();
 
     match cli.command {
-        Command::Init => register(),
+        Command::Init => {
+            let credential_id = register();
+            remember::after_init(&credential_id);
+        }
         Command::Public { ref name, format } => {
-            let prf_output = authenticate(name);
-            let raw_key = derive_key(&prf_output);
+            let raw_key = obtain_key(name);
             emit_public_key(&raw_key, format, name);
         }
         Command::Reveal { ref name, format } => {
-            let prf_output = authenticate(name);
-            let raw_key = derive_key(&prf_output);
+            let raw_key = obtain_key(name);
             emit_private_key(&raw_key, format);
         }
         Command::Encrypt { ref file, ref output, ref key, ref recipients, ref recipients_file, no_self } => {
             // Validate flags BEFORE authenticating so a bad invocation fails fast
             // instead of after a Touch ID / phone approval.
             encrypt::validate_io(file, output.as_deref());
-            let prf_output = authenticate(key);
-            let raw_key = derive_key(&prf_output);
+            let raw_key = obtain_key(key);
             encrypt::encrypt(&raw_key, file, output.as_deref(), recipients, recipients_file, !no_self);
         }
         Command::Decrypt { ref file, ref output, ref key } => {
             encrypt::validate_io(file, output.as_deref());
-            let prf_output = authenticate(key);
-            let raw_key = derive_key(&prf_output);
+            let raw_key = obtain_key(key);
             encrypt::decrypt(&raw_key, file, output.as_deref());
         }
+        Command::Remember { ref name } => {
+            // Fail fast on names derivation would reject, before any ceremony.
+            if let Err(e) = keytap_core::prf_salt_for_name(name) {
+                die(&e.to_string());
+            }
+            let assertion = authenticate(name);
+            let raw_key = derive_key(&assertion.prf_output);
+            remember::remember(name, &assertion.credential_id, &raw_key);
+        }
+        Command::Forget { ref name, all } => {
+            if all {
+                remember::forget_all();
+            } else {
+                remember::forget(name);
+            }
+        }
+        Command::Remembered => remember::remembered(),
     }
+}
+
+/// Resolve the raw key for `name`: a key remembered on this machine (under
+/// the active passkey root) is used as-is; otherwise run the passkey ceremony
+/// and derive on demand, storing nothing.
+fn obtain_key(name: &str) -> Zeroizing<Vec<u8>> {
+    if let Some(raw_key) = remember::lookup(name) {
+        return raw_key;
+    }
+    derive_key(&authenticate(name).prf_output)
 }
 
 /// True when the invocation asks for top-level help: no subcommand at all, or
@@ -161,26 +211,41 @@ fn wants_top_level_help() -> bool {
     }
 }
 
-/// Authenticate with passkey and return the PRF output.
+/// A completed passkey ceremony: the PRF output plus the ID of the credential
+/// that produced it (the latter identifies the root for remembered keys).
+struct Assertion {
+    prf_output: Zeroizing<Vec<u8>>,
+    credential_id: Vec<u8>,
+}
+
+impl Assertion {
+    fn new(prf_output: Vec<u8>, credential_id: Vec<u8>) -> Self {
+        Assertion { prf_output: Zeroizing::new(prf_output), credential_id }
+    }
+}
+
+/// Authenticate with a passkey ceremony.
 #[cfg(feature = "native-passkey")]
-fn authenticate(name: &str) -> Zeroizing<Vec<u8>> {
+fn authenticate(name: &str) -> Assertion {
     match keytap_macos::assert(name) {
-        keytap_macos::AssertionOutcome::Success { prf_output, .. } => {
-            Zeroizing::new(prf_output)
+        keytap_macos::AssertionOutcome::Success { prf_output, credential_id } => {
+            Assertion::new(prf_output, credential_id)
         }
         keytap_macos::AssertionOutcome::Error(msg) if msg == "cancelled" => {
             die(&msg);
         }
         keytap_macos::AssertionOutcome::Error(msg) => {
             eprintln!("Couldn't open native passkey flow: {msg}");
-            Zeroizing::new(nearby::authenticate_nearby(name))
+            let (prf_output, credential_id) = nearby::authenticate_nearby(name);
+            Assertion::new(prf_output, credential_id)
         }
     }
 }
 
 #[cfg(not(feature = "native-passkey"))]
-fn authenticate(name: &str) -> Zeroizing<Vec<u8>> {
-    Zeroizing::new(nearby::authenticate_nearby(name))
+fn authenticate(name: &str) -> Assertion {
+    let (prf_output, credential_id) = nearby::authenticate_nearby(name);
+    Assertion::new(prf_output, credential_id)
 }
 
 fn derive_key(prf_output: &[u8]) -> Zeroizing<Vec<u8>> {
@@ -189,25 +254,28 @@ fn derive_key(prf_output: &[u8]) -> Zeroizing<Vec<u8>> {
     }))
 }
 
+/// Register a new passkey; returns its credential ID so init can rotate the
+/// remembered-keys root.
 #[cfg(feature = "native-passkey")]
-fn register() {
+fn register() -> Vec<u8> {
     match keytap_macos::register() {
-        keytap_macos::RegistrationOutcome::Success => {
+        keytap_macos::RegistrationOutcome::Success { credential_id } => {
             eprintln!("Passkey registered successfully.");
+            credential_id
         }
         keytap_macos::RegistrationOutcome::Error(msg) if msg == "cancelled" => {
             die(&msg);
         }
         keytap_macos::RegistrationOutcome::Error(msg) => {
             eprintln!("Couldn't open native passkey flow: {msg}");
-            nearby::register_nearby();
+            nearby::register_nearby()
         }
     }
 }
 
 #[cfg(not(feature = "native-passkey"))]
-fn register() {
-    nearby::register_nearby();
+fn register() -> Vec<u8> {
+    nearby::register_nearby()
 }
 
 fn emit_private_key(raw_key: &[u8], format: Format) {

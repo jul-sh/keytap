@@ -50,7 +50,7 @@ pub fn overview(cli: &Command) -> String {
         out.push_str(&legend);
     }
 
-    out.push_str("\nReusing a key without re-authenticating each time: see `keytap reveal --help`.\n");
+    out.push_str("\nSkip repeated prompts for a key: `keytap remember NAME` (see `keytap remember --help`).\nHolds that expire instead (ssh-agent, TTLs): see `keytap reveal --help`.\n");
 
     out.push_str("Run `");
     out.push_str(bin);
@@ -58,14 +58,18 @@ pub fn overview(cli: &Command) -> String {
     out
 }
 
-/// Reuse-without-re-auth guidance, shown by `keytap reveal --help`. keytap
-/// derives on demand and never caches; to avoid a passkey prompt on every use,
-/// hand the key to a standard agent or keychain and let *it* hold the key (the
-/// tool has no session/agent of its own by design). The keychain examples
-/// write through stdin on purpose: a secret in argv is visible in the process
-/// list. The blessed keychain coordinates are service `keytap`, account = key
-/// name, so entries stay recognizable and auditable.
-pub(crate) const REUSE: &str = "Reusing a key without re-authenticating each time\n  keytap derives on demand and never caches. Let a standard holder keep the key:\n\n  SSH (many connections, one prompt):\n    eval \"$(ssh-agent -s)\"\n    keytap reveal ha --as ssh | ssh-add -t 900 -    # 15-min hold, then gone\n\n  A secret reused within one script (bounded to the process):\n    KEY=$(keytap reveal deploy --as hex); use \"$KEY\"; unset KEY\n\n  A secret reused across shells (the OS keychain holds it, not keytap):\n    # via stdin on purpose: the key must never appear in argv / the process list\n    macOS: security -i <<<\"add-generic-password -U -s keytap -a deploy -w $(keytap reveal deploy)\"\n    Linux: keytap reveal deploy | secret-tool store --label=keytap service keytap key deploy\n\n  Batch files in one prompt (no agent needed):\n    keytap encrypt *.env --key backup               # one auth, each -> <file>.age\n\n  Whatever holds the key\u{2014}agent, variable, keychain\u{2014}must be trusted accordingly.";
+/// Reuse-without-re-auth guidance, shown by `keytap reveal --help`. By default
+/// keytap derives on demand and stores nothing; `keytap remember` is the
+/// built-in opt-in hold (OS keychain, no TTL). The agent/variable patterns
+/// remain the recommended *bounded* holds — they expire, remembered keys
+/// don't — so they are presented as deliberate alternatives, not leftovers.
+pub(crate) const REUSE: &str = "Reusing a key without re-authenticating each time\n  By default keytap derives on demand and stores nothing. The built-in way to\n  stop repeated prompts is to remember the key on this machine (OS keychain,\n  no expiry \u{2014} see `keytap remember --help` for the exact trade-off):\n\n    keytap remember deploy    # one ceremony; 'deploy' stops prompting on this machine\n    keytap forget deploy      # back to prompting (or `keytap forget --all`)\n\n  Prefer a hold that expires on its own? Hand the key to a standard holder:\n\n  SSH (many connections, one prompt, self-expiring):\n    eval \"$(ssh-agent -s)\"\n    keytap reveal ha --as ssh | ssh-add -t 900 -    # 15-min hold, then gone\n\n  A secret reused within one script (bounded to the process):\n    KEY=$(keytap reveal deploy --as hex); use \"$KEY\"; unset KEY\n\n  A secret another tool reads from the OS keychain: remember it, then let the\n  tool call keytap \u{2014} `keytap reveal deploy` no longer prompts once remembered.\n\n  Batch files in one prompt (no agent or remembering needed):\n    keytap encrypt *.env --key backup               # one auth, each -> <file>.age\n\n  Whatever holds the key\u{2014}keychain entry, agent, variable\u{2014}must be trusted accordingly.";
+
+/// The remembered-keys contract, shown by `keytap remember --help`. States
+/// plainly what is stored, where, for how long, and what the trade-off is, so
+/// the one command that breaks keytap's statelessness is also the one place
+/// that documents it.
+pub(crate) const REMEMBER: &str = "What remembering means\n  `keytap remember NAME` runs one passkey ceremony, then stores the derived raw\n  key in the OS keychain (service `keytap`, account `remember:<root>:<name>`).\n  From then on, keytap commands for NAME use the stored key without prompting.\n  Nothing is ever stored unless you run `remember`; key material is not printed.\n\n  Scope & lifetime\n    - No TTL: the key stays until `keytap forget NAME`, `keytap forget --all`,\n      or you replace the passkey (`keytap init` wipes all remembered keys).\n    - Machine-local: remembering here does not affect your other machines.\n    - Passkey-bound: keys remembered under a replaced passkey are never used.\n\n  Security trade-off\n    Remembered keys are encrypted at rest by the OS keychain, but any process\n    running as your user may be able to invoke keytap and use them without a\n    ceremony. When you want a hold that expires instead, use an agent:\n    `keytap reveal ha --as ssh | ssh-add -t 900 -` (see `keytap reveal --help`).";
 
 /// Arguments intentionally kept out of the at-a-glance overview (still shown by
 /// each subcommand's own `--help`). Niche switches that would only add noise.

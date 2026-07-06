@@ -1,11 +1,17 @@
 pub enum RegistrationOutcome {
-    Success,
+    Success {
+        /// WebAuthn credential ID of the newly registered passkey. Stable
+        /// registration-level material, suitable for fingerprinting the root.
+        credential_id: Vec<u8>,
+    },
     Error(String),
 }
 
 pub enum AssertionOutcome {
     Success {
         prf_output: Vec<u8>,
+        /// Credential ID of the passkey that produced this assertion.
+        credential_id: Vec<u8>,
     },
     Error(String),
 }
@@ -42,7 +48,8 @@ unsafe extern "C" fn on_registration(
         let msg = unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(data, data_len)) };
         *slot = Some(RegistrationOutcome::Error(msg.to_string()));
     } else {
-        *slot = Some(RegistrationOutcome::Success);
+        let credential_id = unsafe { std::slice::from_raw_parts(data, data_len) }.to_vec();
+        *slot = Some(RegistrationOutcome::Success { credential_id });
     }
 }
 
@@ -59,10 +66,11 @@ unsafe extern "C" fn on_assertion(
         let msg = unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(data, data_len)) };
         *slot = Some(AssertionOutcome::Error(msg.to_string()));
     } else {
-        let _cred_id = unsafe { std::slice::from_raw_parts(data, data_len) };
+        let credential_id = unsafe { std::slice::from_raw_parts(data, data_len) }.to_vec();
         let prf = unsafe { std::slice::from_raw_parts(extra, extra_len) }.to_vec();
         *slot = Some(AssertionOutcome::Success {
             prf_output: prf,
+            credential_id,
         });
     }
 }
