@@ -34,9 +34,9 @@ const ROOT_ID_CONTEXT: &[u8] = b"keytap:root-id:v1:";
 
 /// The stores that may hold remembered keys, in lookup order: the OS keychain
 /// first, then the plain-file store. The keychain participates when this
-/// machine can open one; the file store only once the user has opted into it
-/// (`keytap remember --file` is what brings it into existence). Each store
-/// carries its own root marker and entries, so the per-store invariants hold
+/// machine can open one; the file store once some `keytap remember` has
+/// stored into it (that is what brings it into existence). Each store carries
+/// its own root marker and entries, so the per-store invariants hold
 /// independently. `Err` means this machine has no store at all and carries
 /// the keychain's reason.
 fn open_stores() -> Result<Vec<Box<dyn Keychain>>, KeychainError> {
@@ -85,28 +85,19 @@ pub struct WriteTarget {
     location: String,
 }
 
-/// The write target for `keytap remember`: the OS keychain, or the plain-file
-/// store when the user passed `--file`. A missing keychain is an error that
-/// points at the explicit alternative; keytap never downgrades to a plain
-/// file silently.
-pub fn write_target(name: &str, to_file: bool) -> WriteTarget {
-    if to_file {
-        match keychain::file::open_default() {
+/// The write target for `keytap remember`: conceptually the plain-file store,
+/// silently upgraded to the OS keychain when this machine has one. The
+/// success message reports which of the two actually holds the key.
+pub fn write_target() -> WriteTarget {
+    match keychain::open() {
+        Ok(kc) => WriteTarget { store: Box::new(kc), location: "the OS keychain".to_string() },
+        Err(_) => match keychain::file::open_default() {
             Ok(store) => WriteTarget {
                 location: format!("{} (a plain file, not encrypted at rest)", store.path().display()),
                 store: Box::new(store),
             },
             Err(e) => crate::die(&e.to_string()),
-        }
-    } else {
-        match keychain::open() {
-            Ok(kc) => WriteTarget { store: Box::new(kc), location: "the OS keychain".to_string() },
-            Err(e) => crate::die(&format!(
-                "{e}. On a machine without an OS keychain (headless Linux, containers), \
-                 `keytap remember {name} --file` stores the key in a plain file instead; \
-                 see `keytap remember --help` for the trade-off"
-            )),
-        }
+        },
     }
 }
 

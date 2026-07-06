@@ -32,7 +32,7 @@ Commands
   reveal [NAME] [--as VAL]                                       Reveal private key material
   encrypt [FILE] [--output VAL] [--key VAL] [--to VAL] [-R VAL]  Encrypt with the derived age identity (stdin/stdout by default)
   decrypt [FILE] [--output VAL] [--key VAL]                      Decrypt an age file with the derived age identity (stdin/stdout by default)
-  remember [NAME] [--file]                                       Remember a derived key in the OS keychain (no more prompts for it)
+  remember [NAME]                                                Remember a derived key on this machine (no more prompts for it)
   forget [NAME] [--all]                                          Forget a remembered key
   remembered                                                     List keys remembered on this machine (never prints key material)
 
@@ -44,7 +44,6 @@ Arguments & options
   --key VAL     Key name for domain separation  [default: default]
   --to VAL      Additional age recipient (can be repeated)
   -R VAL        File containing age recipients (one per line)
-  --file        Store in a plain file instead of the OS keychain, for machines without one (not encrypted at rest; see --help)
   --all         Forget every remembered key, including ones from previous passkeys
 
 Skip repeated prompts for a key: `keytap remember NAME` (see `keytap remember --help`).
@@ -88,8 +87,8 @@ The important property is predictability, across installs:
 
 By default nothing is stored; run the same command on another machine and you
 get the same key there. If a prompt per use is too much friction,
-`keytap remember NAME` keeps that derived key in the OS keychain on that
-machine (see [Skipping repeated prompts](#skipping-repeated-prompts)).
+`keytap remember NAME` keeps that derived key on that machine
+(see [Skipping repeated prompts](#skipping-repeated-prompts)).
 
 ## Platform model
 
@@ -159,7 +158,7 @@ keytap ties all derived keys to a single passkey registered under the `keytap.ju
 With that said, here is how keytap works within those constraints:
 
 - By default keytap does not sync or cache derived keys. It derives on demand, writes to stdout, and exits. There are no local config files, and no state is stored implicitly.
-- The one explicit exception is `keytap remember NAME`: it stores that derived key in the OS keychain on this machine, with no TTL, until `keytap forget`, `keytap forget --all`, or passkey replacement. Remembered keys are encrypted at rest by the keychain, but any process running as your user may be able to invoke keytap and use them without a ceremony.
+- The one explicit exception is `keytap remember NAME`: it stores that derived key on this machine, with no TTL, until `keytap forget`, `keytap forget --all`, or passkey replacement. The key lands in a plain file (not encrypted at rest), silently upgraded to the OS keychain when the machine has one (then encrypted at rest by it). Either way, any process running as your user may be able to invoke keytap and use the key without a ceremony.
 - Remembered keys are tied to a fingerprint of the registered passkey credential. `keytap init` is a root boundary: it wipes all remembered entries, and lookups are scoped to the current root, so keys remembered under a replaced passkey are never used.
 - If you save the output, pipe it into another tool, or import it into an agent, that destination now holds the key and must be trusted accordingly.
 - The PRF inputs are public and derived from the key name. They provide stable derivation and domain separation, not secrecy.
@@ -179,10 +178,9 @@ When that is too much friction, pick a holder for the key.
 
 ### Remember the key on this machine
 
-`keytap remember` runs one ceremony, then stores the derived raw key in the OS
-keychain (macOS Keychain; Secret Service on Linux). Later keytap commands for
-that name stop prompting. There is no TTL; the key stays until you forget it
-or replace the passkey.
+`keytap remember` runs one ceremony, then stores the derived raw key on that
+machine. Later keytap commands for that name stop prompting. There is no TTL;
+the key stays until you forget it or replace the passkey.
 
 ```bash
 keytap remember deploy      # one ceremony; 'deploy' stops prompting on this machine
@@ -195,23 +193,17 @@ Remembered keys are bound to the passkey that produced them. `keytap init`
 replaces the root and wipes every remembered entry; keys remembered under an
 old passkey are never used. Remembering is per machine.
 
-Entries are auditable in your keychain under service `keytap`, account
-`remember:<root>:<name>`; the value is the raw derived key, encrypted at rest
-by the OS keychain.
+Where the key lives: a plain file, `~/.local/state/keytap/remembered.json`
+(0600, honors `$XDG_STATE_HOME`). On machines with an OS keychain (macOS
+Keychain; Secret Service on desktop Linux), `remember` upgrades to it
+automatically; entries are then auditable under service `keytap`, account
+`remember:<root>:<name>`, encrypted at rest by the keychain. The success
+message says which of the two was used, and lookups check the keychain first.
 
-On machines without an OS keychain (headless Linux, servers, containers;
-Secret Service needs a desktop session), opt into a plain-file store instead:
-
-```bash
-keytap remember deploy --file   # ~/.local/state/keytap/remembered.json, 0600
-```
-
-The file honors `$XDG_STATE_HOME` and is not encrypted at rest: anyone who
-can read your files (root, backups, disk images) can use the key, so treat it
-like an unencrypted SSH private key. keytap never picks the file on its own;
-the flag is the opt-in. Everything else works the same (`forget`,
-`remembered`, wiped on `keytap init`), and lookups prefer the OS keychain
-when both stores exist.
+Be clear-eyed about the plain file (what you get on headless Linux, servers,
+and containers, where Secret Service needs a desktop session): it is not
+encrypted at rest, so anyone who can read your files (root, backups, disk
+images) can use the key. Treat it like an unencrypted SSH private key.
 
 The trade-off: any process running as your user may be able to invoke keytap
 and use a remembered key without a ceremony. If you want a hold that expires

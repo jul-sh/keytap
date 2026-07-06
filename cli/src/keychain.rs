@@ -254,13 +254,13 @@ mod platform {
     }
 }
 
-/// Plain-file store for machines without an OS keychain (headless Linux,
-/// containers). Same [`Keychain`] contract as the platform backends, but the
-/// values sit in a JSON file protected only by file permissions: NOT
-/// encrypted at rest, usable by anyone who can read the user's files. keytap
-/// therefore never picks it silently; the store starts existing only when the
-/// user opts in with `keytap remember --file`, and read paths consult it only
-/// once it exists.
+/// Plain-file store: the baseline home for remembered keys. Machines with an
+/// OS keychain upgrade past it automatically; everywhere else (headless
+/// Linux, servers, containers) `keytap remember` stores here. Same
+/// [`Keychain`] contract as the platform backends, but the values sit in a
+/// JSON file protected only by file permissions: NOT encrypted at rest,
+/// usable by anyone who can read the user's files, and documented as such.
+/// Read paths consult it only once it exists.
 pub mod file {
     use super::{Keychain, KeychainError};
     use base64::engine::general_purpose::STANDARD as BASE64;
@@ -289,16 +289,16 @@ pub mod file {
         Some(state_home.join("keytap").join("remembered.json"))
     }
 
-    /// The store at the default path, but only if the user created it earlier
-    /// (by running `keytap remember --file`). Read paths use this so machines
-    /// that never opted in never touch the filesystem.
+    /// The store at the default path, but only if some earlier
+    /// `keytap remember` created it. Read paths use this so machines that
+    /// never stored a file never touch the filesystem.
     pub fn open_existing() -> Option<FileStore> {
         let path = default_path()?;
         path.is_file().then(|| FileStore { path })
     }
 
     /// The store at the default path for writing; the parent directory is
-    /// created on first use. For `keytap remember --file`.
+    /// created on first use. For `keytap remember` on keychain-less machines.
     pub fn open_default() -> Result<FileStore, KeychainError> {
         match default_path() {
             Some(path) => Ok(FileStore { path }),
