@@ -24,12 +24,17 @@
             hash = "sha256-Upjpji4I2JEyDEJd1gk8i33M74YvGI5R0q/k10UhB3M=";
           };
         };
+
+        # The only version statement is the release tag inside the artifact
+        # URL, so the package version can never drift from what it ships.
+        versionFromUrl = url:
+          builtins.head (builtins.match ".*/download/v([^/]+)/.*" url);
       in
       {
         packages = pkgs.lib.optionalAttrs (builtins.hasAttr system releases) {
           default = pkgs.stdenv.mkDerivation {
             pname = "keytap";
-            version = "5.0.1";
+            version = versionFromUrl releases.${system}.url;
             src = pkgs.fetchurl {
               inherit (releases.${system}) url hash;
             };

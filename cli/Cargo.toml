@@ -1,6 +1,6 @@
 [package]
 name = "keytap"
-version = "5.0.1"
+version = "6.0.0"
 edition = "2021"
 
 [[bin]]
@@ -30,3 +30,15 @@ aes-gcm = "0.10"
 getrandom = "0.2"
 ureq = "3"
 zeroize = "1"
+
+# Remembered keys live in the OS keychain: the macOS Keychain via the
+# Security framework, and the freedesktop Secret Service (GNOME Keyring,
+# KWallet, …) on Linux. These are target dependencies (not tied to the
+# `native-passkey` feature) so the nearby-phone fallback build still gets
+# keychain support. `vendored` builds libdbus from source so release builds
+# don't depend on system dev packages.
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "3"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+dbus-secret-service = { version = "4", features = ["crypto-rust", "vendored"] }

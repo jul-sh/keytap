@@ -13,18 +13,21 @@ const DEFAULT_RELAY_URL: &str = "wss://keytap-relay.julsh.workers.dev";
 const PAGE_URL: &str = "https://keytap.jul.sh/n";
 const WS_TIMEOUT_SECS: u64 = 300; // 5 minutes
 
-/// Authenticate via nearby device and return the PRF output.
-pub fn authenticate_nearby(name: &str) -> Vec<u8> {
-    let (_credential_id, prf_first) = run_nearby_flow("assert", name);
-    prf_first.unwrap_or_else(|| {
+/// Authenticate via nearby device; returns the PRF output and the credential
+/// ID of the passkey that produced it.
+pub fn authenticate_nearby(name: &str) -> (Vec<u8>, Vec<u8>) {
+    let (credential_id, prf_first) = run_nearby_flow("assert", name);
+    let prf_first = prf_first.unwrap_or_else(|| {
         crate::die("passkey provider did not return PRF output — it may not support the PRF extension");
-    })
+    });
+    (prf_first, credential_id)
 }
 
-/// Register a passkey via nearby device.
-pub fn register_nearby() {
-    run_nearby_flow("register", "default");
+/// Register a passkey via nearby device; returns the new credential ID.
+pub fn register_nearby() -> Vec<u8> {
+    let (credential_id, _) = run_nearby_flow("register", "default");
     eprintln!("Passkey registered successfully via nearby device.");
+    credential_id
 }
 
 fn run_nearby_flow(operation: &str, name: &str) -> (Vec<u8>, Option<Vec<u8>>) {

@@ -128,12 +128,11 @@ jobs:
           git fetch origin main
           git checkout main
 
-          VERSION="${TAG#v}"
-
+          # The package version is derived from the artifact URL in flake.nix,
+          # so rewriting the release blocks below is the whole update.
           python3 -c "
           import re, sys
           with open('flake.nix') as f: s = f.read()
-          s = re.sub(r'version = \"[^\"]+\"', 'version = \"${VERSION}\"', s, count=1)
           s = re.sub(
               r'aarch64-darwin = \{[^}]+\}',
               'aarch64-darwin = {\n            url = \"${MACOS_URL}\";\n            hash = \"${MACOS_HASH}\";\n          }',
