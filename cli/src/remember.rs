@@ -30,35 +30,94 @@ const ROOT_VALUE_PREFIX: &str = "keytap-root-v1:";
 /// confused with any other hash of the credential ID.
 const ROOT_ID_CONTEXT: &[u8] = b"keytap:root-id:v1:";
 
-// ─── Command surface (opens the platform keychain, reports to the user) ───
+// ─── Command surface (opens the stores, reports to the user) ───
 
-/// Resolve a remembered key for `name` under the active root, if one exists.
-/// Never fails: any keychain trouble falls back to `None`, i.e. a normal
-/// passkey ceremony. `keytap remembered` surfaces the errors this path
+/// The stores that may hold remembered keys, in lookup order: the OS keychain
+/// first, then the plain-file store. The keychain participates when this
+/// machine can open one; the file store only once the user has opted into it
+/// (`keytap remember --file` is what brings it into existence). Each store
+/// carries its own root marker and entries, so the per-store invariants hold
+/// independently. `Err` means this machine has no store at all and carries
+/// the keychain's reason.
+fn open_stores() -> Result<Vec<Box<dyn Keychain>>, KeychainError> {
+    let mut stores: Vec<Box<dyn Keychain>> = Vec::new();
+    let keychain_error = match keychain::open() {
+        Ok(kc) => {
+            stores.push(Box::new(kc));
+            None
+        }
+        Err(e) => Some(e),
+    };
+    if let Some(store) = keychain::file::open_existing() {
+        stores.push(Box::new(store));
+    }
+    match (stores.is_empty(), keychain_error) {
+        (true, Some(e)) => Err(e),
+        _ => Ok(stores),
+    }
+}
+
+/// Resolve a remembered key for `name` under the active root, if any store
+/// holds one. Never fails: any keychain trouble falls back to `None`, i.e. a
+/// normal passkey ceremony. `keytap remembered` surfaces the errors this path
 /// deliberately swallows (a stateless user on a keychain-less machine should
 /// not see warnings on every command).
 pub fn lookup(name: &str) -> Option<Zeroizing<Vec<u8>>> {
-    let kc = keychain::open().ok()?;
-    match lookup_in(&kc, name) {
-        Ok(Resolution::Hit(key)) => Some(key),
-        Ok(Resolution::Miss) | Err(_) => None,
-        Ok(Resolution::Invalid) => {
-            eprintln!(
+    for store in open_stores().unwrap_or_default() {
+        match lookup_in(store.as_ref(), name) {
+            Ok(Resolution::Hit(key)) => return Some(key),
+            Ok(Resolution::Miss) | Err(_) => {}
+            Ok(Resolution::Invalid) => eprintln!(
                 "warning: ignoring a malformed remembered key for '{name}'; run `keytap forget {name}` to clean it up"
-            );
-            None
+            ),
+        }
+    }
+    None
+}
+
+/// Where `keytap remember` will store the key, resolved and validated BEFORE
+/// the passkey ceremony so a machine with nowhere to store fails fast instead
+/// of after a prompt.
+pub struct WriteTarget {
+    store: Box<dyn Keychain>,
+    /// Where the key ends up, for the success message ("the OS keychain" or
+    /// the file path with its caveat).
+    location: String,
+}
+
+/// The write target for `keytap remember`: the OS keychain, or the plain-file
+/// store when the user passed `--file`. A missing keychain is an error that
+/// points at the explicit alternative; keytap never downgrades to a plain
+/// file silently.
+pub fn write_target(name: &str, to_file: bool) -> WriteTarget {
+    if to_file {
+        match keychain::file::open_default() {
+            Ok(store) => WriteTarget {
+                location: format!("{} (a plain file, not encrypted at rest)", store.path().display()),
+                store: Box::new(store),
+            },
+            Err(e) => crate::die(&e.to_string()),
+        }
+    } else {
+        match keychain::open() {
+            Ok(kc) => WriteTarget { store: Box::new(kc), location: "the OS keychain".to_string() },
+            Err(e) => crate::die(&format!(
+                "{e}. On a machine without an OS keychain (headless Linux, containers), \
+                 `keytap remember {name} --file` stores the key in a plain file instead; \
+                 see `keytap remember --help` for the trade-off"
+            )),
         }
     }
 }
 
 /// Store a freshly derived key under the root of the credential that produced
 /// it. Called by `keytap remember` after the ceremony.
-pub fn remember(name: &str, credential_id: &[u8], raw_key: &[u8]) {
-    let mut kc = open_or_die();
-    match remember_in(&mut kc, name, credential_id, raw_key) {
+pub fn remember(target: &mut WriteTarget, name: &str, credential_id: &[u8], raw_key: &[u8]) {
+    match remember_in(target.store.as_mut(), name, credential_id, raw_key) {
         Ok(RememberOutcome::Stored) => eprintln!(
-            "Remembered '{name}' on this machine. Future keytap commands for this name will not \
-             prompt until you run `keytap forget {name}` or replace the passkey."
+            "Remembered '{name}' in {location}. Future keytap commands for this name will not \
+             prompt until you run `keytap forget {name}` or replace the passkey.",
+            location = target.location
         ),
         Ok(RememberOutcome::RootMismatch) => crate::die(
             "the passkey you just used is not this machine's active keytap root, so remembering \
@@ -70,71 +129,99 @@ pub fn remember(name: &str, credential_id: &[u8], raw_key: &[u8]) {
     }
 }
 
-/// Delete the remembered key for `name` under the active root.
+/// Delete the remembered key for `name` under the active root, from every
+/// store that holds one.
 pub fn forget(name: &str) {
-    let mut kc = open_or_die();
-    match forget_in(&mut kc, name) {
-        Ok(true) => eprintln!("Forgot '{name}'. The next keytap command for this name will prompt again."),
-        Ok(false) => crate::die(&format!("no remembered key named '{name}' for the current passkey")),
-        Err(e) => crate::die(&e.to_string()),
+    let mut stores = open_stores().unwrap_or_else(|e| crate::die(&e.to_string()));
+    let mut deleted = false;
+    for store in &mut stores {
+        match forget_in(store.as_mut(), name) {
+            Ok(d) => deleted |= d,
+            Err(e) => crate::die(&e.to_string()),
+        }
+    }
+    if deleted {
+        eprintln!("Forgot '{name}'. The next keytap command for this name will prompt again.");
+    } else {
+        crate::die(&format!("no remembered key named '{name}' for the current passkey"));
     }
 }
 
 /// Delete every remembered key on this machine, including entries left over
-/// from previously replaced passkeys.
+/// from previously replaced passkeys, across every store.
 pub fn forget_all() {
-    let mut kc = open_or_die();
-    match forget_all_in(&mut kc) {
-        Ok(0) => eprintln!("No remembered keys to forget."),
-        Ok(n) => eprintln!(
+    let mut stores = open_stores().unwrap_or_else(|e| crate::die(&e.to_string()));
+    let mut deleted = 0;
+    for store in &mut stores {
+        match forget_all_in(store.as_mut()) {
+            Ok(n) => deleted += n,
+            Err(e) => crate::die(&e.to_string()),
+        }
+    }
+    match deleted {
+        0 => eprintln!("No remembered keys to forget."),
+        n => eprintln!(
             "Forgot {n} remembered key{}, including any from previous passkeys.",
             if n == 1 { "" } else { "s" }
         ),
-        Err(e) => crate::die(&e.to_string()),
     }
 }
 
-/// Print the names remembered under the active root, one per line.
+/// Print the names remembered under the active root, one per line, across
+/// every store (each name once, even when stores overlap).
 pub fn remembered() {
-    let kc = open_or_die();
-    match list_in(&kc) {
-        Ok(names) if names.is_empty() => eprintln!("No remembered keys for the current passkey."),
-        Ok(names) => {
-            for name in names {
-                println!("{name}");
-            }
+    let stores = open_stores().unwrap_or_else(|e| crate::die(&e.to_string()));
+    let mut names: Vec<String> = Vec::new();
+    for store in &stores {
+        match list_in(store.as_ref()) {
+            Ok(mut listed) => names.append(&mut listed),
+            Err(e) => crate::die(&e.to_string()),
         }
-        Err(e) => crate::die(&e.to_string()),
+    }
+    names.sort();
+    names.dedup();
+    if names.is_empty() {
+        eprintln!("No remembered keys for the current passkey.");
+    } else {
+        for name in names {
+            println!("{name}");
+        }
     }
 }
 
 /// Root rotation after a successful `keytap init`: record the new credential's
-/// fingerprint as the active root and wipe every remembered entry. Must never
-/// fail init — the registration already succeeded — so trouble here is only
-/// reported, and lookups stay safe regardless because they are scoped to the
-/// active root.
+/// fingerprint as the active root and wipe every remembered entry, in every
+/// store. Must never fail init — the registration already succeeded — so
+/// trouble here is only reported, and lookups stay safe regardless because
+/// they are scoped to the active root.
 pub fn after_init(credential_id: &[u8]) {
-    let mut kc = match keychain::open() {
-        Ok(kc) => kc,
-        // No keychain, no state: nothing to rotate.
-        Err(KeychainError::Unsupported) => return,
+    let mut stores: Vec<Box<dyn Keychain>> = Vec::new();
+    match keychain::open() {
+        Ok(kc) => stores.push(Box::new(kc)),
+        // No keychain, no keychain state: nothing there to rotate.
+        Err(KeychainError::Unsupported) => {}
         Err(e) => {
-            eprintln!("warning: {e}; couldn't check for remembered keys from a previous passkey");
-            return;
+            eprintln!("warning: {e}; couldn't check for remembered keys from a previous passkey")
         }
-    };
-    match rotate_root_in(&mut kc, &root_id(credential_id)) {
-        Ok(0) => {}
-        Ok(_) => eprintln!("Removed remembered keys tied to the previous passkey."),
-        Err(e) => eprintln!(
-            "warning: {e}; couldn't fully clear remembered keys tied to the previous passkey. \
-             They will not be used, but you can purge them with `keytap forget --all`"
-        ),
     }
-}
+    if let Some(store) = keychain::file::open_existing() {
+        stores.push(Box::new(store));
+    }
 
-fn open_or_die() -> impl Keychain {
-    keychain::open().unwrap_or_else(|e| crate::die(&e.to_string()))
+    let root = root_id(credential_id);
+    let mut removed = 0;
+    for store in &mut stores {
+        match rotate_root_in(store.as_mut(), &root) {
+            Ok(n) => removed += n,
+            Err(e) => eprintln!(
+                "warning: {e}; couldn't fully clear remembered keys tied to the previous passkey. \
+                 They will not be used, but you can purge them with `keytap forget --all`"
+            ),
+        }
+    }
+    if removed > 0 {
+        eprintln!("Removed remembered keys tied to the previous passkey.");
+    }
 }
 
 // ─── Logic (pure over the Keychain trait, unit-tested below) ───
@@ -173,7 +260,7 @@ fn decode_key_value(value: &[u8]) -> Option<Zeroizing<Vec<u8>>> {
 
 /// The active root id, or `None` when absent or unparseable (a corrupt marker
 /// self-heals: the next `init` or root-adopting `remember` rewrites it).
-fn read_active_root(kc: &impl Keychain) -> Result<Option<String>, KeychainError> {
+fn read_active_root(kc: &(impl Keychain + ?Sized)) -> Result<Option<String>, KeychainError> {
     let Some(value) = kc.get(ACTIVE_ROOT_ACCOUNT)? else {
         return Ok(None);
     };
@@ -183,7 +270,7 @@ fn read_active_root(kc: &impl Keychain) -> Result<Option<String>, KeychainError>
         .map(str::to_string))
 }
 
-fn store_active_root(kc: &mut impl Keychain, root: &str) -> Result<(), KeychainError> {
+fn store_active_root(kc: &mut (impl Keychain + ?Sized), root: &str) -> Result<(), KeychainError> {
     kc.set(ACTIVE_ROOT_ACCOUNT, format!("{ROOT_VALUE_PREFIX}{root}").as_bytes())
 }
 
@@ -195,7 +282,7 @@ enum Resolution {
     Invalid,
 }
 
-fn lookup_in(kc: &impl Keychain, name: &str) -> Result<Resolution, KeychainError> {
+fn lookup_in(kc: &(impl Keychain + ?Sized), name: &str) -> Result<Resolution, KeychainError> {
     let Some(root) = read_active_root(kc)? else {
         return Ok(Resolution::Miss);
     };
@@ -216,7 +303,7 @@ enum RememberOutcome {
 }
 
 fn remember_in(
-    kc: &mut impl Keychain,
+    kc: &mut (impl Keychain + ?Sized),
     name: &str,
     credential_id: &[u8],
     raw_key: &[u8],
@@ -234,7 +321,7 @@ fn remember_in(
 }
 
 /// Whether the entry for `name` under the active root existed (and was deleted).
-fn forget_in(kc: &mut impl Keychain, name: &str) -> Result<bool, KeychainError> {
+fn forget_in(kc: &mut (impl Keychain + ?Sized), name: &str) -> Result<bool, KeychainError> {
     let Some(root) = read_active_root(kc)? else {
         return Ok(false);
     };
@@ -243,7 +330,7 @@ fn forget_in(kc: &mut impl Keychain, name: &str) -> Result<bool, KeychainError> 
 
 /// Delete every `remember:*` entry regardless of root; returns how many.
 /// Leaves the active-root marker and any user-managed entries alone.
-fn forget_all_in(kc: &mut impl Keychain) -> Result<usize, KeychainError> {
+fn forget_all_in(kc: &mut (impl Keychain + ?Sized)) -> Result<usize, KeychainError> {
     let mut deleted = 0;
     for account in kc.accounts()? {
         if parse_remember_account(&account).is_some() && kc.delete(&account)? {
@@ -254,7 +341,7 @@ fn forget_all_in(kc: &mut impl Keychain) -> Result<usize, KeychainError> {
 }
 
 /// Names remembered under the active root, sorted.
-fn list_in(kc: &impl Keychain) -> Result<Vec<String>, KeychainError> {
+fn list_in(kc: &(impl Keychain + ?Sized)) -> Result<Vec<String>, KeychainError> {
     let Some(root) = read_active_root(kc)? else {
         return Ok(Vec::new());
     };
@@ -274,7 +361,7 @@ fn list_in(kc: &impl Keychain) -> Result<Vec<String>, KeychainError> {
 /// root. Ordered so that even a partial failure leaves stale entries
 /// unreachable: once the marker points at the new root, lookups can no longer
 /// see them.
-fn rotate_root_in(kc: &mut impl Keychain, new_root: &str) -> Result<usize, KeychainError> {
+fn rotate_root_in(kc: &mut (impl Keychain + ?Sized), new_root: &str) -> Result<usize, KeychainError> {
     store_active_root(kc, new_root)?;
     forget_all_in(kc)
 }
@@ -311,6 +398,35 @@ mod tests {
         }
         // A name that was never remembered stays a miss.
         assert!(matches!(lookup_in(&kc, "other").unwrap(), Resolution::Miss));
+    }
+
+    /// The full remember policy over the plain-file store: it is just another
+    /// `Keychain`, so root scoping and rotation behave exactly as they do in
+    /// the OS keychain.
+    #[test]
+    fn remember_policy_holds_over_the_file_store() {
+        let dir = std::env::temp_dir()
+            .join(format!("keytap-remember-file-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut store = crate::keychain::file::FileStore::at(dir.join("remembered.json"));
+
+        assert_stored(remember_in(&mut store, "deploy", CRED_1, &KEY_A).unwrap());
+        match lookup_in(&store, "deploy").unwrap() {
+            Resolution::Hit(key) => assert_eq!(&key[..], &KEY_A),
+            _ => panic!("expected a hit"),
+        }
+
+        // A different credential can't overwrite entries under the active root.
+        assert!(matches!(
+            remember_in(&mut store, "deploy", CRED_2, &KEY_B).unwrap(),
+            RememberOutcome::RootMismatch
+        ));
+
+        // Root rotation wipes the file store like any other store.
+        assert_eq!(rotate_root_in(&mut store, &root_id(CRED_2)).unwrap(), 1);
+        assert!(matches!(lookup_in(&store, "deploy").unwrap(), Resolution::Miss));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

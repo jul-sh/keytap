@@ -32,7 +32,7 @@ Commands
   reveal [NAME] [--as VAL]                                       Reveal private key material
   encrypt [FILE] [--output VAL] [--key VAL] [--to VAL] [-R VAL]  Encrypt with the derived age identity (stdin/stdout by default)
   decrypt [FILE] [--output VAL] [--key VAL]                      Decrypt an age file with the derived age identity (stdin/stdout by default)
-  remember [NAME]                                                Remember a derived key in the OS keychain (no more prompts for it)
+  remember [NAME] [--file]                                       Remember a derived key in the OS keychain (no more prompts for it)
   forget [NAME] [--all]                                          Forget a remembered key
   remembered                                                     List keys remembered on this machine (never prints key material)
 
@@ -44,6 +44,7 @@ Arguments & options
   --key VAL     Key name for domain separation  [default: default]
   --to VAL      Additional age recipient (can be repeated)
   -R VAL        File containing age recipients (one per line)
+  --file        Store in a plain file instead of the OS keychain, for machines without one (not encrypted at rest; see --help)
   --all         Forget every remembered key, including ones from previous passkeys
 
 Skip repeated prompts for a key: `keytap remember NAME` (see `keytap remember --help`).
@@ -197,6 +198,20 @@ old passkey are never used. Remembering is per machine.
 Entries are auditable in your keychain under service `keytap`, account
 `remember:<root>:<name>`; the value is the raw derived key, encrypted at rest
 by the OS keychain.
+
+On machines without an OS keychain (headless Linux, servers, containers;
+Secret Service needs a desktop session), opt into a plain-file store instead:
+
+```bash
+keytap remember deploy --file   # ~/.local/state/keytap/remembered.json, 0600
+```
+
+The file honors `$XDG_STATE_HOME` and is not encrypted at rest: anyone who
+can read your files (root, backups, disk images) can use the key, so treat it
+like an unencrypted SSH private key. keytap never picks the file on its own;
+the flag is the opt-in. Everything else works the same (`forget`,
+`remembered`, wiped on `keytap init`), and lookups prefer the OS keychain
+when both stores exist.
 
 The trade-off: any process running as your user may be able to invoke keytap
 and use a remembered key without a ceremony. If you want a hold that expires

@@ -101,6 +101,11 @@ enum Command {
         /// Key name for domain separation
         #[arg(default_value = "default")]
         name: String,
+
+        /// Store in a plain file instead of the OS keychain, for machines
+        /// without one (not encrypted at rest; see --help)
+        #[arg(long)]
+        file: bool,
     },
 
     /// Forget a remembered key
@@ -170,14 +175,16 @@ fn main() {
             let raw_key = obtain_key(key);
             encrypt::decrypt(&raw_key, file, output.as_deref());
         }
-        Command::Remember { ref name } => {
-            // Fail fast on names derivation would reject, before any ceremony.
+        Command::Remember { ref name, file } => {
+            // Fail fast on names derivation would reject, and on machines
+            // with nowhere to store, before any ceremony.
             if let Err(e) = keytap_core::prf_salt_for_name(name) {
                 die(&e.to_string());
             }
+            let mut target = remember::write_target(name, file);
             let assertion = authenticate(name);
             let raw_key = derive_key(&assertion.prf_output);
-            remember::remember(name, &assertion.credential_id, &raw_key);
+            remember::remember(&mut target, name, &assertion.credential_id, &raw_key);
         }
         Command::Forget { ref name, all } => {
             if all {
