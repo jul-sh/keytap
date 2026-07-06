@@ -42,25 +42,7 @@ Arguments & options
   --to VAL      Additional age recipient (can be repeated)
   -R VAL        File containing age recipients (one per line)
 
-Reusing a key without re-authenticating each time
-  keytap derives on demand and never caches. Let a standard agent hold the key:
-
-  SSH (many connections, one prompt):
-    eval "$(ssh-agent -s)"
-    keytap reveal ha --as ssh | ssh-add -t 900 -     # 15-min hold, then gone
-
-  A secret reused within one script (bounded to the process):
-    KEY=$(keytap reveal deploy --as hex); use "$KEY"; unset KEY
-
-  A secret reused across shells (the OS keychain holds it, not keytap):
-    security add-generic-password -a "$USER" -s keytap-deploy \
-      -w "$(keytap reveal deploy --as hex)"        # macOS; secret-tool on Linux
-
-  Batch files in one prompt (no agent needed):
-    keytap encrypt *.env --key backup                # one auth, each -> <file>.age
-
-  Whatever you pipe into now holds the key—trust it accordingly.
-
+Reusing a key without re-authenticating each time: see `keytap reveal --help`.
 Run `keytap <COMMAND> --help` for the full details of any command.
 ```
 <!--HELP:END-->
@@ -213,15 +195,18 @@ unset KEY
 ### A secret reused across shells: the OS keychain
 
 For arbitrary secrets (API tokens, `age` keys) that outlive one process, the OS
-keychain is the right holder — it enforces ACLs keytap can't:
+keychain is the right holder — it enforces ACLs keytap can't. Write through
+stdin (never argv, which is visible in the process list), under service
+`keytap` with the key name as the account so entries stay recognizable:
 
 ```bash
-# macOS
-security add-generic-password -a "$USER" -s keytap-deploy -w "$(keytap reveal deploy --as age)"
-security find-generic-password -a "$USER" -s keytap-deploy -w   # read back
+# macOS (`security -i` reads the command from stdin)
+security -i <<<"add-generic-password -U -s keytap -a deploy -w $(keytap reveal deploy --as age)"
+security find-generic-password -s keytap -a deploy -w        # read back
 
 # Linux (libsecret)
-keytap reveal deploy --as age | secret-tool store --label=keytap-deploy service keytap key deploy
+keytap reveal deploy --as age | secret-tool store --label=keytap service keytap key deploy
+secret-tool lookup service keytap key deploy                 # read back
 ```
 
 This trades keytap's zero-persistence for a larger footprint — an explicit,

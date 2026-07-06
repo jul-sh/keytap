@@ -50,19 +50,22 @@ pub fn overview(cli: &Command) -> String {
         out.push_str(&legend);
     }
 
-    out.push_str(SESSIONS);
+    out.push_str("\nReusing a key without re-authenticating each time: see `keytap reveal --help`.\n");
 
-    out.push_str("\nRun `");
+    out.push_str("Run `");
     out.push_str(bin);
     out.push_str(" <COMMAND> --help` for the full details of any command.\n");
     out
 }
 
-/// Reuse-without-re-auth guidance. keytap derives on demand and never caches;
-/// to avoid a passkey prompt on every use, hand the key to a standard agent or
-/// keychain and let *it* hold the key. This section is the discoverable pointer
-/// to that pattern (the tool has no session/agent of its own by design).
-const SESSIONS: &str = "\nReusing a key without re-authenticating each time\n  keytap derives on demand and never caches. Let a standard agent hold the key:\n\n  SSH (many connections, one prompt):\n    eval \"$(ssh-agent -s)\"\n    keytap reveal ha --as ssh | ssh-add -t 900 -     # 15-min hold, then gone\n\n  A secret reused within one script (bounded to the process):\n    KEY=$(keytap reveal deploy --as hex); use \"$KEY\"; unset KEY\n\n  A secret reused across shells (the OS keychain holds it, not keytap):\n    security add-generic-password -a \"$USER\" -s keytap-deploy \\\n      -w \"$(keytap reveal deploy --as hex)\"        # macOS; secret-tool on Linux\n\n  Batch files in one prompt (no agent needed):\n    keytap encrypt *.env --key backup                # one auth, each -> <file>.age\n\n  Whatever you pipe into now holds the key—trust it accordingly.\n";
+/// Reuse-without-re-auth guidance, shown by `keytap reveal --help`. keytap
+/// derives on demand and never caches; to avoid a passkey prompt on every use,
+/// hand the key to a standard agent or keychain and let *it* hold the key (the
+/// tool has no session/agent of its own by design). The keychain examples
+/// write through stdin on purpose: a secret in argv is visible in the process
+/// list. The blessed keychain coordinates are service `keytap`, account = key
+/// name, so entries stay recognizable and auditable.
+pub(crate) const REUSE: &str = "Reusing a key without re-authenticating each time\n  keytap derives on demand and never caches. Let a standard holder keep the key:\n\n  SSH (many connections, one prompt):\n    eval \"$(ssh-agent -s)\"\n    keytap reveal ha --as ssh | ssh-add -t 900 -    # 15-min hold, then gone\n\n  A secret reused within one script (bounded to the process):\n    KEY=$(keytap reveal deploy --as hex); use \"$KEY\"; unset KEY\n\n  A secret reused across shells (the OS keychain holds it, not keytap):\n    # via stdin on purpose: the key must never appear in argv / the process list\n    macOS: security -i <<<\"add-generic-password -U -s keytap -a deploy -w $(keytap reveal deploy)\"\n    Linux: keytap reveal deploy | secret-tool store --label=keytap service keytap key deploy\n\n  Batch files in one prompt (no agent needed):\n    keytap encrypt *.env --key backup               # one auth, each -> <file>.age\n\n  Whatever holds the key\u{2014}agent, variable, keychain\u{2014}must be trusted accordingly.";
 
 /// Arguments intentionally kept out of the at-a-glance overview (still shown by
 /// each subcommand's own `--help`). Niche switches that would only add noise.

@@ -40,6 +40,7 @@ enum Command {
     },
 
     /// Reveal private key material
+    #[command(after_help = help::REUSE)]
     Reveal {
         /// Key name for domain separation
         #[arg(default_value = "default")]
