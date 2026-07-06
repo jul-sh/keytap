@@ -149,13 +149,14 @@ mod platform {
     }
 
     impl LinuxKeychain {
-        /// The default collection, unlocked. Items searched out of it borrow
-        /// it, so each operation opens the collection and finishes with it in
-        /// the same scope.
+        /// The default collection, possibly locked. Attribute searches work
+        /// on a locked collection (lookup attributes are not encrypted), so
+        /// opening never prompts; operations that need secret values or
+        /// writes unlock explicitly, and only once they know there is
+        /// something to unlock for. A locked keyring must never pop an
+        /// unlock dialog just so keytap can discover it has nothing stored.
         fn collection(&self) -> Result<Collection<'_>, KeychainError> {
-            let collection = self.service.get_default_collection().map_err(backend_err)?;
-            collection.ensure_unlocked().map_err(backend_err)?;
-            Ok(collection)
+            self.service.get_default_collection().map_err(backend_err)
         }
     }
 
@@ -177,6 +178,9 @@ mod platform {
             let collection = self.collection()?;
             match find(&collection, Some(account))?.first() {
                 Some(item) => {
+                    // Unlock only now that a matching entry is known to
+                    // exist: the dialog a locked keyring pops here is for a
+                    // key that is about to be used.
                     item.ensure_unlocked().map_err(backend_err)?;
                     Ok(Some(Zeroizing::new(item.get_secret().map_err(backend_err)?)))
                 }
@@ -186,7 +190,11 @@ mod platform {
 
         fn set(&mut self, account: &str, value: &[u8]) -> Result<(), KeychainError> {
             let attributes = HashMap::from([("service", SERVICE), ("account", account)]);
-            self.collection()?
+            let collection = self.collection()?;
+            // Writes need an unlocked collection; the prompt is justified
+            // because the user explicitly asked to store something.
+            collection.ensure_unlocked().map_err(backend_err)?;
+            collection
                 .create_item(
                     &format!("{SERVICE}: {account}"),
                     attributes,
@@ -203,6 +211,7 @@ mod platform {
             let items = find(&collection, Some(account))?;
             let existed = !items.is_empty();
             for item in items {
+                item.ensure_unlocked().map_err(backend_err)?;
                 item.delete().map_err(backend_err)?;
             }
             Ok(existed)
