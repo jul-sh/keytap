@@ -106,6 +106,12 @@ The flow is:
 4. you approve with a passkey on the phone
 5. the PRF result is sent back to the CLI over an end-to-end encrypted relay channel
 
+Because each command costs a scan, the page also offers an opt-in
+"remember this key" checkbox: tick it before approving and the machine that
+printed the QR code stores the derived key exactly as if you had run
+`keytap remember` there — no second ceremony
+(see [Skipping repeated prompts](#skipping-repeated-prompts)).
+
 ## Install
 
 ```bash
@@ -155,7 +161,7 @@ keytap ties all derived keys to a single passkey registered under the `keytap.ju
 With that said, here is how keytap works within those constraints:
 
 - By default keytap does not sync or cache derived keys. It derives on demand, writes to stdout, and exits. There are no local config files, and no state is stored implicitly.
-- The one explicit exception is `keytap remember NAME`: it stores that derived key on this machine, with no TTL, until `keytap forget`, `keytap forget --all`, or passkey replacement. The key lands in a plain file (not encrypted at rest), silently upgraded to the OS keychain when the machine has one (then encrypted at rest by it). Either way, any process running as your user may be able to invoke keytap and use the key without a ceremony.
+- The one explicit exception is remembering — `keytap remember NAME`, or the opt-in "remember this key" checkbox on the nearby-phone page: it stores that derived key on this machine, with no TTL, until `keytap forget`, `keytap forget --all`, or passkey replacement. The key lands in a plain file (not encrypted at rest), silently upgraded to the OS keychain when the machine has one (then encrypted at rest by it). Either way, any process running as your user may be able to invoke keytap and use the key without a ceremony.
 - Remembered keys are tied to a fingerprint of the registered passkey credential. `keytap init` is a root boundary: it wipes all remembered entries, and lookups are scoped to the current root, so keys remembered under a replaced passkey are never used.
 - If you save the output, pipe it into another tool, or import it into an agent, that destination now holds the key and must be trusted accordingly.
 - The PRF inputs are public and derived from the key name. They provide stable derivation and domain separation, not secrecy.
@@ -189,6 +195,11 @@ keytap forget deploy        # back to prompting; or: keytap forget --all
 Remembered keys are bound to the passkey that produced them. `keytap init`
 replaces the root and wipes every remembered entry; keys remembered under an
 old passkey are never used. Remembering is per machine.
+
+When a command authenticates via the nearby-phone flow, the phone page offers
+the same opt-in as a checkbox: tick "remember this key" while approving any
+derive command and the machine remembers it — one ceremony instead of the two
+that a separate `keytap remember` would cost over QR.
 
 Where the key lives: a plain file, `~/.local/state/keytap/remembered.json`
 (0600, honors `$XDG_STATE_HOME`). On machines with an OS keychain (macOS

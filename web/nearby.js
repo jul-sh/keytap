@@ -48,6 +48,10 @@ function parseRawConfig(raw) {
     keyName: raw.n || 'default',
     userId: raw.u,
     userName: raw.un,
+    // The CLI is new enough to honor a "remember this key" request sent back
+    // with the assertion. Older CLIs never set this, so they never show a
+    // checkbox they would silently ignore.
+    offerRemember: !!raw.m,
   };
 }
 
@@ -146,16 +150,29 @@ async function main() {
     ? 'Create the passkey once, then keytap can recover the same keys anywhere.'
     : `Approve to derive key: ${config.keyName}`;
 
+  const rememberBox = $('remember-box');
+  const offerRemember = !isRegister && config.offerRemember;
+  if (offerRemember) {
+    $('remember-name').textContent = config.keyName;
+    $('remember').hidden = false;
+  }
+
   async function run() {
     btn.disabled = true;
     status.textContent = isRegister ? 'Waiting for passkey creation…' : 'Waiting for passkey approval…';
 
     try {
       const payload = isRegister ? await runRegister(config) : await runAssertion(config);
+      // Read the checkbox at send time so a tick still counts after a
+      // cancelled or failed first attempt.
+      if (offerRemember && rememberBox.checked) payload.remember = true;
       status.textContent = 'Encrypting and sending…';
       await encryptAndPost(payload, config);
-      status.textContent = 'Sent! You can close this page.';
+      status.textContent = payload.remember
+        ? 'Sent! That machine will remember this key. You can close this page.'
+        : 'Sent! You can close this page.';
       btn.textContent = 'Done';
+      rememberBox.disabled = true;
     } catch (e) {
       status.textContent = e.message;
       btn.textContent = 'Try again';

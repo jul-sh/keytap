@@ -13,24 +13,39 @@ const DEFAULT_RELAY_URL: &str = "wss://keytap-relay.julsh.workers.dev";
 const PAGE_URL: &str = "https://keytap.jul.sh/n";
 const WS_TIMEOUT_SECS: u64 = 300; // 5 minutes
 
-/// Authenticate via nearby device; returns the PRF output and the credential
-/// ID of the passkey that produced it.
-pub fn authenticate_nearby(name: &str) -> (Vec<u8>, Vec<u8>) {
-    let (credential_id, prf_first) = run_nearby_flow("assert", name);
-    let prf_first = prf_first.unwrap_or_else(|| {
+/// A completed nearby assertion ceremony.
+pub struct NearbyAssertion {
+    pub prf_output: Vec<u8>,
+    /// Credential ID of the passkey that produced the PRF output.
+    pub credential_id: Vec<u8>,
+    /// The user ticked "remember this key on this machine" on the phone page.
+    pub remember_requested: bool,
+}
+
+/// Authenticate via nearby device. `offer_remember` controls whether the
+/// phone page shows its "remember this key on this machine" checkbox;
+/// `keytap remember` suppresses it because that command already stores.
+pub fn authenticate_nearby(name: &str, offer_remember: bool) -> NearbyAssertion {
+    let payload = run_nearby_flow("assert", name, offer_remember);
+    let prf_output = payload.prf_first.unwrap_or_else(|| {
         crate::die("passkey provider did not return PRF output — it may not support the PRF extension");
     });
-    (prf_first, credential_id)
+    NearbyAssertion {
+        prf_output,
+        credential_id: payload.credential_id,
+        // A request the CLI never offered is not honored, whatever the page sent.
+        remember_requested: offer_remember && payload.remember_requested,
+    }
 }
 
 /// Register a passkey via nearby device; returns the new credential ID.
 pub fn register_nearby() -> Vec<u8> {
-    let (credential_id, _) = run_nearby_flow("register", "default");
+    let payload = run_nearby_flow("register", "default", false);
     eprintln!("Passkey registered successfully via nearby device.");
-    credential_id
+    payload.credential_id
 }
 
-fn run_nearby_flow(operation: &str, name: &str) -> (Vec<u8>, Option<Vec<u8>>) {
+fn run_nearby_flow(operation: &str, name: &str, offer_remember: bool) -> NearbyPayload {
     // Install rustls crypto provider
     rustls::crypto::ring::default_provider()
         .install_default()
@@ -63,6 +78,7 @@ fn run_nearby_flow(operation: &str, name: &str) -> (Vec<u8>, Option<Vec<u8>>) {
         name,
         &prf_salt,
         &challenge_bytes,
+        offer_remember,
     );
 
     // Upload config to relay
@@ -120,6 +136,7 @@ fn build_qr_config(
     name: &str,
     prf_salt: &[u8],
     challenge: &[u8],
+    offer_remember: bool,
 ) -> String {
     let op = match operation {
         "register" => "r",
@@ -138,6 +155,13 @@ fn build_qr_config(
     if operation == "register" {
         config["u"] = serde_json::json!(URL_SAFE_NO_PAD.encode(b"keytap-user"));
         config["un"] = serde_json::json!("keytap");
+    }
+
+    // "may remember": the page only offers its remember checkbox when this
+    // CLI is new enough to honor the request (older CLIs ignore the payload
+    // flag, which would turn the checkbox into a silent no-op).
+    if offer_remember {
+        config["m"] = serde_json::json!(true);
     }
 
     config.to_string()
@@ -208,11 +232,19 @@ fn wait_for_response(ws: &mut WebSocket<MaybeTlsStream<TcpStream>>) -> RelayResp
     }
 }
 
+/// The decrypted phone payload, decoded but not yet validated against the
+/// operation (registrations carry no PRF output; assertions must).
+struct NearbyPayload {
+    credential_id: Vec<u8>,
+    prf_first: Option<Vec<u8>>,
+    remember_requested: bool,
+}
+
 fn decrypt_response(
     cli_secret: EphemeralSecret,
     response: &RelayResponse,
     session_id: &str,
-) -> (Vec<u8>, Option<Vec<u8>>) {
+) -> NearbyPayload {
     let phone_pk_bytes: [u8; 32] = response.phone_pk[..].try_into().unwrap_or_else(|_| {
         crate::die("phone public key must be 32 bytes");
     });
@@ -236,7 +268,12 @@ fn decrypt_response(
         .decrypt(nonce, response.ciphertext.as_ref())
         .unwrap_or_else(|e| crate::die(&format!("decryption failed: {e}")));
 
-    let payload: serde_json::Value = serde_json::from_slice(&plaintext)
+    parse_payload(&plaintext)
+}
+
+/// Decode a decrypted phone payload into its protocol fields.
+fn parse_payload(plaintext: &[u8]) -> NearbyPayload {
+    let payload: serde_json::Value = serde_json::from_slice(plaintext)
         .unwrap_or_else(|e| crate::die(&format!("invalid decrypted payload: {e}")));
 
     let cred_id_b64 = payload["credentialId"]
@@ -258,5 +295,45 @@ fn decrypt_response(
         decoded
     });
 
-    (credential_id, prf_first)
+    NearbyPayload {
+        credential_id,
+        prf_first,
+        // Absent on registrations and on pages that predate the checkbox.
+        remember_requested: payload["remember"].as_bool().unwrap_or(false),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn payload_without_remember_field_requests_nothing() {
+        let payload = parse_payload(
+            br#"{"credentialId":"Y3JlZA","prfFirst":"cHJm"}"#,
+        );
+        assert!(!payload.remember_requested);
+        assert_eq!(payload.credential_id, b"cred");
+        assert_eq!(payload.prf_first.as_deref(), Some(b"prf".as_slice()));
+    }
+
+    #[test]
+    fn payload_with_remember_true_requests_remembering() {
+        let payload = parse_payload(
+            br#"{"credentialId":"Y3JlZA","prfFirst":"cHJm","remember":true}"#,
+        );
+        assert!(payload.remember_requested);
+    }
+
+    #[test]
+    fn qr_config_offers_remember_only_when_asked() {
+        let cli_secret = EphemeralSecret::random_from_rng(OsRng);
+        let cli_public = PublicKey::from(&cli_secret);
+        let config = |offer| -> serde_json::Value {
+            let json = build_qr_config("assert", "session", &cli_public, "deploy", &[0; 32], &[0; 32], offer);
+            serde_json::from_str(&json).unwrap()
+        };
+        assert_eq!(config(true)["m"], serde_json::json!(true));
+        assert!(config(false).get("m").is_none());
+    }
 }

@@ -192,6 +192,40 @@ a:hover {
   color: var(--muted);
 }
 
+/* ─── remember opt-in ─── */
+
+.remember {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  margin-top: 24px;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  background: var(--callout-bg);
+  color: var(--muted);
+  font-size: 0.95rem;
+  cursor: pointer;
+  user-select: none;
+}
+
+.remember[hidden] {
+  display: none;
+}
+
+.remember input {
+  flex-shrink: 0;
+  width: 1.2em;
+  height: 1.2em;
+  margin-top: 0.2em;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.remember:has(input:checked) {
+  border-color: var(--accent);
+  color: var(--fg);
+}
+
 /* ─── action button ─── */
 
 .action {
