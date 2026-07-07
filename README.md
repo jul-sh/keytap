@@ -45,7 +45,7 @@ Arguments & options
 
 Skip repeated prompts for a key: `keytap remember NAME` (see `keytap remember --help`).
 Holds that expire instead (ssh-agent, TTLs): see `keytap reveal --help`.
-CI (headless, $CI set): keys come from `$KEYTAP_KEY_<NAME>` — see the README's CI section.
+CI (headless, $CI set): keys come from `$KEYTAP_KEY_<NAME>` — see `keytap reveal --help`.
 Run `keytap <COMMAND> --help` for the full details of any command.
 ```
 <!--HELP:END-->
