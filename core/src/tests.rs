@@ -269,3 +269,55 @@ fn test_golden_vectors() {
         );
     }
 }
+
+#[test]
+fn test_parse_age_secret_key_round_trips() {
+    for raw in [[0u8; 32], [7u8; 32], [0xFF; 32]] {
+        let encoded = String::from_utf8(
+            format_private_key(&raw, PrivateKeyFormat::AgeSecretKey).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(parse_age_secret_key(&encoded).unwrap(), raw.to_vec());
+        // bech32 permits either case as long as it's uniform; keytap emits
+        // uppercase, but a lowercased copy must parse to the same key.
+        assert_eq!(parse_age_secret_key(&encoded.to_lowercase()).unwrap(), raw.to_vec());
+    }
+}
+
+#[test]
+fn test_parse_age_secret_key_rejects_bad_input() {
+    let valid = String::from_utf8(
+        format_private_key(&[7u8; 32], PrivateKeyFormat::AgeSecretKey).unwrap(),
+    )
+    .unwrap();
+
+    // Not bech32 at all.
+    assert!(matches!(
+        parse_age_secret_key("not-a-key"),
+        Err(KeytapError::InvalidKeyMaterial { .. })
+    ));
+    // Other lossless encodings of the same key are deliberately refused:
+    // the env contract is one format, not autodetection.
+    let hex = String::from_utf8(format_private_key(&[7u8; 32], PrivateKeyFormat::Hex).unwrap()).unwrap();
+    assert!(parse_age_secret_key(&hex).is_err());
+    // Wrong prefix, valid bech32.
+    let wrong_hrp = bech32_encode("age", &[7u8; 32]);
+    assert!(matches!(
+        parse_age_secret_key(&wrong_hrp),
+        Err(KeytapError::InvalidKeyMaterial { .. })
+    ));
+    // Right prefix, wrong payload length.
+    let short = bech32_encode("age-secret-key-", &[7u8; 16]);
+    assert!(matches!(
+        parse_age_secret_key(&short),
+        Err(KeytapError::InvalidKeyMaterial { .. })
+    ));
+    // A corrupted character trips the checksum instead of yielding a key.
+    let mut corrupted = valid.clone();
+    let last = corrupted.pop().unwrap();
+    corrupted.push(if last == 'Q' { 'P' } else { 'Q' });
+    assert!(parse_age_secret_key(&corrupted).is_err());
+    // Mixed case is invalid bech32.
+    let mixed = format!("age-SECRET-key-{}", &valid["AGE-SECRET-KEY-".len()..]);
+    assert!(parse_age_secret_key(&mixed).is_err());
+}

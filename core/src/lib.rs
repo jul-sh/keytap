@@ -14,6 +14,8 @@ pub enum KeytapError {
     InvalidPrfOutputLength { actual: usize },
     #[error("unsupported format: {reason}")]
     UnsupportedFormat { reason: String },
+    #[error("invalid key material: {reason}")]
+    InvalidKeyMaterial { reason: String },
     #[error("internal error: {message}")]
     Internal { message: String },
 }
@@ -87,6 +89,27 @@ pub fn format_private_key(raw_key: &[u8], format: PrivateKeyFormat) -> Result<Ve
         PrivateKeyFormat::Raw => Ok(key.to_vec()),
         PrivateKeyFormat::SshPrivateKey => Ok(ssh::private_key_pem(key).into_bytes()),
     }
+}
+
+/// Parse the age secret key encoding (`AGE-SECRET-KEY-1…`) back into the raw
+/// 32 key bytes — the inverse of `format_private_key(_, AgeSecretKey)`. This
+/// is the one encoding accepted from the environment (`$KEYTAP_KEY_<NAME>`):
+/// bech32's checksum means a corrupted value fails here instead of silently
+/// becoming a different key.
+pub fn parse_age_secret_key(s: &str) -> Result<Vec<u8>, KeytapError> {
+    let (hrp, data) = bech32::decode(s)
+        .map_err(|e| KeytapError::InvalidKeyMaterial { reason: e.to_string() })?;
+    if hrp.to_lowercase() != "age-secret-key-" {
+        return Err(KeytapError::InvalidKeyMaterial {
+            reason: format!("prefix is '{}', expected 'age-secret-key-'", hrp.to_lowercase()),
+        });
+    }
+    if data.len() != 32 {
+        return Err(KeytapError::InvalidKeyMaterial {
+            reason: format!("holds {} key bytes, expected 32", data.len()),
+        });
+    }
+    Ok(data)
 }
 
 pub fn format_public_key(raw_key: &[u8], format: PublicKeyFormat, name: Option<&str>) -> Result<String, KeytapError> {

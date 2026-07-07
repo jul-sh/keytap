@@ -45,6 +45,7 @@ Arguments & options
 
 Skip repeated prompts for a key: `keytap remember NAME` (see `keytap remember --help`).
 Holds that expire instead (ssh-agent, TTLs): see `keytap reveal --help`.
+CI (headless, $CI set): keys come from `$KEYTAP_KEY_<NAME>` — see the README's CI section.
 Run `keytap <COMMAND> --help` for the full details of any command.
 ```
 <!--HELP:END-->
@@ -248,6 +249,50 @@ entries it didn't create. Usually simpler: remember the key and have the other
 tool run `keytap reveal`, which no longer prompts.
 
 Whatever holds the key must be trusted accordingly.
+
+## CI
+
+A CI job can hold secrets, but nobody is there to approve a passkey ceremony.
+So under `$CI` (which every major CI platform sets) keytap refuses to start
+one: a passkey prompt in a headless job is a hung runner, not a question.
+A missing key fails the job immediately, with the fix in the message.
+(`--prompt` overrides, for the rare run where someone really is watching the
+log and wants to scan the QR code out of it.)
+
+Instead, hand the job the derived key through the environment, one variable
+per key name:
+
+```bash
+# once, on a machine with the passkey
+keytap reveal ci --as age | gh secret set KEYTAP_KEY_CI
+```
+
+```yaml
+# in the job: the same commands as on your machine, no branching
+env:
+  KEYTAP_KEY_CI: ${{ secrets.KEYTAP_KEY_CI }}
+steps:
+  - run: keytap decrypt ci < secrets/api-token.age
+```
+
+The contract is deliberately narrow:
+
+- **The variable holds exactly the output of `keytap reveal <name> --as age`**
+  (`AGE-SECRET-KEY-1…`). One format, and a checksummed one: a mangled secret
+  fails loudly at startup instead of quietly becoming a different key. The
+  same 32 bytes still come out in every format — `keytap reveal ci --as ssh`
+  works from the variable.
+- **The variable name** is `KEYTAP_KEY_` plus the key name uppercased, with
+  everything outside `A–Z0–9` flattened to `_` (`my-app` →
+  `KEYTAP_KEY_MY_APP`). Keep CI-bound key names to lowercase letters, digits,
+  and dashes and this is invisible.
+- **A set variable always wins** over remembered keys and ceremonies, and a
+  set-but-broken variable (empty, wrong encoding) is always a hard error
+  naming the variable — never a silent fall-through to a prompt no one can
+  answer.
+- **If a variable leaks, that name is burned.** The value is the derived key
+  for that one name — never the passkey root — and derivation is
+  deterministic, so there is no rotating it: retire the name.
 
 ## Tips
 

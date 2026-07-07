@@ -1,4 +1,5 @@
 mod encrypt;
+mod env_keys;
 mod help;
 mod keychain;
 mod nearby;
@@ -20,6 +21,13 @@ use zeroize::Zeroizing;
 struct Cli {
     #[command(subcommand)]
     command: Command,
+
+    /// Run a passkey ceremony even under $CI (the QR code lands in the job log)
+    // With $CI set, a missing key fails fast instead of prompting — a prompt
+    // in a headless job is a hung runner, not a question. This is the
+    // override for the rare run where someone really is watching the log.
+    #[arg(long, global = true)]
+    prompt: bool,
 }
 
 #[derive(Subcommand)]
@@ -141,23 +149,24 @@ fn main() {
 
     match cli.command {
         Command::Init => {
+            guard_ceremony("init", cli.prompt);
             let credential_id = register();
             remember::after_init(&credential_id);
         }
         Command::Public { ref name, format } => {
-            let raw_key = obtain_key(name);
+            let raw_key = obtain_key(name, cli.prompt);
             emit_public_key(&raw_key, format, name);
         }
         Command::Reveal { ref name, format } => {
-            let raw_key = obtain_key(name);
+            let raw_key = obtain_key(name, cli.prompt);
             emit_private_key(&raw_key, format);
         }
         Command::Encrypt { ref name, ref recipients, ref recipients_file, no_self } => {
-            let raw_key = obtain_key(name);
+            let raw_key = obtain_key(name, cli.prompt);
             encrypt::encrypt(&raw_key, recipients, recipients_file, !no_self);
         }
         Command::Decrypt { ref name } => {
-            let raw_key = obtain_key(name);
+            let raw_key = obtain_key(name, cli.prompt);
             encrypt::decrypt(&raw_key);
         }
         Command::Remember { ref name } => {
@@ -166,6 +175,7 @@ fn main() {
             if let Err(e) = keytap_core::prf_salt_for_name(name) {
                 die(&e.to_string());
             }
+            guard_ceremony("remember", cli.prompt);
             let mut target = remember::write_target();
             let assertion = authenticate(name, SUPPRESS_REMEMBER);
             let raw_key = derive_key(&assertion.prf_output);
@@ -182,14 +192,28 @@ fn main() {
     }
 }
 
-/// Resolve the raw key for `name`: a key remembered on this machine (under
-/// the active passkey root) is used as-is; otherwise run the passkey ceremony
-/// and derive on demand. Nothing is stored unless the user opted in on the
+/// Resolve the raw key for `name`, in order: a key handed in via the
+/// environment (`$KEYTAP_KEY_<NAME>`, the CI path), a key remembered on this
+/// machine (under the active passkey root), and finally a passkey ceremony,
+/// deriving on demand. Under `$CI` the ceremony rung is refused unless
+/// `--prompt` asks for it. Nothing is stored unless the user opted in on the
 /// nearby page ("remember this key on this machine"); that request arrives
 /// with the assertion and is honored here, best-effort.
-fn obtain_key(name: &str) -> Zeroizing<Vec<u8>> {
+fn obtain_key(name: &str, allow_prompt: bool) -> Zeroizing<Vec<u8>> {
+    if let Some(raw_key) = env_keys::resolve(name) {
+        return raw_key;
+    }
     if let Some(raw_key) = remember::lookup(name) {
         return raw_key;
+    }
+    if in_ci() && !allow_prompt {
+        die(&format!(
+            "$CI is set and there is no key for '{name}': refusing to start a passkey ceremony \
+             (it would hang this job). Set ${var} to the output of \
+             `keytap reveal {name} --as age`, or pass --prompt to run the ceremony anyway \
+             (the QR code lands in the job log).",
+            var = env_keys::var_name(name)
+        ));
     }
     let assertion = authenticate(name, OFFER_REMEMBER);
     let raw_key = derive_key(&assertion.prf_output);
@@ -197,6 +221,25 @@ fn obtain_key(name: &str) -> Zeroizing<Vec<u8>> {
         remember::remember_requested_nearby(name, &assertion.credential_id, &raw_key);
     }
     raw_key
+}
+
+
+/// `init` and `remember` exist to run a ceremony; under `$CI` that still
+/// needs the same explicit opt-in as the derivation commands.
+fn guard_ceremony(command: &str, allow_prompt: bool) {
+    if in_ci() && !allow_prompt {
+        die(&format!(
+            "$CI is set: refusing to start the passkey ceremony `keytap {command}` needs \
+             (it would hang this job). Pass --prompt to run it anyway \
+             (the QR code lands in the job log)."
+        ));
+    }
+}
+
+/// Whether this is a CI environment: `$CI` set to anything but the explicit
+/// opt-outs — the convention every major CI platform follows.
+fn in_ci() -> bool {
+    std::env::var("CI").is_ok_and(|v| !v.is_empty() && v != "false" && v != "0")
 }
 
 /// True when the invocation asks for top-level help: no subcommand at all, or

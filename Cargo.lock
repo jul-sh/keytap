@@ -1035,7 +1035,7 @@ dependencies = [
 
 [[package]]
 name = "keytap"
-version = "6.1.0"
+version = "6.2.0"
 dependencies = [
  "aes-gcm",
  "age",
