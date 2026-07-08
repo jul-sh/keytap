@@ -33,6 +33,13 @@ pub struct Cli {
     pub prompt: bool,
 }
 
+// The serde view mirrors nothing by hand: variant tags and field names come
+// from the same identifiers clap derives the CLI surface from.
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Serialize),
+    serde(tag = "cmd", rename_all = "camelCase", rename_all_fields = "camelCase")
+)]
 #[derive(Subcommand)]
 pub enum Command {
     /// Create the passkey (only needed once)
@@ -140,6 +147,36 @@ impl PublicFormat {
     /// The CLI-facing name of this format — exactly what `--as` accepts.
     pub fn as_str(self) -> String {
         self.to_possible_value().unwrap().get_name().to_string()
+    }
+}
+
+// `--as` names parse and print through clap's own value metadata, so a
+// rename in the derive is the single edit everywhere.
+impl std::str::FromStr for Format {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, String> {
+        <Self as ValueEnum>::from_str(s, false)
+    }
+}
+
+impl std::str::FromStr for PublicFormat {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, String> {
+        <Self as ValueEnum>::from_str(s, false)
+    }
+}
+
+#[cfg(feature = "serde")]
+impl serde::Serialize for Format {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.as_str())
+    }
+}
+
+#[cfg(feature = "serde")]
+impl serde::Serialize for PublicFormat {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.as_str())
     }
 }
 

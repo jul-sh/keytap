@@ -204,24 +204,15 @@ fn register() -> Vec<u8> {
 }
 
 fn emit_private_key(raw_key: &[u8], format: keytap_cli_spec::Format) {
-    match keytap_core::format_private_key(raw_key, format.into()) {
-        Ok(bytes) => {
-            // SSH PEM already ends in a newline; others are single-line values.
-            if matches!(format, keytap_cli_spec::Format::Ssh) {
-                print!("{}", String::from_utf8(bytes).unwrap());
-            } else {
-                println!("{}", String::from_utf8(bytes).unwrap());
-            }
-        }
+    match keytap_core::format_private_key_display(raw_key, format.into()) {
+        Ok(bytes) => print!("{}", String::from_utf8(bytes).unwrap()),
         Err(e) => die(&format!("format error: {e}")),
     }
 }
 
 fn emit_public_key(raw_key: &[u8], format: keytap_cli_spec::PublicFormat, name: &str) {
-    // The name is only meaningful as the SSH key comment; other formats ignore it.
-    let comment = matches!(format, keytap_cli_spec::PublicFormat::Ssh).then_some(name);
-    match keytap_core::format_public_key(raw_key, format.into(), comment) {
-        Ok(s) => println!("{s}"),
+    match keytap_core::format_public_key_display(raw_key, format.into(), name) {
+        Ok(s) => print!("{s}"),
         Err(e) => die(&format!("format error: {e}")),
     }
 }
