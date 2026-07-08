@@ -1,0 +1,10 @@
+[package]
+name = "keytap-cli-spec"
+# The version clap prints for `keytap --version` comes from this crate, so it
+# inherits the workspace version — bump it in the root Cargo.toml.
+version.workspace = true
+edition = "2021"
+
+[dependencies]
+keytap-core = { path = "../../core" }
+clap = { version = "4", features = ["derive"] }

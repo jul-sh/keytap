@@ -3,44 +3,71 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'self' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'">
-  <title>keytap</title>
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self'; connect-src 'self'; form-action 'none'; frame-ancestors 'none'; base-uri 'none'; manifest-src 'none'; worker-src blob:; script-src-elem 'self' blob:">
+  <meta name="description" content="keytap turns one passkey into reproducible SSH keys, age identities, and app secrets — in your terminal or right here, in this one.">
+  <meta name="theme-color" content="#000066">
+  <meta property="og:title" content="keytap — passkeys that turn into real keys">
+  <meta property="og:description" content="A terminal running the real keytap CLI, compiled to WebAssembly. Derive SSH keys, age identities, and app secrets from your passkey.">
+  <meta property="og:image" content="https://keytap.jul.sh/icon.png">
+  <meta property="og:url" content="https://keytap.jul.sh/">
+  <title>keytap — passkeys that turn into real keys</title>
+  <link rel="icon" href="./icon.png">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Iosevka+Charon&family=Pixelify+Sans:wght@400..700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="./nearby.css">
+  <link href="https://fonts.googleapis.com/css2?family=Pixelify+Sans:wght@400..700&family=IBM+Plex+Mono:ital,wght@0,400;0,500;0,700;1,400&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="./site.css">
+  <script type="module" src="./terminal.js"></script>
 </head>
 <body>
-  <main class="shell">
-    <div class="hero">
-      <img src="./icon.png" alt="keytap icon" class="hero-icon" width="128" height="128">
-      <div>
-        <p class="eyebrow">keytap</p>
-        <h1>Passkeys that turn into real keys.</h1>
-      </div>
-    </div>
-    <p class="summary">Register a passkey once, then derive the same SSH key, <code>age</code> identity, or app secret on any device that can unlock it. Everything runs locally, or with E2E encryption; no server ever sees your keys.</p>
 
-    <section class="panel" aria-labelledby="how-title">
-      <div class="panel-header">
-        <p class="panel-label" id="how-title">How it works</p>
-      </div>
-      <ol class="steps">
-        <li>Register a passkey with keytap</li>
-        <li>Pick a key name and output format (SSH, age, hex, ...)</li>
-        <li>Unlock your passkey — keytap derives the same key every time</li>
-      </ol>
+  <header class="masthead">
+    <a class="brand" href="/">
+      <img src="./icon.png" alt="" width="40" height="40">
+      <span class="wordmark">keytap</span>
+    </a>
+    <nav class="masthead-links">
+      <a href="https://github.com/jul-sh/keytap">github</a>
+    </nav>
+  </header>
+
+  <main>
+    <section class="hero">
+      <h1>Passkeys that turn into <span class="accent">real&nbsp;keys.</span></h1>
+      <p class="summary">Register a passkey once, then derive the same SSH key, <code>age</code> identity, or app secret on any device that can unlock it. Everything runs locally, or with E2E encryption; no server ever sees your keys.</p>
     </section>
 
-    <section class="panel" aria-labelledby="cli-title">
-      <div class="panel-header">
-        <p class="panel-label" id="cli-title">CLI (macOS &amp; Linux)</p>
+    <ol class="spec-strip" aria-label="how it works">
+      <li><span class="n">01</span>register a passkey</li>
+      <li><span class="n">02</span>pick a key name and format</li>
+      <li><span class="n">03</span>unlock — the same key, every&nbsp;time</li>
+    </ol>
+
+    <section class="terminal" aria-label="keytap terminal">
+      <div class="term-chrome">
+        <span class="term-title">keytap — tty</span>
+        <span class="term-badge">the real cli · wasm · webauthn prf</span>
       </div>
-      <p>A native command-line tool that uses Touch ID or platform authenticators for passkey authentication.</p>
-      <a href="https://github.com/jul-sh/keytap" class="action" style="margin-top:16px; text-align:center">GitHub</a>
+      <div class="term-shell">
+        <div class="term-screen" id="term-screen">
+          <div id="term-out" role="log" aria-live="polite"></div>
+          <div class="term-line" id="term-input-line"><span class="term-prompt" id="term-prompt"></span><span id="term-pre"></span><span class="term-cursor" id="term-cursor"> </span><span id="term-post"></span></div>
+          <noscript><p class="ln err">JavaScript is off, so the terminal can't run. The CLI itself doesn't need it: github.com/jul-sh/keytap</p></noscript>
+        </div>
+        <input id="term-kbd" type="text" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" enterkeyhint="send" aria-label="terminal input">
+      </div>
+      <div class="term-status">
+        <span id="term-status" data-mode="busy">loading…</span>
+        <span class="term-hints">tab completes · ↑ history · ctrl+c cancels</span>
+      </div>
     </section>
 
-    <p class="details" style="margin-top:28px">Or use the <a href="./app.html">web app</a> directly in your browser — no install needed.</p>
+    <footer class="marginalia">
+      <div><span class="k">cli</span><a href="https://github.com/jul-sh/keytap#install">install for macos &amp; linux</a></div>
+      <div><span class="k">relying party</span>keytap.jul.sh</div>
+      <div><span class="k">source</span><a href="https://github.com/jul-sh/keytap">jul-sh/keytap · mit</a></div>
+      <div><span class="k">fine print</span><a href="https://github.com/jul-sh/keytap#security">an honest security readme</a></div>
+    </footer>
   </main>
+
 </body>
 </html>

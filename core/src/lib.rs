@@ -4,6 +4,8 @@ use hkdf::Hkdf;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+#[cfg(feature = "encrypt")]
+pub mod encrypt;
 mod ssh;
 
 #[derive(Debug, Error)]
@@ -18,6 +20,10 @@ pub enum KeytapError {
     InvalidKeyMaterial { reason: String },
     #[error("internal error: {message}")]
     Internal { message: String },
+    /// An age encryption/decryption failure; the message is complete and
+    /// already names the failing stage.
+    #[error("{message}")]
+    Crypto { message: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
