@@ -97,10 +97,22 @@ function writeBlock(text, className) {
   scrollToBottom();
 }
 
+// An echoed prompt line: the prompt keeps its color, the command is plain.
+function writeEcho(line) {
+  const div = document.createElement('div');
+  div.className = 'ln echo';
+  const p = document.createElement('span');
+  p.className = 'p';
+  p.textContent = PROMPT;
+  div.append(p, sanitize(line));
+  el.out.appendChild(div);
+  scrollToBottom();
+}
+
 const io = {
   out: (text) => writeBlock(text, 'ln'),
   err: (text) => writeBlock(text, 'ln err'),
-  echo: (text) => writeBlock(text, 'ln echo'),
+  echo: writeEcho,
 };
 
 // ── Line rendering ──
@@ -182,6 +194,8 @@ function completionCandidates(tokens, endsWithSpace) {
   return { current, options: [...fs.keys()] };
 }
 
+let optionsPrintedFor = null;
+
 function complete() {
   const endsWithSpace = /\s$/.test(buffer.slice(0, cursorAt)) || cursorAt === 0;
   const head = buffer.slice(0, cursorAt);
@@ -201,8 +215,10 @@ function complete() {
   }
   if (prefix.length > current.length) {
     insertText(prefix.slice(current.length));
-  } else {
+  } else if (optionsPrintedFor !== buffer) {
+    // List candidates once per line state; holding Tab shouldn't spam.
     io.out(matches.join('  '));
+    optionsPrintedFor = buffer;
   }
 }
 
@@ -238,7 +254,7 @@ function clearScreen() {
 // ── Execution ──
 
 async function execute(line) {
-  io.echo(PROMPT + line);
+  io.echo(line);
   pushHistory(line);
   setBuffer('');
   historyAt = -1;
@@ -298,8 +314,8 @@ function onKeyDown(event) {
       event.preventDefault();
       return;
     }
-    if (!running && ctrlKey && key === 'c') {
-      io.echo(PROMPT + buffer + '^C');
+    if (!running && ctrlKey && chord === 'c') {
+      io.echo(buffer + '^C');
       setBuffer('');
       historyAt = -1;
       event.preventDefault();
@@ -429,9 +445,10 @@ async function main() {
   completionsSpec = cliCompletions();
   commands.keytap = createKeytapCommand(ceremony);
 
-  io.out(`keytap ${cliVersion()} — the real CLI, compiled to WebAssembly.`);
-  io.out('keys derive from your passkey, locally in this tab; nothing leaves it.');
+  io.out(`keytap ${cliVersion()} — passkeys that turn into real keys.`);
+  io.out('one passkey; reproducible ssh keys, age identities, and raw secrets on any device that can unlock it.');
   io.out('');
+  io.out('this is the real CLI, compiled to WebAssembly — keys derive locally, nothing leaves this tab.');
   io.out('type `keytap` for the command reference, `help` for this shell.');
   io.out('try:  keytap init');
   io.out('      keytap reveal demo --as ssh');

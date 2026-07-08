@@ -4,8 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self'; connect-src 'self'; form-action 'none'; frame-ancestors 'none'; base-uri 'none'; manifest-src 'none'; worker-src blob:; script-src-elem 'self' blob:">
-  <meta name="description" content="keytap turns one passkey into reproducible SSH keys, age identities, and app secrets — in your terminal or right here, in this one.">
-  <meta name="theme-color" content="#000066">
+  <meta name="description" content="keytap turns one passkey into reproducible SSH keys, age identities, and app secrets. This page is a terminal running the real CLI, compiled to WebAssembly.">
+  <meta name="theme-color" content="#00003d">
   <meta property="og:title" content="keytap — passkeys that turn into real keys">
   <meta property="og:description" content="A terminal running the real keytap CLI, compiled to WebAssembly. Derive SSH keys, age identities, and app secrets from your passkey.">
   <meta property="og:image" content="https://keytap.jul.sh/icon.png">
@@ -20,54 +20,25 @@
 </head>
 <body>
 
-  <header class="masthead">
-    <a class="brand" href="/">
-      <img src="./icon.png" alt="" width="40" height="40">
-      <span class="wordmark">keytap</span>
-    </a>
-    <nav class="masthead-links">
-      <a href="https://github.com/jul-sh/keytap">github</a>
-    </nav>
+  <header class="term-chrome">
+    <h1 class="term-title"><img src="./icon.png" alt="" width="18" height="18">keytap</h1>
+    <span class="term-tagline">passkeys that turn into real keys</span>
+    <a class="term-link" href="https://github.com/jul-sh/keytap">github</a>
   </header>
 
-  <main>
-    <section class="hero">
-      <h1>Passkeys that turn into <span class="accent">real&nbsp;keys.</span></h1>
-      <p class="summary">Register a passkey once, then derive the same SSH key, <code>age</code> identity, or app secret on any device that can unlock it. Everything runs locally, or with E2E encryption; no server ever sees your keys.</p>
-    </section>
-
-    <ol class="spec-strip" aria-label="how it works">
-      <li><span class="n">01</span>register a passkey</li>
-      <li><span class="n">02</span>pick a key name and format</li>
-      <li><span class="n">03</span>unlock — the same key, every&nbsp;time</li>
-    </ol>
-
-    <section class="terminal" aria-label="keytap terminal">
-      <div class="term-chrome">
-        <span class="term-title">keytap — tty</span>
-        <span class="term-badge">the real cli · wasm · webauthn prf</span>
-      </div>
-      <div class="term-shell">
-        <div class="term-screen" id="term-screen">
-          <div id="term-out" role="log" aria-live="polite"></div>
-          <div class="term-line" id="term-input-line"><span class="term-prompt" id="term-prompt"></span><span id="term-pre"></span><span class="term-cursor" id="term-cursor"> </span><span id="term-post"></span></div>
-          <noscript><p class="ln err">JavaScript is off, so the terminal can't run. The CLI itself doesn't need it: github.com/jul-sh/keytap</p></noscript>
-        </div>
-        <input id="term-kbd" type="text" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" enterkeyhint="send" aria-label="terminal input">
-      </div>
-      <div class="term-status">
-        <span id="term-status" data-mode="busy">loading…</span>
-        <span class="term-hints">tab completes · ↑ history · ctrl+c cancels</span>
-      </div>
-    </section>
-
-    <footer class="marginalia">
-      <div><span class="k">cli</span><a href="https://github.com/jul-sh/keytap#install">install for macos &amp; linux</a></div>
-      <div><span class="k">relying party</span>keytap.jul.sh</div>
-      <div><span class="k">source</span><a href="https://github.com/jul-sh/keytap">jul-sh/keytap · mit</a></div>
-      <div><span class="k">fine print</span><a href="https://github.com/jul-sh/keytap#security">an honest security readme</a></div>
-    </footer>
+  <main class="term-shell">
+    <div class="term-screen" id="term-screen">
+      <div id="term-out" role="log" aria-live="polite"></div>
+      <div class="term-line" id="term-input-line"><span class="term-prompt" id="term-prompt"></span><span id="term-pre"></span><span class="term-cursor" id="term-cursor"> </span><span id="term-post"></span></div>
+      <noscript><p class="ln err">JavaScript is off, so the terminal can't run. The CLI itself doesn't need it: github.com/jul-sh/keytap</p></noscript>
+    </div>
+    <input id="term-kbd" type="text" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" enterkeyhint="send" aria-label="terminal input">
   </main>
+
+  <footer class="term-status">
+    <span id="term-status" data-mode="busy">loading…</span>
+    <span class="term-hints">tab completes · ↑ history · ctrl+c cancels</span>
+  </footer>
 
 </body>
 </html>

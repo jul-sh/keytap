@@ -41,6 +41,25 @@ export function webAuthnAvailable() {
   return Boolean(window.PublicKeyCredential && navigator.credentials);
 }
 
+/// Whether a credential ID from an earlier ceremony is stored here — i.e.
+/// this browser has, at some point, seen `keytap init` or an assertion.
+export function hasStoredCredential() {
+  return loadCredentialId() !== null;
+}
+
+/// WebAuthn only honors an RP ID that is a registrable suffix of (or equal
+/// to) the page's host. Anywhere else — localhost checkouts, mirrors — the
+/// ceremony is doomed, and browsers report it with an unhelpful (or, in
+/// Safari's case, deliberately vague) error. Fail first, naming the fix.
+function guardOrigin(rpId) {
+  const host = location.hostname;
+  if (host === rpId || host.endsWith('.' + rpId)) return;
+  throw new Error(
+    `passkeys are bound to ${rpId}, but this page is served from ${host} — ` +
+      `ceremonies only work on https://${rpId}`
+  );
+}
+
 /// The user closed or rejected the passkey prompt — keytap calls that
 /// "cancelled", matching the native CLI's message.
 function normalizeError(error) {
@@ -52,6 +71,7 @@ function normalizeError(error) {
 
 export async function register(signal) {
   const config = registrationConfig();
+  guardOrigin(config.rp_id);
   const challenge = crypto.getRandomValues(new Uint8Array(32));
   const prfSalt = new Uint8Array(config.default_prf_salt);
 
@@ -99,6 +119,7 @@ export async function assertPrf(keyName, signal) {
   const credIdB64 = loadCredentialId();
   const preferredCredId = credIdB64 ? Array.from(decodeBase64URL(credIdB64)) : null;
   const config = assertionConfig(keyName, preferredCredId);
+  guardOrigin(config.rp_id);
 
   const request = {
     signal,

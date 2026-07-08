@@ -13,7 +13,7 @@ import {
   decryptAge,
 } from './pkg/keytap_web.js';
 
-import { register, assertPrf, webAuthnAvailable } from './webauthn.js';
+import { register, assertPrf, webAuthnAvailable, hasStoredCredential } from './webauthn.js';
 import { encode } from './shell.js';
 
 const empty = new Uint8Array(0);
@@ -121,7 +121,13 @@ export function createKeytapCommand(ceremony) {
           return { stdout: empty, code: 1 };
       }
     } catch (error) {
-      err(`error: ${error instanceof Error ? error.message : String(error)}`);
+      const message = error instanceof Error ? error.message : String(error);
+      err(`error: ${message}`);
+      // A dismissed prompt in a browser that has never completed a ceremony
+      // usually means there is no passkey to pick — say so.
+      if (message === 'cancelled' && cmd.cmd !== 'init' && !hasStoredCredential()) {
+        err('hint: no passkey seen in this browser yet — `keytap init` creates one.');
+      }
       return { stdout: empty, code: 1 };
     }
   };
