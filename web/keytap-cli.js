@@ -22,8 +22,8 @@ const empty = new Uint8Array(0);
 // Commands that store state on "this machine" have no home in a page that
 // deliberately keeps none. One loud error, naming the fix.
 const STATELESS =
-  'this web terminal keeps no state, so keys are never remembered here. ' +
-  'Install the CLI to remember keys on a machine: https://github.com/jul-sh/keytap';
+  'this page stores nothing, so keys are never remembered here — ' +
+  'install keytap on a machine for that: https://github.com/jul-sh/keytap';
 
 const NEXT_REVEAL = 'keytap reveal demo --as ssh';
 
@@ -55,23 +55,11 @@ export function createKeytapCommand(ceremony, ui) {
     }
   }
 
-  // Resolve the raw key for `name`. When this browser has never completed a
-  // ceremony and the prompt comes back empty-handed, init is implicit: create
-  // the passkey (narrated), then continue the original command. The assertion
-  // is still attempted first so a visitor whose passkey synced from another
-  // device picks it instead of minting a new root.
-  async function rawKeyFor(name, err) {
-    try {
-      return await assertOnce(name);
-    } catch (error) {
-      const cancelled = error instanceof Error && error.message === 'cancelled';
-      if (!cancelled || hasStoredCredential()) throw error;
-      ui.hint('no passkey in this browser yet — creating one, then continuing.');
-      await registerHere();
-      err('Passkey registered successfully.');
-      return await assertOnce(name);
-    }
-  }
+  // Resolve the raw key for `name` — one assertion, nothing more. Creation
+  // is never automatic: a create ceremony can replace an existing synced
+  // passkey, which would change every derived key. The recovery for a
+  // passkey-less browser is an offered tap, printed by the error path.
+  const rawKeyFor = assertOnce;
 
 
   // Muted reassurance under a freshly revealed key — the moment of maximum
@@ -134,21 +122,21 @@ export function createKeytapCommand(ceremony, ui) {
             code: 0,
             after: () =>
               ui.hintCmd(
-                'your password manager syncs this passkey — that sync is your backup. next: ',
+                "this passkey syncs across your devices — that's the backup. next: ",
                 NEXT_REVEAL,
-                ' (Touch ID / Face ID again — every reveal asks)'
+                ' (it asks again; every reveal does)'
               ),
           };
         }
 
         case 'public': {
-          const rawKey = await rawKeyFor(cmd.name, err);
+          const rawKey = await rawKeyFor(cmd.name);
           const text = formatPublicKey(rawKey, cmd.format, cmd.name);
           return { stdout: encode(text + '\n'), code: 0 };
         }
 
         case 'reveal': {
-          const rawKey = await rawKeyFor(cmd.name, err);
+          const rawKey = await rawKeyFor(cmd.name);
           const bytes = new Uint8Array(formatPrivateKey(rawKey, cmd.format));
           // SSH PEM already ends in a newline; others are single-line values.
           const newline = cmd.format === 'ssh' ? empty : encode('\n');
@@ -170,14 +158,14 @@ export function createKeytapCommand(ceremony, ui) {
             labels.push(file);
             contents.push(new TextDecoder().decode(data));
           }
-          const rawKey = await rawKeyFor(cmd.name, err);
+          const rawKey = await rawKeyFor(cmd.name);
           const selfKey = cmd.noSelf ? undefined : rawKey;
           const stdout = new Uint8Array(encryptAge(selfKey, cmd.recipients, labels, contents, stdin));
           return { stdout, code: 0 };
         }
 
         case 'decrypt': {
-          const rawKey = await rawKeyFor(cmd.name, err);
+          const rawKey = await rawKeyFor(cmd.name);
           const stdout = new Uint8Array(decryptAge(rawKey, stdin));
           return { stdout, code: 0 };
         }
@@ -189,6 +177,11 @@ export function createKeytapCommand(ceremony, ui) {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       err(`error: ${message}`);
+      // A dismissed prompt in a browser that has never completed a ceremony
+      // usually means there is no passkey to pick — offer the fix, one tap.
+      if (message === 'cancelled' && cmd.cmd !== 'init' && !hasStoredCredential()) {
+        ui.hintCmd('no passkey in this browser yet — ', 'keytap init', ' creates one.');
+      }
       return { stdout: empty, code: 1 };
     }
   };

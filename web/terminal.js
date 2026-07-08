@@ -16,8 +16,8 @@ const PROMPT = '$ ';
 
 // Chrome-authored literal commands; what they do is decided by the CLI.
 const SUGGESTIONS = [
-  { cmd: 'keytap init', note: 'creates a passkey in your password manager (no account — Touch ID / Face ID, deletable anytime)' },
-  { cmd: 'keytap reveal demo --as ssh', note: 'turns that passkey into an ssh key named demo' },
+  { cmd: 'keytap init', note: 'creates a passkey (no account, deletable anytime)' },
+  { cmd: 'keytap reveal demo --as ssh', note: 'turns it into an ssh key named demo' },
   { cmd: 'keytap', note: 'full command list' },
 ];
 
@@ -588,13 +588,14 @@ async function main() {
   completionsSpec = cliCompletions();
   commands.keytap = createKeytapCommand(ceremony, io);
 
-  io.out(`keytap ${cliVersion()} — passkeys that turn into real keys: ssh, file encryption (age), raw secrets.`);
-  io.out('same passkey + same key name = the same key, on any device. no keys stored, nothing to back up.');
-  io.out('the real CLI, compiled to WebAssembly — keys are computed in this tab and never leave it.');
+  io.out(`keytap ${cliVersion()} — passkeys that turn into real keys: ssh, file encryption, app secrets.`);
+  io.out('same passkey + same key name = the same key, on any device. nothing is stored, nothing to back up.');
+  io.out('this page runs keytap itself — keys are computed here and never leave this tab.');
   io.out('');
   printSuggestions();
   io.out('');
   writeHintLine();
+  io.hintLink('this is the demo — the real tool installs from ', 'https://github.com/jul-sh/keytap');
   focusKeyboard();
 }
 
@@ -603,7 +604,7 @@ async function main() {
 function writeHintLine() {
   const coarse = window.matchMedia?.('(pointer: coarse)').matches;
   const pre = coarse ? 'tap any printed command to run it · ' : 'tab key completes · ↑ history · ';
-  io.hintCmd(pre, 'help', ' for the shell + how keys derive');
+  io.hintCmd(pre, 'help', ' for more');
 }
 
 main().catch((error) => {
