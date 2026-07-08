@@ -41,26 +41,26 @@ export function webAuthnAvailable() {
   return Boolean(window.PublicKeyCredential && navigator.credentials);
 }
 
-/// Whether a credential ID from an earlier ceremony is stored here — i.e.
+/// Whether a credential ID from an earlier ceremony is stored here; i.e.
 /// this browser has, at some point, seen `keytap init` or an assertion.
 export function hasStoredCredential() {
   return loadCredentialId() !== null;
 }
 
 /// WebAuthn only honors an RP ID that is a registrable suffix of (or equal
-/// to) the page's host. Anywhere else — localhost checkouts, mirrors — the
+/// to) the page's host. Anywhere else; localhost checkouts, mirrors; the
 /// ceremony is doomed, and browsers report it with an unhelpful (or, in
 /// Safari's case, deliberately vague) error. Fail first, naming the fix.
 function guardOrigin(rpId) {
   const host = location.hostname;
   if (host === rpId || host.endsWith('.' + rpId)) return;
   throw new Error(
-    `passkeys are bound to ${rpId}, but this page is served from ${host} — ` +
+    `passkeys are bound to ${rpId}, but this page is served from ${host}; ` +
       `ceremonies only work on https://${rpId}`
   );
 }
 
-/// The user closed or rejected the passkey prompt — keytap calls that
+/// The user closed or rejected the passkey prompt; keytap calls that
 /// "cancelled", matching the native CLI's message.
 function normalizeError(error) {
   if (error && (error.name === 'NotAllowedError' || error.name === 'AbortError')) {

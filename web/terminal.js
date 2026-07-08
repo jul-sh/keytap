@@ -21,7 +21,7 @@ const SUGGESTIONS = [
   { cmd: 'keytap', note: 'full command list' },
 ];
 
-const HELP = `keytap web terminal — the real CLI, compiled to WebAssembly.
+const HELP = `keytap web terminal; the real CLI, compiled to WebAssembly.
 
   keytap …                      the actual keytap CLI (start with \`keytap\`)
   ls · cat · echo · rm · xxd    a tiny in-memory filesystem
@@ -31,14 +31,14 @@ const HELP = `keytap web terminal — the real CLI, compiled to WebAssembly.
 tab key completes · ↑ ↓ history · ctrl+c or esc cancels a passkey prompt
 shift+tab moves focus out of the terminal.
 
-how keys derive: WebAuthn PRF — your authenticator releases a per-name secret
-after Touch ID; keys are HKDF-derived from it. same input, same key. the
-installed CLI reaches the same passkey for this domain, so web and cli derive
-identical keys (how: the GITHUB readme).
-network: locked down by the CSP meta tag (view-source) — static page, no
+how keys derive: WebAuthn PRF; your authenticator releases a per-name secret
+after Touch ID, and keys are HKDF-derived from it. same input, same key. the
+installed tool reaches the same passkey for this domain, so web and cli derive
+identical keys (how: the install keytap readme).
+network: locked down by the CSP meta tag (view-source); static page, no
 server code, no analytics.
-printed output is readable by your browser and its extensions — don't reuse
-this demo's key names; real key work belongs in the installed CLI.
+printed output is readable by your browser and its extensions; don't reuse
+this demo's key names. real key work belongs in the installed tool.
 `;
 
 // ── DOM ──
@@ -73,8 +73,8 @@ try {
 
 // ── Ceremony hooks ──
 // One busy line in the log carries the state, the trust claim (front-loaded,
-// so screen readers hear it before the OS sheet seizes focus), and — being a
-// button — the tap-to-cancel that mobile otherwise lacks.
+// so screen readers hear it before the OS sheet seizes focus), and; being a
+// button; the tap-to-cancel that mobile otherwise lacks.
 
 let abortController = null;
 let busyLine = null;
@@ -85,8 +85,8 @@ const ceremony = {
     abortController = new AbortController();
     const text =
       kind === 'create'
-        ? 'passkey prompt — nothing is sent by this page · creating your passkey · tap this line or esc cancels'
-        : `passkey prompt — nothing is sent by this page · waiting for ${name} · tap this line or esc cancels`;
+        ? 'passkey prompt; nothing is sent by this page · creating your passkey · tap this line or esc cancels'
+        : `passkey prompt; nothing is sent by this page · waiting for ${name} · tap this line or esc cancels`;
     busyLine = document.createElement('button');
     busyLine.type = 'button';
     busyLine.className = 'ln busy';
@@ -121,7 +121,7 @@ function scrollToBottom() {
   el.screen.scrollTop = el.screen.scrollHeight;
 }
 
-// Control characters other than newline/tab render as middle dots — binary
+// Control characters other than newline/tab render as middle dots; binary
 // output (age ciphertext) stays legible instead of wrecking the layout.
 function sanitize(text) {
   // eslint-disable-next-line no-control-regex
@@ -149,7 +149,7 @@ function writeEcho(line) {
   scrollToBottom();
 }
 
-// Pipeline stdout: rendered sanitized, copied raw — SSH keys and age
+// Pipeline stdout: rendered sanitized, copied raw; SSH keys and age
 // ciphertext must survive the trip to the clipboard byte-for-byte. Long
 // blocks (key material) are kept out of the live region so screen readers
 // don't dictate private keys; a short summary speaks instead.
@@ -160,7 +160,7 @@ function writeResult(text) {
     div.setAttribute('aria-live', 'off');
     const summary = document.createElement('div');
     summary.className = 'visually-hidden';
-    summary.textContent = `output, ${lines} lines — copy button follows`;
+    summary.textContent = `output, ${lines} lines; copy button follows`;
     el.out.appendChild(summary);
   }
   const copy = document.createElement('button');
@@ -189,16 +189,21 @@ function writeHintCmd(pre, cmd, post) {
   scrollToBottom();
 }
 
-// A muted line with a real link (the one place the page points off-site).
-function writeHintLink(pre, url) {
+// A line with a real link (the only place the page points off-site).
+function writeLinkLine(pre, url, label, post = '', className = 'ln hint') {
   const div = document.createElement('div');
-  div.className = 'ln hint';
+  div.className = className;
   const a = document.createElement('a');
   a.href = url;
-  a.textContent = url.replace(/^https:\/\//, '');
-  div.append(pre, a);
+  a.textContent = label;
+  if (label !== url.replace(/^https:\/\//, '')) a.setAttribute('aria-label', 'install keytap, on github');
+  div.append(pre, a, post);
   el.out.appendChild(div);
   scrollToBottom();
+}
+
+function writeHintLink(pre, url) {
+  writeLinkLine(pre, url, url.replace(/^https:\/\//, ''));
 }
 
 const io = {
@@ -221,7 +226,7 @@ function printSuggestions() {
     btn.type = 'button';
     btn.className = 'cmd';
     btn.textContent = cmd;
-    div.append('  ', btn, ' '.repeat(width - cmd.length) + '  — ' + note);
+    div.append('  ', btn, ' '.repeat(width - cmd.length) + '    ' + note);
     el.out.appendChild(div);
   }
   scrollToBottom();
@@ -472,7 +477,7 @@ function onKeyDown(event) {
       event.preventDefault();
       break;
     case 'Tab':
-      // Shift+Tab moves native focus out (to the github link) — the
+      // Shift+Tab moves native focus out (to the github link); the
       // keyboard-only escape from the terminal.
       if (event.shiftKey) return;
       complete();
@@ -588,14 +593,19 @@ async function main() {
   completionsSpec = cliCompletions();
   commands.keytap = createKeytapCommand(ceremony, io);
 
-  io.out(`keytap ${cliVersion()} — passkeys that turn into real keys: ssh, file encryption, app secrets.`);
+  io.out(`keytap ${cliVersion()} · passkeys that turn into real keys: ssh, file encryption, app secrets.`);
   io.out('same passkey + same key name = the same key, on any device. nothing is stored, nothing to back up.');
-  io.out('this page runs keytap itself — keys are computed here and never leave this tab.');
+  writeLinkLine(
+    'this page runs the CLI compiled to WebAssembly as a demo; install on your machine ',
+    'https://github.com/jul-sh/keytap#install',
+    'here',
+    '.',
+    'ln'
+  );
   io.out('');
   printSuggestions();
   io.out('');
   writeHintLine();
-  io.hintLink('this is the demo — the real tool installs from ', 'https://github.com/jul-sh/keytap');
   focusKeyboard();
 }
 

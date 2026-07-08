@@ -2,7 +2,7 @@
 
 // The `keytap` command of the web terminal. Parsing, help, and crypto all
 // happen inside the wasm build of the real CLI (cliInvoke and friends);
-// this module only routes: argv in, ceremonies via WebAuthn, bytes out —
+// this module only routes: argv in, ceremonies via WebAuthn, bytes out,
 // plus the muted follow-up lines the page prints as chrome.
 
 import {
@@ -22,7 +22,7 @@ const empty = new Uint8Array(0);
 // Commands that store state on "this machine" have no home in a page that
 // deliberately keeps none. One loud error, naming the fix.
 const STATELESS =
-  'this page stores nothing, so keys are never remembered here — ' +
+  'this page stores nothing, so keys are never remembered here; ' +
   'install keytap on a machine for that: https://github.com/jul-sh/keytap';
 
 const NEXT_REVEAL = 'keytap reveal demo --as ssh';
@@ -55,18 +55,18 @@ export function createKeytapCommand(ceremony, ui) {
     }
   }
 
-  // Resolve the raw key for `name` — one assertion, nothing more. Creation
+  // Resolve the raw key for `name`; one assertion, nothing more. Creation
   // is never automatic: a create ceremony can replace an existing synced
   // passkey, which would change every derived key. The recovery for a
   // passkey-less browser is an offered tap, printed by the error path.
   const rawKeyFor = assertOnce;
 
 
-  // Muted reassurance under a freshly revealed key — the moment of maximum
+  // Muted reassurance under a freshly revealed key; the moment of maximum
   // "should this be on my screen?".
   function revealFooter(name, format) {
     ui.hint(
-      `derived, not stored, not sent — same passkey + name '${name}' reproduces this exact key on any device`
+      `derived, not stored, not sent; same passkey + name '${name}' reproduces this exact key on any device`
     );
     if (format === 'ssh') {
       ui.hintCmd('the public half: ', `keytap public ${name} --as ssh`, '');
@@ -75,7 +75,7 @@ export function createKeytapCommand(ceremony, ui) {
       if (!sessionStorage.getItem('keytap:web:cli-bridge')) {
         sessionStorage.setItem('keytap:web:cli-bridge', '1');
         ui.hintLink(
-          'use it for real work: install the CLI (it uses this same passkey) — ',
+          'use it for real work: install keytap (it uses this same passkey): ',
           'https://github.com/jul-sh/keytap'
         );
       }
@@ -122,7 +122,7 @@ export function createKeytapCommand(ceremony, ui) {
             code: 0,
             after: () =>
               ui.hintCmd(
-                "this passkey syncs across your devices — that's the backup. next: ",
+                "this passkey syncs across your devices; that's the backup. next: ",
                 NEXT_REVEAL,
                 ' (it asks again; every reveal does)'
               ),
@@ -178,9 +178,9 @@ export function createKeytapCommand(ceremony, ui) {
       const message = error instanceof Error ? error.message : String(error);
       err(`error: ${message}`);
       // A dismissed prompt in a browser that has never completed a ceremony
-      // usually means there is no passkey to pick — offer the fix, one tap.
+      // usually means there is no passkey to pick; offer the fix, one tap.
       if (message === 'cancelled' && cmd.cmd !== 'init' && !hasStoredCredential()) {
-        ui.hintCmd('no passkey in this browser yet — ', 'keytap init', ' creates one.');
+        ui.hintCmd('no passkey in this browser yet; ', 'keytap init', ' creates one.');
       }
       return { stdout: empty, code: 1 };
     }

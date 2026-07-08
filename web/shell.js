@@ -1,7 +1,7 @@
 'use strict';
 
 // The demo shell around the keytap CLI: tokenizer, pipelines, redirects, an
-// in-memory filesystem, and a few coreutils. Deliberately tiny — everything
+// in-memory filesystem, and a few coreutils. Deliberately tiny; everything
 // keytap-shaped lives in the wasm build of the real CLI, not here.
 
 const encoder = new TextEncoder();
@@ -102,7 +102,7 @@ export function createFs() {
   const files = new Map();
   files.set(
     'notes.txt',
-    encode('in-memory demo filesystem — nothing here survives a reload.\ntry: keytap encrypt < notes.txt > notes.age\n')
+    encode('in-memory demo filesystem; nothing here survives a reload.\ntry: keytap encrypt < notes.txt > notes.age\n')
   );
   return files;
 }
