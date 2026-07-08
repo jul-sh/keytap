@@ -1,6 +1,47 @@
 /* ─── keytap — the site is a terminal ───
-   One full-viewport terminal: an inverted title strip, a screen, a status
-   bar. Hard rules, flat color, no ornament. */
+   Two regions: an inverted title strip and the screen. Hard rules, flat
+   color, no ornament. Fonts are self-hosted: the page claims nothing
+   leaves it, so nothing may. */
+
+@font-face {
+  font-family: "Pixelify Sans";
+  font-style: normal;
+  font-weight: 400 700;
+  font-display: swap;
+  src: url(./fonts/PixelifySans-400-700.woff2) format("woff2");
+}
+
+@font-face {
+  font-family: "IBM Plex Mono";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url(./fonts/IBMPlexMono-400.woff2) format("woff2");
+}
+
+@font-face {
+  font-family: "IBM Plex Mono";
+  font-style: italic;
+  font-weight: 400;
+  font-display: swap;
+  src: url(./fonts/IBMPlexMono-400-italic.woff2) format("woff2");
+}
+
+@font-face {
+  font-family: "IBM Plex Mono";
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url(./fonts/IBMPlexMono-500.woff2) format("woff2");
+}
+
+@font-face {
+  font-family: "IBM Plex Mono";
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url(./fonts/IBMPlexMono-700.woff2) format("woff2");
+}
 
 :root {
   color-scheme: dark;
@@ -29,7 +70,7 @@ body {
 }
 
 body {
-  height: 100dvh;
+  height: var(--vvh, 100dvh); /* JS syncs --vvh to the visual viewport */
   display: flex;
   flex-direction: column;
   font: 16px/1.6 var(--mono);
@@ -56,8 +97,8 @@ body {
 .term-title {
   display: flex;
   align-items: center;
-  gap: 10px;
-  font: 700 0.95rem var(--display);
+  gap: 12px;
+  font: 700 1rem var(--display);
   letter-spacing: 0.18em;
   text-transform: uppercase;
 }
@@ -67,18 +108,8 @@ body {
   image-rendering: pixelated;
 }
 
-.term-tagline {
-  flex: 1;
-  font-size: 0.72rem;
-  letter-spacing: 0.08em;
-  opacity: 0.75;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
 .term-link {
-  margin-left: auto; /* stays right even when the tagline is hidden */
+  margin-left: auto;
   font-size: 0.72rem;
   font-weight: 700;
   text-transform: uppercase;
@@ -123,6 +154,128 @@ body {
 
 .term-screen .ln.echo .p {
   color: var(--accent);
+}
+
+.term-screen .ln.hint {
+  color: var(--muted);
+}
+
+/* Tap-to-run command strings: dotted underline says "pressable" without
+   adding chrome. The label IS the command. */
+button.cmd {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: 0;
+  padding: 0;
+  text-decoration: underline dotted var(--accent);
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+
+button.cmd {
+  position: relative;
+}
+
+button.cmd:hover,
+button.cmd:focus-visible {
+  color: var(--accent);
+  text-decoration-style: solid;
+}
+
+/* Previews "this echoes into the prompt", not "this navigates away". */
+button.cmd:hover::before,
+button.cmd:focus-visible::before {
+  content: "$ ";
+  position: absolute;
+  right: 100%;
+  color: var(--muted);
+  text-decoration: none;
+}
+
+/* The ceremony line: state, reassurance, and cancel in one button. */
+button.ln.busy {
+  display: block;
+  width: 100%;
+  text-align: left;
+  font: inherit;
+  background: none;
+  border: 0;
+  color: var(--busy);
+  cursor: pointer;
+}
+
+button.ln.busy:focus-visible {
+  outline: 1px solid var(--busy);
+  outline-offset: 2px;
+}
+
+/* Screen-reader-only text (ceremony alerts, key-block summaries). */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* Copy chip on pipeline output. */
+.term-screen .ln.res {
+  position: relative;
+  padding-right: 4.5em;
+}
+
+.copy {
+  position: absolute;
+  top: 0;
+  right: 0;
+  font: 700 0.65rem var(--mono);
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  color: var(--muted);
+  background: none;
+  border: 1px solid currentColor;
+  padding: 1px 8px;
+  cursor: pointer;
+}
+
+.copy[data-state="copied"] {
+  color: var(--accent);
+}
+
+.copy[data-state="failed"] {
+  color: var(--error);
+}
+
+@media (hover: hover) {
+  .ln.res .copy {
+    opacity: 0;
+  }
+
+  .ln.res:hover .copy,
+  .copy:focus-visible {
+    opacity: 1;
+  }
+}
+
+@media (hover: none) {
+  .copy {
+    opacity: 0.55;
+    top: auto;
+    bottom: 0;
+  }
+}
+
+@media (pointer: coarse) {
+  /* 44px-ish hit areas without layout shift. */
+  button.cmd,
+  .copy {
+    padding: 10px 8px;
+    margin: -10px -8px;
+  }
 }
 
 .term-line {
@@ -176,62 +329,33 @@ body {
   caret-color: transparent;
 }
 
-/* ─── status bar ─── */
+/* ─── focus visibility ─── */
 
-.term-status {
-  display: flex;
-  justify-content: space-between;
-  align-items: baseline;
-  gap: 16px;
-  padding: 7px var(--pad);
-  border-top: 2px solid var(--chrome);
-  font: 700 0.72rem var(--mono);
-  text-transform: uppercase;
-  letter-spacing: 0.16em;
+.term-link:focus-visible {
+  outline: 2px solid var(--chrome-fg);
+  outline-offset: 2px;
 }
 
-#term-status[data-mode="idle"] {
-  color: var(--accent);
+#term-kbd:focus-visible {
+  outline: none; /* the block cursor is the focus indicator */
 }
 
-#term-status[data-mode="busy"] {
-  color: var(--busy);
-  animation: pulse 1s steps(2, start) infinite;
-}
-
-#term-status[data-mode="error"] {
-  color: var(--error);
-}
-
-@keyframes pulse {
-  50% {
-    opacity: 0.35;
+@media (forced-colors: active) {
+  .term-cursor {
+    outline: 1px solid CanvasText;
   }
-}
-
-.term-hints {
-  color: var(--muted);
-  font-weight: 400;
-  letter-spacing: 0.14em;
-  text-align: right;
 }
 
 /* ─── responsive ─── */
 
 @media (max-width: 720px) {
-  .term-tagline,
-  .term-hints {
-    display: none;
-  }
-
   .term-screen {
     font-size: 0.88rem;
   }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .focused .term-cursor,
-  #term-status[data-mode="busy"] {
+  .focused .term-cursor {
     animation: none;
   }
 }

@@ -205,6 +205,7 @@ export async function runPipeline(line, fs, commands, err) {
   const stages = parsePipeline(tokenize(line));
   let stdin = empty;
   let code = 0;
+  let after = undefined;
 
   for (const stage of stages) {
     if (stage.stdinFile !== null) {
@@ -225,14 +226,18 @@ export async function runPipeline(line, fs, commands, err) {
 
     const result = await handler(stage.argv, stdin, fs, err);
     code = result.code;
+    // A command's follow-up chrome (footers under its output) survives only
+    // when its output actually reaches the screen unredirected.
+    after = result.after;
 
     if (stage.stdoutFile !== null) {
       const prior = stage.append ? fs.get(stage.stdoutFile) : undefined;
       fs.set(stage.stdoutFile, prior ? concat([prior, result.stdout]) : result.stdout);
       stdin = empty;
+      after = undefined;
     } else {
       stdin = result.stdout;
     }
   }
-  return { code, stdout: stdin };
+  return { code, stdout: stdin, after };
 }
