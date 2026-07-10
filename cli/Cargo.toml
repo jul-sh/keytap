@@ -1,6 +1,6 @@
 [package]
 name = "keytap"
-version = "6.2.0"
+version.workspace = true
 edition = "2021"
 
 [[bin]]
@@ -12,10 +12,9 @@ default = ["native-passkey"]
 native-passkey = ["keytap-macos"]
 
 [dependencies]
-keytap-core = { path = "../core" }
-age = { version = "0.11", default-features = false }
+keytap-core = { path = "../core", features = ["encrypt"] }
+keytap-cli-spec = { path = "spec" }
 keytap-macos = { path = "../macos", optional = true }
-clap = { version = "4", features = ["derive"] }
 serde_json = "1"
 base64 = "0.22"
 hkdf = "0.12"
@@ -30,6 +29,10 @@ aes-gcm = "0.10"
 getrandom = "0.2"
 ureq = "3"
 zeroize = "1"
+
+[dev-dependencies]
+# The encrypt_roundtrip integration test exercises age directly.
+age = { version = "0.11", default-features = false }
 
 # Remembered keys live in the OS keychain: the macOS Keychain via the
 # Security framework, and the freedesktop Secret Service (GNOME Keyring,

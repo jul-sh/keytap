@@ -1,151 +1,25 @@
 mod encrypt;
 mod env_keys;
-mod help;
 mod keychain;
 mod nearby;
 mod remember;
 
-use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
-use keytap_core::{PrivateKeyFormat, PublicKeyFormat};
+use keytap_cli_spec::{Command, Invocation};
 use zeroize::Zeroizing;
 
-#[derive(Parser)]
-#[command(
-    name = "keytap",
-    version,
-    about = "Derive keys and encrypt files from a passkey.",
-    // The top-level help is our own generated single-screen overview (see
-    // `main`); clap keeps its default `--help` on each subcommand.
-    disable_help_subcommand = true
-)]
-struct Cli {
-    #[command(subcommand)]
-    command: Command,
-
-    /// Run a passkey ceremony even under $CI (the QR code lands in the job log)
-    // With $CI set, a missing key fails fast instead of prompting — a prompt
-    // in a headless job is a hung runner, not a question. This is the
-    // override for the rare run where someone really is watching the log.
-    #[arg(long, global = true)]
-    prompt: bool,
-}
-
-#[derive(Subcommand)]
-enum Command {
-    /// Create the passkey (only needed once)
-    Init,
-
-    /// Output the public key
-    Public {
-        /// Key name for domain separation
-        #[arg(default_value = "default")]
-        name: String,
-
-        /// Output format
-        // `--as` is the documented flag; `--format` stays as a hidden alias so
-        // existing scripts keep working. (`as` is a Rust keyword, hence the
-        // field is still named `format`.)
-        #[arg(long = "as", alias = "format", value_name = "FORMAT", default_value = "hex")]
-        format: PublicFormat,
-    },
-
-    /// Reveal private key material
-    #[command(after_help = help::REUSE)]
-    Reveal {
-        /// Key name for domain separation
-        #[arg(default_value = "default")]
-        name: String,
-
-        /// Output format
-        #[arg(long = "as", alias = "format", value_name = "FORMAT", default_value = "hex")]
-        format: Format,
-    },
-
-    /// Encrypt stdin to stdout with the derived age identity
-    Encrypt {
-        /// Key name for domain separation
-        #[arg(default_value = "default")]
-        name: String,
-
-        /// Additional age recipient (can be repeated)
-        #[arg(long = "to")]
-        recipients: Vec<String>,
-
-        /// File containing age recipients (one per line)
-        #[arg(short = 'R')]
-        recipients_file: Vec<String>,
-
-        /// Don't include self as a recipient when encrypting
-        #[arg(long)]
-        no_self: bool,
-    },
-
-    /// Decrypt age input from stdin to stdout with the derived age identity
-    Decrypt {
-        /// Key name for domain separation
-        #[arg(default_value = "default")]
-        name: String,
-    },
-
-    /// Remember a derived key on this machine (no more prompts for it)
-    #[command(after_help = help::REMEMBER)]
-    Remember {
-        /// Key name for domain separation. Required: persisting a key should
-        /// name it deliberately, never land on 'default' by accident.
-        name: String,
-    },
-
-    /// Forget a remembered key
-    Forget {
-        /// Key name for domain separation
-        #[arg(default_value = "default")]
-        name: String,
-
-        /// Forget every remembered key, including ones from previous passkeys
-        #[arg(long, conflicts_with = "name")]
-        all: bool,
-    },
-
-    /// List keys remembered on this machine (never prints key material)
-    Remembered,
-}
-
-#[derive(Clone, Copy, ValueEnum)]
-pub(crate) enum Format {
-    Hex,
-    Base64,
-    Age,
-    Ssh,
-}
-
-#[derive(Clone, Copy, ValueEnum)]
-pub(crate) enum PublicFormat {
-    Hex,
-    Base64,
-    Age,
-    Ssh,
-}
-
 fn main() {
-    // Intercept the top-level help ourselves (bare `keytap`, `keytap -h`,
-    // `keytap --help`, `keytap help`) so it renders our single-screen overview.
-    // Subcommand help (`keytap reveal --help`) still falls through to clap.
-    if wants_top_level_help() {
-        print!("{}", help::overview(&Cli::command()));
-        return;
-    }
-
-    // `remember` requires an explicit name (persisting a key should never
-    // target 'default' by accident), but the bare invocation deserves a
-    // better answer than clap's generic missing-argument error.
-    if std::env::args().skip(1).eq(["remember"]) {
-        die(
-            "`keytap remember` needs a key name. Did you mean `keytap remember default`? \
-             ('default' is the key every other command uses when you don't give a name)",
-        );
-    }
-
-    let cli = Cli::parse();
+    // The whole CLI surface — clap definitions, the single-screen overview,
+    // the bare-`remember` special case — lives in keytap-cli-spec, shared
+    // with the web terminal's wasm build. This binary only executes.
+    let cli = match keytap_cli_spec::invoke(std::env::args_os()) {
+        Invocation::Overview(text) => {
+            print!("{text}");
+            return;
+        }
+        Invocation::Misuse(msg) => die(&msg),
+        Invocation::Parsed(Err(e)) => e.exit(),
+        Invocation::Parsed(Ok(cli)) => cli,
+    };
 
     match cli.command {
         Command::Init => {
@@ -242,17 +116,6 @@ fn in_ci() -> bool {
     std::env::var("CI").is_ok_and(|v| !v.is_empty() && v != "false" && v != "0")
 }
 
-/// True when the invocation asks for top-level help: no subcommand at all, or
-/// a help token (`-h`/`--help`/`help`) before any subcommand is named.
-fn wants_top_level_help() -> bool {
-    let mut args = std::env::args().skip(1);
-    match args.next().as_deref() {
-        None => true,
-        Some("-h" | "--help" | "help") => true,
-        _ => false,
-    }
-}
-
 /// Values for `authenticate`'s `offer_remember`, named so call sites read as
 /// policy: derivation commands offer the nearby page's remember checkbox;
 /// `keytap remember` suppresses it (that command already stores the key).
@@ -340,37 +203,16 @@ fn register() -> Vec<u8> {
     nearby::register_nearby()
 }
 
-fn emit_private_key(raw_key: &[u8], format: Format) {
-    let priv_format = match format {
-        Format::Hex => PrivateKeyFormat::Hex,
-        Format::Base64 => PrivateKeyFormat::Base64,
-        Format::Age => PrivateKeyFormat::AgeSecretKey,
-        Format::Ssh => PrivateKeyFormat::SshPrivateKey,
-    };
-    match keytap_core::format_private_key(raw_key, priv_format) {
-        Ok(bytes) => {
-            // SSH PEM already ends in a newline; others are single-line values.
-            if matches!(format, Format::Ssh) {
-                print!("{}", String::from_utf8(bytes).unwrap());
-            } else {
-                println!("{}", String::from_utf8(bytes).unwrap());
-            }
-        }
+fn emit_private_key(raw_key: &[u8], format: keytap_cli_spec::Format) {
+    match keytap_core::format_private_key_display(raw_key, format.into()) {
+        Ok(bytes) => print!("{}", String::from_utf8(bytes).unwrap()),
         Err(e) => die(&format!("format error: {e}")),
     }
 }
 
-fn emit_public_key(raw_key: &[u8], format: PublicFormat, name: &str) {
-    let pub_format = match format {
-        PublicFormat::Hex => PublicKeyFormat::Hex,
-        PublicFormat::Base64 => PublicKeyFormat::Base64,
-        PublicFormat::Age => PublicKeyFormat::AgeRecipient,
-        PublicFormat::Ssh => PublicKeyFormat::SshPublicKey,
-    };
-    // The name is only meaningful as the SSH key comment; other formats ignore it.
-    let comment = matches!(format, PublicFormat::Ssh).then_some(name);
-    match keytap_core::format_public_key(raw_key, pub_format, comment) {
-        Ok(s) => println!("{s}"),
+fn emit_public_key(raw_key: &[u8], format: keytap_cli_spec::PublicFormat, name: &str) {
+    match keytap_core::format_public_key_display(raw_key, format.into(), name) {
+        Ok(s) => print!("{s}"),
         Err(e) => die(&format!("format error: {e}")),
     }
 }

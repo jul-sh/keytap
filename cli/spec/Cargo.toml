@@ -1,0 +1,16 @@
+[package]
+name = "keytap-cli-spec"
+# The version clap prints for `keytap --version` comes from this crate, so it
+# inherits the workspace version — bump it in the root Cargo.toml.
+version.workspace = true
+edition = "2021"
+
+[features]
+# JSON view of the parsed command surface, for frontends that execute
+# outside this process (the web terminal's wasm build).
+serde = ["dep:serde"]
+
+[dependencies]
+keytap-core = { path = "../../core" }
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"], optional = true }

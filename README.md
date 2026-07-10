@@ -20,6 +20,8 @@ The mental model is simple:
 Same passkey + same name = same key.
 Different name = different key.
 
+No install needed to try it: [keytap.jul.sh](https://keytap.jul.sh) is a terminal running this same CLI, compiled to WebAssembly; every command below works there.
+
 <!--HELP:BEGIN-->
 ```
 Derive keys and encrypt files from a passkey.

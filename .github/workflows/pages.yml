@@ -9,6 +9,8 @@ on:
       - .well-known/**
       - web/**
       - core/**
+      # The terminal's wasm build compiles the CLI spec (parser + help text).
+      - cli/spec/**
   workflow_dispatch:
 
 permissions:

@@ -4,6 +4,8 @@ use hkdf::Hkdf;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+#[cfg(feature = "encrypt")]
+pub mod encrypt;
 mod ssh;
 
 #[derive(Debug, Error)]
@@ -18,6 +20,10 @@ pub enum KeytapError {
     InvalidKeyMaterial { reason: String },
     #[error("internal error: {message}")]
     Internal { message: String },
+    /// An age encryption/decryption failure; the message is complete and
+    /// already names the failing stage.
+    #[error("{message}")]
+    Crypto { message: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -26,6 +32,7 @@ pub enum PrivateKeyFormat { Hex, Base64, AgeSecretKey, Raw, SshPrivateKey }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PublicKeyFormat { Hex, Base64, AgeRecipient, SshPublicKey }
 
+#[derive(serde::Serialize)]
 pub struct RegistrationConfig {
     pub rp_id: String,
     pub user_name: String,
@@ -33,6 +40,7 @@ pub struct RegistrationConfig {
     pub default_prf_salt: Vec<u8>,
 }
 
+#[derive(serde::Serialize)]
 pub struct AssertionConfig {
     pub rp_id: String,
     pub key_name: String,
@@ -78,6 +86,27 @@ pub fn derive_raw_key(prf_output: &[u8]) -> Result<Vec<u8>, KeytapError> {
         .expand(HKDF_INFO, &mut okm)
         .map_err(|e| KeytapError::Internal { message: e.to_string() })?;
     Ok(okm.to_vec())
+}
+
+/// `format_private_key`, newline-terminated the way the CLI prints it: the
+/// SSH PEM already ends in a newline, every other format is a single line
+/// that gets one. Shared by the native binary and the web terminal so the
+/// presentation rule exists once.
+pub fn format_private_key_display(raw_key: &[u8], format: PrivateKeyFormat) -> Result<Vec<u8>, KeytapError> {
+    let mut bytes = format_private_key(raw_key, format)?;
+    if format != PrivateKeyFormat::SshPrivateKey {
+        bytes.push(b'\n');
+    }
+    Ok(bytes)
+}
+
+/// `format_public_key`, newline-terminated, with the name applied only where
+/// it means something (the SSH key comment).
+pub fn format_public_key_display(raw_key: &[u8], format: PublicKeyFormat, name: &str) -> Result<String, KeytapError> {
+    let comment = (format == PublicKeyFormat::SshPublicKey).then_some(name);
+    let mut s = format_public_key(raw_key, format, comment)?;
+    s.push('\n');
+    Ok(s)
 }
 
 pub fn format_private_key(raw_key: &[u8], format: PrivateKeyFormat) -> Result<Vec<u8>, KeytapError> {
