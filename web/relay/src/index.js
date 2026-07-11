@@ -40,6 +40,10 @@ export default {
   },
 };
 
+// Sessions are one-time and short-lived: the CLI gives up after 5 minutes,
+// so anything older is garbage. The alarm wipes storage after this window.
+const SESSION_TTL_MS = 10 * 60 * 1000;
+
 export class RelaySession {
   /**
    * @param {DurableObjectState} state
@@ -73,7 +77,11 @@ export class RelaySession {
         return new Response("Invalid JSON", { status: 400, headers: cors });
       }
 
-      this.config = body;
+      // Durable storage, not an instance field: with hibernatable WebSockets
+      // the runtime evicts this object from memory between events, so
+      // in-memory state does not survive until the phone's GET.
+      await this.state.storage.put("config", body);
+      await this.state.storage.setAlarm(Date.now() + SESSION_TTL_MS);
       return new Response(JSON.stringify({ ok: true }), {
         status: 200,
         headers: { ...cors, "Content-Type": "application/json" },
@@ -83,10 +91,11 @@ export class RelaySession {
     // GET config (phone fetches it)
     if (request.method === "GET") {
       const cors = corsHeaders(request);
-      if (!this.config) {
+      const config = await this.state.storage.get("config");
+      if (!config) {
         return new Response("No config", { status: 404, headers: cors });
       }
-      return new Response(this.config, {
+      return new Response(config, {
         status: 200,
         headers: { ...cors, "Content-Type": "application/json" },
       });
@@ -127,6 +136,10 @@ export class RelaySession {
         }
       }
 
+      // The session is spent; don't leave the config fetchable.
+      await this.state.storage.deleteAll();
+      await this.state.storage.deleteAlarm();
+
       return new Response(JSON.stringify({ ok: true }), {
         status: 200,
         headers: { ...cors, "Content-Type": "application/json" },
@@ -137,6 +150,10 @@ export class RelaySession {
       status: 405,
       headers: corsHeaders(request),
     });
+  }
+
+  async alarm() {
+    await this.state.storage.deleteAll();
   }
 
   async webSocketMessage() {}
