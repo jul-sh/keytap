@@ -63,7 +63,7 @@
             clippy
             lld
             wasm-pack
-            nodePackages.wrangler
+            wrangler
           ];
 
           shellHook = if isDarwin then ''
