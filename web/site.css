@@ -45,7 +45,7 @@ body {
   font: 700 1rem var(--display);
   letter-spacing: 0.18em;
   text-transform: uppercase;
-  color: var(--accent);
+  color: var(--fg);
 }
 
 .term-title img {
@@ -59,14 +59,13 @@ body {
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.18em;
-  color: var(--accent);
+  color: var(--muted);
   text-decoration: underline;
   text-underline-offset: 3px;
 }
 
 .term-link:hover {
-  background: var(--accent);
-  color: var(--accent-fg);
+  color: var(--fg);
 }
 
 /* ─── screen ─── */
