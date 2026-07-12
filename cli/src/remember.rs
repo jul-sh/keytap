@@ -94,7 +94,8 @@ pub fn write_target() -> WriteTarget {
 
 fn resolve_write_target() -> Result<WriteTarget, KeychainError> {
     match keychain::open() {
-        Ok(kc) => {
+        Ok(mut kc) => {
+            probe_writable(&mut kc)?;
             Ok(WriteTarget { store: Box::new(kc), location: "the OS keychain".to_string() })
         }
         Err(_) => {
@@ -105,6 +106,22 @@ fn resolve_write_target() -> Result<WriteTarget, KeychainError> {
             })
         }
     }
+}
+
+/// Account name for the write probe below. Deliberately outside the
+/// `remember:` namespace so `remembered`, `forget`, and root rotation never
+/// see it, and self-describing in case a crash ever leaves it behind.
+const WRITE_PROBE_ACCOUNT: &str = "write-probe";
+
+/// Exercise the operations `remember` will need after the ceremony — the
+/// active-root read and a real write — so a store that would refuse them
+/// (a keychain that needs an unlock dialog in a session that can't show one,
+/// an ACL denial) fails BEFORE the user's passkey tap, not after it.
+fn probe_writable(kc: &mut (impl Keychain + ?Sized)) -> Result<(), KeychainError> {
+    read_active_root(kc)?;
+    kc.set(WRITE_PROBE_ACCOUNT, b"keytap write probe; safe to delete")?;
+    kc.delete(WRITE_PROBE_ACCOUNT)?;
+    Ok(())
 }
 
 /// Store a freshly derived key under the root of the credential that produced
@@ -405,6 +422,37 @@ mod tests {
 
     fn assert_stored(outcome: RememberOutcome) {
         assert!(matches!(outcome, RememberOutcome::Stored));
+    }
+
+    /// A store that answers reads but refuses writes, like a keychain that
+    /// can't show its unlock dialog.
+    struct ReadOnlyKeychain;
+
+    impl Keychain for ReadOnlyKeychain {
+        fn get(&self, _: &str) -> Result<Option<Zeroizing<Vec<u8>>>, KeychainError> {
+            Ok(None)
+        }
+        fn set(&mut self, _: &str, _: &[u8]) -> Result<(), KeychainError> {
+            Err(KeychainError::Backend("interaction not allowed".to_string()))
+        }
+        fn delete(&mut self, _: &str) -> Result<bool, KeychainError> {
+            Err(KeychainError::Backend("interaction not allowed".to_string()))
+        }
+        fn accounts(&self) -> Result<Vec<String>, KeychainError> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[test]
+    fn probe_passes_on_a_working_store_and_leaves_no_trace() {
+        let mut kc = MemoryKeychain::default();
+        probe_writable(&mut kc).unwrap();
+        assert!(kc.accounts().unwrap().is_empty(), "the probe must clean up after itself");
+    }
+
+    #[test]
+    fn probe_surfaces_a_store_that_refuses_writes() {
+        assert!(probe_writable(&mut ReadOnlyKeychain).is_err());
     }
 
     #[test]

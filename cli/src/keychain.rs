@@ -68,6 +68,11 @@ mod platform {
     /// answer ("no such entry") rather than a failure.
     const ITEM_NOT_FOUND: i32 = -25300;
 
+    /// `errSecInteractionNotAllowed`: the operation needed an unlock or
+    /// access-approval dialog and this session has no way to show one
+    /// (SSH, tmux attached from SSH, a sandboxed shell).
+    const INTERACTION_NOT_ALLOWED: i32 = -25308;
+
     pub struct MacosKeychain;
 
     pub fn open() -> Result<MacosKeychain, KeychainError> {
@@ -75,6 +80,15 @@ mod platform {
     }
 
     fn backend_err(e: security_framework::base::Error) -> KeychainError {
+        if e.code() == INTERACTION_NOT_ALLOWED {
+            return KeychainError::Backend(
+                "the keychain needs to show an unlock or approval dialog, and this session \
+                 can't display one (running over SSH or in a sandbox?). Run keytap from a \
+                 terminal in your logged-in desktop session, or unlock the keychain here \
+                 first with `security unlock-keychain`"
+                    .to_string(),
+            );
+        }
         KeychainError::Backend(e.to_string())
     }
 
