@@ -15,7 +15,7 @@ jobs:
       - name: Run tests
         run: |
           cargo test -p keytap-core
-          cargo test -p keytap --no-default-features --bins --test e2e_crypto --test env_keys
+          cargo test -p keytap --no-default-features --bins --test e2e_crypto --test env_keys --test init_guard
 
       # Remembered keys: exercise the real Secret Service backend against a
       # live GNOME Keyring inside an isolated D-Bus session.

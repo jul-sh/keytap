@@ -26,6 +26,11 @@ extern "C" {
     #[wasm_bindgen(method, catch)]
     async fn prf(this: &Host, name: &str) -> Result<JsValue, JsValue>;
 
+    /// Whether this browser already holds a keytap credential; drives init's
+    /// refusal to silently replace it.
+    #[wasm_bindgen(method, js_name = hasCredential)]
+    fn has_credential(this: &Host) -> bool;
+
     /// Read a file from the shell's filesystem; undefined when missing.
     #[wasm_bindgen(method, js_name = readFile)]
     fn read_file(this: &Host, name: &str) -> JsValue;
@@ -87,7 +92,14 @@ pub async fn cli_run(argv: Vec<String>, stdin: &[u8], host: Host) -> Result<JsVa
 
     let command = cli.command;
     let stdout: Vec<u8> = match &command {
-        Command::Init => {
+        Command::Init { force } => {
+            if !force && host.has_credential() {
+                return Err(fail(
+                    "a keytap passkey already exists in this browser. Running init again \
+                     creates a new one: keys derived from the current passkey can no longer \
+                     be re-derived. Pass --force to replace the passkey.",
+                ));
+            }
             host.register().await?;
             host.stderr("Passkey registered successfully.");
             Vec::new()
@@ -253,6 +265,14 @@ mod plan_tests {
                 }
                 _ => panic!("wrong command"),
             },
+            _ => panic!("expected run"),
+        }
+    }
+
+    #[test]
+    fn init_parses_its_force_switch() {
+        match plan(argv("init --force")) {
+            Plan::Run(cli) => assert!(matches!(cli.command, Command::Init { force: true })),
             _ => panic!("expected run"),
         }
     }

@@ -236,6 +236,17 @@ pub fn remembered() {
     }
 }
 
+/// Best-effort evidence that a passkey already serves as this machine's
+/// keytap root — the signal `init` uses to refuse a silent replacement.
+/// Errors read as "no evidence": a store that can't answer must never lock
+/// the user out of initializing.
+pub fn previously_initialized() -> bool {
+    open_stores()
+        .unwrap_or_default()
+        .iter()
+        .any(|store| matches!(read_active_root(store.as_ref()), Ok(Some(_))))
+}
+
 /// Root rotation after a successful `keytap init`: record the new credential's
 /// fingerprint as the active root and wipe every remembered entry, in every
 /// store. Must never fail init — the registration already succeeded — so

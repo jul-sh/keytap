@@ -22,8 +22,16 @@ fn main() {
     };
 
     match cli.command {
-        Command::Init => {
+        Command::Init { force } => {
             guard_ceremony("init", cli.prompt);
+            if !force && remember::previously_initialized() {
+                die(
+                    "a keytap passkey is already set up on this machine. Running init again \
+                     creates a new one: keys derived from the current passkey can no longer be \
+                     re-derived (files encrypted to them stay locked), and remembered keys are \
+                     cleared. Pass --force to replace the passkey.",
+                );
+            }
             let credential_id = register();
             remember::after_init(&credential_id);
         }

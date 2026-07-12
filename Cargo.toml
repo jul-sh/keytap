@@ -5,4 +5,4 @@ resolver = "2"
 # The released keytap version. `keytap --version` and the CLI crates inherit
 # it from here; bump this (only here) when cutting a release.
 [workspace.package]
-version = "6.3.0"
+version = "6.4.0"

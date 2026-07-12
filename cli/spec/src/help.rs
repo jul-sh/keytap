@@ -73,8 +73,10 @@ pub(crate) const REUSE: &str = "Reusing a key without re-authenticating each tim
 pub(crate) const REMEMBER: &str = "What remembering means\n  `keytap remember NAME` runs one passkey ceremony, then stores the derived raw\n  key on this machine. From then on, keytap commands for NAME use the stored\n  key without prompting. Nothing is ever stored unless you opt in: run\n  `remember`, or choose \u{2018}remember this key\u{2019} on the phone page after a QR-code\n  approval \u{2014} one more passkey check there confirms it, then it stores the\n  same way. Key material is not printed.\n\n  Where the key lives\n    A plain file: ~/.local/state/keytap/remembered.json (0600, honors\n    $XDG_STATE_HOME), NOT encrypted at rest. On machines with an OS keychain\n    (macOS Keychain; Secret Service on desktop Linux), remember upgrades to it\n    automatically: service `keytap`, account `remember:<root>:<name>`,\n    encrypted at rest by the keychain. The success message says which one was\n    used; lookups check the keychain first, then the file.\n\n  Scope & lifetime\n    - No TTL: the key stays until `keytap forget NAME`, `keytap forget --all`,\n      or you replace the passkey (`keytap init` wipes all remembered keys).\n    - Machine-local: remembering here does not affect your other machines.\n    - Passkey-bound: keys remembered under a replaced passkey are never used.\n\n  Security trade-off\n    Any process running as your user may be able to invoke keytap and use a\n    remembered key without a ceremony. In the plain file (no OS keychain),\n    anyone who can read your files (root, backups, disk images) can also use\n    the key: treat it like an unencrypted SSH private key. When you want a\n    hold that expires instead, use an agent:\n    `keytap reveal ha --as ssh | ssh-add -t 900 -` (see `keytap reveal --help`).";
 
 /// Arguments intentionally kept out of the at-a-glance overview (still shown by
-/// each subcommand's own `--help`). Niche switches that would only add noise.
-const OVERVIEW_SKIP: &[&str] = &["no_self"];
+/// each subcommand's own `--help`). Niche switches that would only add noise;
+/// `--force` is taught by init's refusal message at exactly the moment it
+/// applies.
+const OVERVIEW_SKIP: &[&str] = &["no_self", "force"];
 
 /// Whether this argument should appear in the generated overview.
 fn in_overview(arg: &Arg) -> bool {

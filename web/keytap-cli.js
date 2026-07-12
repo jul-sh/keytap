@@ -48,6 +48,7 @@ export function createKeytapCommand(ceremony, ui) {
           ceremony.end();
         }
       },
+      hasCredential: () => hasStoredCredential(),
       readFile: (name) => fs.get(name),
       stderr: (text) => err(text),
     };

@@ -43,7 +43,14 @@ pub struct Cli {
 #[derive(Subcommand)]
 pub enum Command {
     /// Create the passkey (only needed once)
-    Init,
+    Init {
+        /// Replace an already-registered passkey (every derived key changes)
+        // Re-running init is destructive — the new passkey overwrites the old
+        // one in the authenticator, so keys derived from it stop being
+        // reproducible. Each frontend refuses a detected re-init without this.
+        #[arg(long)]
+        force: bool,
+    },
 
     /// Output the public key
     Public {
@@ -321,6 +328,18 @@ mod tests {
                 Command::Reveal { name, .. } => assert_eq!(name, "default"),
                 _ => panic!("wrong command"),
             },
+            _ => panic!("expected parse"),
+        }
+    }
+
+    #[test]
+    fn init_requires_an_explicit_force() {
+        match invoke(argv("init")) {
+            Invocation::Parsed(Ok(cli)) => assert!(matches!(cli.command, Command::Init { force: false })),
+            _ => panic!("expected parse"),
+        }
+        match invoke(argv("init --force")) {
+            Invocation::Parsed(Ok(cli)) => assert!(matches!(cli.command, Command::Init { force: true })),
             _ => panic!("expected parse"),
         }
     }
