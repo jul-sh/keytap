@@ -1,19 +1,5 @@
-/* ─── keytap — BSOD brutalist ─── */
-
-:root {
-  color-scheme: dark;
-  --bg: hsl(240, 100%, 20%);
-  --fg: #fff;
-  --muted: hsl(240, 40%, 72%);
-  --panel-bg: hsla(240, 100%, 28%, 0.5);
-  --line: hsla(0, 0%, 100%, 0.15);
-  --accent: #00ff66;
-  --accent-fg: hsl(240, 100%, 14%);
-  --error: #ff4444;
-  --callout-bg: hsla(240, 100%, 32%, 0.4);
-  --display: "Pixelify Sans", monospace;
-  --body: "Iosevka Charon", "SF Mono", "Fira Code", "Courier New", monospace;
-}
+/* ─── keytap — BSOD brutalist ───
+   Palette and fonts come from theme.css, shared with the terminal. */
 
 * {
   box-sizing: border-box;
@@ -224,13 +210,13 @@ a:hover {
   margin-top: 20px;
 }
 
-.action-secondary {
+.action.action-secondary {
   border-color: var(--muted);
   color: var(--muted);
   margin-top: 12px;
 }
 
-.action-secondary:hover:enabled {
+.action.action-secondary:hover:enabled {
   background: var(--muted);
   color: var(--accent-fg);
 }

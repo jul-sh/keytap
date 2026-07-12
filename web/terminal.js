@@ -386,7 +386,9 @@ async function execute(line) {
   }
 
   running = true;
-  el.inputLine.hidden = true;
+  // The mirror goes invisible but the line (and the focused input inside
+  // it) stays in the layout, so the mobile keyboard never dismisses.
+  el.inputLine.classList.add('running');
   el.kbd.readOnly = true;
   try {
     const result = await runPipeline(line, fs, commands, io.err);
@@ -400,7 +402,7 @@ async function execute(line) {
     }
   } finally {
     running = false;
-    el.inputLine.hidden = false;
+    el.inputLine.classList.remove('running');
     el.kbd.readOnly = false;
     scrollToBottom();
   }

@@ -5,13 +5,14 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; font-src 'self'; img-src 'self'; connect-src 'self'; form-action 'none'; frame-ancestors 'none'; base-uri 'none'; manifest-src 'none'; worker-src blob:; script-src-elem 'self' blob:">
   <meta name="description" content="keytap turns one passkey into reproducible SSH keys, age identities, and app secrets. This page is a terminal running the real CLI, compiled to WebAssembly.">
-  <meta name="theme-color" content="#00003d">
+  <meta name="theme-color" content="#000066">
   <meta property="og:title" content="keytap: passkeys that turn into real keys">
   <meta property="og:description" content="A terminal running the real keytap CLI, compiled to WebAssembly. Derive SSH keys, age identities, and app secrets from your passkey.">
   <meta property="og:image" content="https://keytap.jul.sh/icon.png">
   <meta property="og:url" content="https://keytap.jul.sh/">
   <title>keytap: passkeys that turn into real keys</title>
   <link rel="icon" href="./icon.png">
+  <link rel="stylesheet" href="./theme.css">
   <link rel="stylesheet" href="./site.css">
   <script type="module" src="./terminal.js"></script>
 </head>
@@ -25,10 +26,9 @@
   <main class="term-shell">
     <div class="term-screen" id="term-screen">
       <div id="term-out" role="log" aria-live="polite" aria-label="terminal output"></div>
-      <div class="term-line" id="term-input-line" aria-hidden="true"><span class="term-prompt" id="term-prompt"></span><span id="term-pre"></span><span class="term-cursor" id="term-cursor"> </span><span id="term-post"></span></div>
+      <div class="term-line" id="term-input-line"><span id="term-mirror" aria-hidden="true"><span class="term-prompt" id="term-prompt"></span><span id="term-pre"></span><span class="term-cursor" id="term-cursor"> </span><span id="term-post"></span></span><input id="term-kbd" type="text" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" enterkeyhint="send" aria-label="shell input; type a command" aria-description="tab completes · shift+tab leaves the terminal"></div>
       <noscript><p class="ln err">JavaScript is off, so the terminal can't run. The CLI itself doesn't need it: github.com/jul-sh/keytap</p></noscript>
     </div>
-    <input id="term-kbd" type="text" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" enterkeyhint="send" aria-label="shell input; type a command" aria-description="tab completes · shift+tab leaves the terminal">
   </main>
 
 </body>
