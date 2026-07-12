@@ -192,38 +192,61 @@ a:hover {
   color: var(--muted);
 }
 
-/* ─── remember opt-in ─── */
+/* ─── remember opt-in (post-auth offer) ─── */
 
-.remember {
-  display: flex;
-  align-items: flex-start;
-  gap: 12px;
-  margin-top: 24px;
-  padding: 14px 16px;
+.offer {
+  margin-top: 28px;
+  padding: 20px 22px;
   border: 1px solid var(--line);
   background: var(--callout-bg);
-  color: var(--muted);
-  font-size: 0.95rem;
-  cursor: pointer;
-  user-select: none;
 }
 
-.remember[hidden] {
+.offer[hidden] {
   display: none;
 }
 
-.remember input {
-  flex-shrink: 0;
-  width: 1.2em;
-  height: 1.2em;
-  margin-top: 0.2em;
-  accent-color: var(--accent);
-  cursor: pointer;
+.offer h2 {
+  font: 700 1.3rem/1.3 var(--display);
+  color: var(--fg);
+  margin: 0 0 10px;
+  outline: none;
 }
 
-.remember:has(input:checked) {
-  border-color: var(--accent);
-  color: var(--fg);
+.offer p {
+  color: var(--muted);
+  font-size: 0.95rem;
+}
+
+.offer .action {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  margin-top: 20px;
+}
+
+.action-secondary {
+  border-color: var(--muted);
+  color: var(--muted);
+  margin-top: 12px;
+}
+
+.action-secondary:hover:enabled {
+  background: var(--muted);
+  color: var(--accent-fg);
+}
+
+/* aria-disabled instead of disabled: keeps the button focusable so screen
+   reader focus is never ejected mid-ceremony. */
+.action[aria-disabled="true"] {
+  opacity: 0.35;
+  cursor: not-allowed;
+  border-color: var(--muted);
+  color: var(--muted);
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 /* ─── action button ─── */
@@ -265,14 +288,22 @@ a:hover {
 
 /* ─── status / hint ─── */
 
+/* Status lines carry sentences now, not two-word blips: the body font
+   reads better and holds up for screen magnification. The pixel display
+   font stays for the eyebrow and headings only. */
 .status {
   margin-top: 20px;
   min-height: 1.6em;
-  font-family: var(--display);
-  font-size: 1.2rem;
-  font-weight: 700;
+  font-family: var(--body);
+  font-size: 1.05rem;
   color: var(--muted);
-  line-height: 1.4;
+  line-height: 1.5;
+  outline: none;
+}
+
+.status.alert {
+  margin-top: 8px;
+  min-height: 0;
 }
 
 .hint {

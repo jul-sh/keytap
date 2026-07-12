@@ -112,7 +112,10 @@ export class RelaySession {
         return new Response("Invalid JSON", { status: 400, headers: cors });
       }
 
-      // Push to all connected WebSockets (should be exactly one: the CLI)
+      // Push to all connected WebSockets (should be exactly one: the CLI).
+      // The socket stays open afterwards: the page may follow up (a
+      // remember opt-in, or a "done" that releases the CLI early), and the
+      // CLI closes from its side when it exits.
       let delivered = false;
       for (const ws of this.state.getWebSockets()) {
         try {
@@ -127,16 +130,7 @@ export class RelaySession {
         return new Response("No CLI connected", { status: 410, headers: cors });
       }
 
-      // Close WebSockets after delivery
-      for (const ws of this.state.getWebSockets()) {
-        try {
-          ws.close(1000, "delivered");
-        } catch {
-          // already closed
-        }
-      }
-
-      // The session is spent; don't leave the config fetchable.
+      // The config is one-time; after first delivery nobody refetches it.
       await this.state.storage.deleteAll();
       await this.state.storage.deleteAlarm();
 

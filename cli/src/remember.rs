@@ -143,27 +143,30 @@ pub fn remember(target: &mut WriteTarget, name: &str, credential_id: &[u8], raw_
     }
 }
 
-/// Honor a remember opt-in that arrived with a nearby assertion (the user
-/// ticked the checkbox on the phone page). Unlike `keytap remember`, storing
-/// is best-effort: the command's real job is the key it just derived, so
-/// trouble remembering warns and the command carries on.
+/// Honor a remember opt-in from the phone page (a second passkey ceremony
+/// there, or the first payload from legacy checkbox pages). Unlike
+/// `keytap remember`, storing is best-effort: the command's real job is the
+/// key it just derived, so trouble remembering warns and the command
+/// carries on.
 pub fn remember_requested_nearby(name: &str, credential_id: &[u8], raw_key: &[u8]) {
+    // This runs after the command's output is already on stdout, so every
+    // line goes through the non-panicking printer.
     let could_not = |why: &str| {
-        eprintln!(
+        crate::note(&format!(
             "warning: you asked on your phone to remember '{name}' on this machine, but {why}"
-        );
+        ));
     };
     let mut target = match resolve_write_target() {
         Ok(target) => target,
         Err(e) => return could_not(&e.to_string()),
     };
     match remember_in(target.store.as_mut(), name, credential_id, raw_key) {
-        Ok(RememberOutcome::Stored) => eprintln!(
+        Ok(RememberOutcome::Stored) => crate::note(&format!(
             "Remembered '{name}' in {location}, as requested on your phone. Future keytap \
              commands for this name will not prompt until you run `keytap forget {name}` or \
              replace the passkey.",
             location = target.location
-        ),
+        )),
         Ok(RememberOutcome::RootMismatch) => could_not(
             "the passkey you just used is not this machine's active keytap root, so the stored \
              key would never be used. Run `keytap init` to make this passkey the root (that \

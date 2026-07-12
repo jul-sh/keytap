@@ -7,11 +7,26 @@ does ECDH + HKDF + AES-GCM, and POSTs the encrypted blob to the relay.
 
 Usage:
     echo "<url>" | python3 tests/simulate_phone.py
-    python3 tests/simulate_phone.py "<url>" [--remember]
+    python3 tests/simulate_phone.py "<url>" [flags]
 
---remember simulates ticking the page's "remember this key on that machine"
-checkbox: the encrypted payload carries `remember: true`, which the CLI only
-honors when its config offered it (`m`).
+Like the real page, the simulator sends the assertion first (with
+`follow: true` when the CLI advertised an opt-in window via `w`) and then
+tells the CLI it is finished ({type: "done"}), releasing it immediately.
+
+--remember          post-auth opt-in: remember-pending, then a second
+                    ceremony's payload with `remember: true` (same passkey)
+--wrong-key         like --remember, but the first approval comes from a
+                    different passkey (must be refused, window stays open,
+                    a correct follow-up then stores)
+--legacy-remember   old cached page: `remember: true` rides inside the FIRST
+                    payload, no `follow`, no done
+--no-follow         new-CLI/old-page unticked: no `follow`, no done; the CLI
+                    must exit without lingering
+--no-done           sends `follow` but goes silent, exercising the CLI's
+                    bounded opt-in window
+--done-textplain    send done with Content-Type text/plain (the pagehide
+                    beacon encoding)
+--garbage           inject undecryptable junk before and after the payload
 """
 
 import base64
@@ -34,7 +49,8 @@ if RELAY_URL.startswith("ws://"):
 elif RELAY_URL.startswith("wss://"):
     RELAY_URL = RELAY_URL.replace("wss://", "https://", 1)
 
-# The relay rejects requests that don't look like they come from the web page.
+# Sent for realism; the relay itself never inspects them (it CORS-echoes the
+# Origin and JSON-parses the body regardless of Content-Type).
 BROWSER_HEADERS = {
     "Content-Type": "application/json",
     "Origin": "https://keytap.jul.sh",
@@ -74,9 +90,70 @@ def fetch_config(url: str) -> dict:
         return json.loads(resp.read().decode())
 
 
+def post_raw(cfg: dict, body: str, label: str, content_type: str = "application/json") -> None:
+    """POST one wire message to the relay."""
+    headers = dict(BROWSER_HEADERS, **{"Content-Type": content_type})
+    req = urllib.request.Request(
+        f"{RELAY_URL}/relay/{cfg['s']}",
+        data=body.encode(),
+        headers=headers,
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req) as resp:
+            print(f"Relay response ({label}): {resp.status} {resp.read().decode()}")
+    except urllib.error.HTTPError as e:
+        print(f"Relay error ({label}): {e.code} {e.read().decode()}")
+        sys.exit(1)
+
+
+def encrypt_and_post(cfg: dict, payload: dict, content_type: str = "application/json") -> None:
+    """Encrypt one message under a fresh phone keypair (as the page does for
+    every POST) and deliver it through the relay."""
+    session_id = cfg["s"]
+    cli_pub = X25519PublicKey.from_public_bytes(b64url_decode(cfg["k"]))
+
+    phone_sk = X25519PrivateKey.generate()
+    phone_pk_bytes = phone_sk.public_key().public_bytes(
+        serialization.Encoding.Raw, serialization.PublicFormat.Raw
+    )
+    shared_secret = phone_sk.exchange(cli_pub)
+
+    aes_key = HKDF(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=session_id.encode(),
+        info=b"keytap:e2e:v1",
+    ).derive(shared_secret)
+
+    nonce = os.urandom(12)
+    ciphertext = AESGCM(aes_key).encrypt(nonce, json.dumps(payload).encode(), None)
+
+    body = json.dumps({
+        "pk": b64url_encode(phone_pk_bytes),
+        "nonce": b64url_encode(nonce),
+        "ciphertext": b64url_encode(ciphertext),
+    })
+    post_raw(cfg, body, payload.get("type", "?"), content_type)
+
+
+def ceremony_payload(cfg: dict, remember: bool, credential: bytes = b"fake-credential-id") -> dict:
+    """A fake ceremony result: fixed credential, fixed PRF output (32 × 0x42),
+    so repeated ceremonies look like the same passkey — as they would be."""
+    payload = {"credentialId": b64url_encode(credential)}
+    if cfg["o"] == "r":
+        payload["type"] = "register-success"
+    else:
+        payload["type"] = "assert-success"
+        payload["prfFirst"] = b64url_encode(bytes([0x42] * 32))
+    if remember:
+        payload["remember"] = True
+    return payload
+
+
 def main():
-    args = [a for a in sys.argv[1:] if a != "--remember"]
-    remember = "--remember" in sys.argv[1:]
+    flags = {a for a in sys.argv[1:] if a.startswith("--")}
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
     url = args[0].strip() if args else input().strip()
 
     cfg = fetch_config(url)
@@ -85,68 +162,45 @@ def main():
         f"Config: operation={cfg['o']}, name={cfg.get('n', 'N/A')}, "
         f"session={cfg['s'][:8]}..., offers_remember={offered}"
     )
-    if remember and not offered:
+    if ("--remember" in flags or "--legacy-remember" in flags) and not offered:
         print("note: sending remember=true even though the CLI didn't offer it (m absent)")
 
-    session_id = cfg["s"]
-    cli_pub_bytes = b64url_decode(cfg["k"])
+    if "--garbage" in flags:
+        # A bystander who knows the session id pushes junk; the CLI must
+        # keep waiting through it, before and after the real payload.
+        post_raw(cfg, json.dumps({"pk": "AAAA", "nonce": "AAAA", "ciphertext": "AAAA"}), "garbage")
 
-    # Generate phone keypair
-    phone_sk = X25519PrivateKey.generate()
-    phone_pk = phone_sk.public_key()
-    phone_pk_bytes = phone_pk.public_bytes(
-        serialization.Encoding.Raw, serialization.PublicFormat.Raw
-    )
+    # First message: the ceremony result. `follow` announces this page can
+    # send follow-ups (the CLI only lingers for pages that say so); legacy
+    # pages instead smuggle the remember request into this payload.
+    first = ceremony_payload(cfg, remember="--legacy-remember" in flags)
+    if not {"--legacy-remember", "--no-follow"} & flags and cfg.get("w"):
+        first["follow"] = True
+    encrypt_and_post(cfg, first)
 
-    # ECDH
-    cli_pub = X25519PublicKey.from_public_bytes(cli_pub_bytes)
-    shared_secret = phone_sk.exchange(cli_pub)
+    if "--garbage" in flags:
+        # Valid JSON (the relay forwards it) but not a decryptable envelope.
+        post_raw(cfg, json.dumps({"pk": "AAAA", "nonce": "AAAA", "ciphertext": "!!!"}), "garbage")
 
-    # HKDF-SHA256
-    hkdf = HKDF(
-        algorithm=hashes.SHA256(),
-        length=32,
-        salt=session_id.encode(),
-        info=b"keytap:e2e:v1",
-    )
-    aes_key = hkdf.derive(shared_secret)
-
-    # Build payload — fake PRF output (32 bytes of 0x42)
-    fake_prf = bytes([0x42] * 32)
-    body_fields = {
-        "credentialId": b64url_encode(b"fake-credential-id"),
-    }
-    if cfg["o"] != "r":
-        body_fields["prfFirst"] = b64url_encode(fake_prf)
-    if remember:
-        body_fields["remember"] = True
-    payload = json.dumps(body_fields)
-
-    # AES-256-GCM encrypt
-    nonce = os.urandom(12)
-    aesgcm = AESGCM(aes_key)
-    ciphertext = aesgcm.encrypt(nonce, payload.encode(), None)
-
-    # POST to relay
-    body = json.dumps({
-        "pk": b64url_encode(phone_pk_bytes),
-        "nonce": b64url_encode(nonce),
-        "ciphertext": b64url_encode(ciphertext),
-    })
-
-    req = urllib.request.Request(
-        f"{RELAY_URL}/relay/{session_id}",
-        data=body.encode(),
-        headers=BROWSER_HEADERS,
-        method="POST",
-    )
-
-    try:
-        with urllib.request.urlopen(req) as resp:
-            print(f"Relay response: {resp.status} {resp.read().decode()}")
-    except urllib.error.HTTPError as e:
-        print(f"Relay error: {e.code} {e.read().decode()}")
-        sys.exit(1)
+    if "--remember" in flags or "--wrong-key" in flags:
+        # The post-auth opt-in: tapping the button announces the pending
+        # ceremony (a liveness probe that also extends the CLI's window),
+        # then the second ceremony's result carries the request.
+        encrypt_and_post(cfg, {"type": "remember-pending"})
+        if "--wrong-key" in flags:
+            # Approval from a DIFFERENT passkey: the CLI must refuse it and
+            # keep the window open, so a correct follow-up still lands.
+            encrypt_and_post(cfg, ceremony_payload(cfg, remember=True, credential=b"some-other-passkey"))
+        encrypt_and_post(cfg, ceremony_payload(cfg, remember=True))
+    elif "--no-done" in flags or "--legacy-remember" in flags or "--no-follow" in flags:
+        # Go silent; the CLI's bounded window (if any) is on its own.
+        pass
+    else:
+        # The page's "finished" signal releases the CLI immediately. The
+        # pagehide beacon sends it as text/plain (beacons cannot preflight);
+        # exercise that encoding.
+        content_type = "text/plain" if "--done-textplain" in flags else "application/json"
+        encrypt_and_post(cfg, {"type": "done"}, content_type)
 
     print("Phone side complete — CLI should have received and decrypted the blob.")
 

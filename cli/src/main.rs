@@ -28,20 +28,18 @@ fn main() {
             remember::after_init(&credential_id);
         }
         Command::Public { ref name, format } => {
-            let raw_key = obtain_key(name, cli.prompt);
-            emit_public_key(&raw_key, format, name);
+            with_derived_key(name, cli.prompt, |raw_key| emit_public_key(raw_key, format, name));
         }
         Command::Reveal { ref name, format } => {
-            let raw_key = obtain_key(name, cli.prompt);
-            emit_private_key(&raw_key, format);
+            with_derived_key(name, cli.prompt, |raw_key| emit_private_key(raw_key, format));
         }
         Command::Encrypt { ref name, ref recipients, ref recipients_file, no_self } => {
-            let raw_key = obtain_key(name, cli.prompt);
-            encrypt::encrypt(&raw_key, recipients, recipients_file, !no_self);
+            with_derived_key(name, cli.prompt, |raw_key| {
+                encrypt::encrypt(raw_key, recipients, recipients_file, !no_self)
+            });
         }
         Command::Decrypt { ref name } => {
-            let raw_key = obtain_key(name, cli.prompt);
-            encrypt::decrypt(&raw_key);
+            with_derived_key(name, cli.prompt, |raw_key| encrypt::decrypt(raw_key));
         }
         Command::Remember { ref name } => {
             // Fail fast on names derivation would reject, and on machines
@@ -66,19 +64,22 @@ fn main() {
     }
 }
 
-/// Resolve the raw key for `name`, in order: a key handed in via the
-/// environment (`$KEYTAP_KEY_<NAME>`, the CI path), a key remembered on this
-/// machine (under the active passkey root), and finally a passkey ceremony,
-/// deriving on demand. Under `$CI` the ceremony rung is refused unless
-/// `--prompt` asks for it. Nothing is stored unless the user opted in on the
-/// nearby page ("remember this key on this machine"); that request arrives
-/// with the assertion and is honored here, best-effort.
-fn obtain_key(name: &str, allow_prompt: bool) -> Zeroizing<Vec<u8>> {
+/// Resolve the raw key for `name` and hand it to `use_key`, in order: a key
+/// from the environment (`$KEYTAP_KEY_<NAME>`, the CI path), a key remembered
+/// on this machine (under the active passkey root), and finally a passkey
+/// ceremony, deriving on demand. Under `$CI` the ceremony rung is refused
+/// unless `--prompt` asks for it.
+///
+/// Nothing is stored unless the user opts in on the nearby page. The opt-in
+/// arrives either with the assertion itself (legacy pages) or afterwards,
+/// backed by a second ceremony; the latter settles only after `use_key` has
+/// emitted its output, so the command's result is never delayed by it.
+fn with_derived_key(name: &str, allow_prompt: bool, use_key: impl FnOnce(&[u8])) {
     if let Some(raw_key) = env_keys::resolve(name) {
-        return raw_key;
+        return use_key(&raw_key);
     }
     if let Some(raw_key) = remember::lookup(name) {
-        return raw_key;
+        return use_key(&raw_key);
     }
     if in_ci() && !allow_prompt {
         die(&format!(
@@ -94,7 +95,17 @@ fn obtain_key(name: &str, allow_prompt: bool) -> Zeroizing<Vec<u8>> {
     if assertion.remember_requested {
         remember::remember_requested_nearby(name, &assertion.credential_id, &raw_key);
     }
-    raw_key
+    use_key(&raw_key);
+    if let Some(window) = assertion.followup {
+        // The output must be out of the process before the opt-in window:
+        // the window may end via Ctrl-C (_exit skips buffered-IO flushing),
+        // and a piped consumer deserves the key now, not after the wait.
+        use std::io::Write;
+        std::io::stdout().flush().ok();
+        if window.settle() {
+            remember::remember_requested_nearby(name, &assertion.credential_id, &raw_key);
+        }
+    }
 }
 
 
@@ -127,9 +138,12 @@ const SUPPRESS_REMEMBER: bool = false;
 struct Assertion {
     prf_output: Zeroizing<Vec<u8>>,
     credential_id: Vec<u8>,
-    /// The user ticked "remember this key on this machine" on the nearby
-    /// page. Never set by the native flow, which has no such control.
+    /// The user asked, with the assertion itself, to remember this key on
+    /// this machine. Never set by the native flow, which has no such control.
     remember_requested: bool,
+    /// Still-open window for the nearby page's post-auth remember opt-in;
+    /// settled after the command's output. Never present for the native flow.
+    followup: Option<nearby::RememberWindow>,
 }
 
 impl Assertion {
@@ -139,6 +153,7 @@ impl Assertion {
             prf_output: Zeroizing::new(prf_output),
             credential_id,
             remember_requested: false,
+            followup: None,
         }
     }
 
@@ -147,6 +162,7 @@ impl Assertion {
             prf_output: Zeroizing::new(assertion.prf_output),
             credential_id: assertion.credential_id,
             remember_requested: assertion.remember_requested,
+            followup: assertion.followup,
         }
     }
 }
@@ -220,4 +236,12 @@ fn emit_public_key(raw_key: &[u8], format: keytap_cli_spec::PublicFormat, name: 
 pub(crate) fn die(msg: &str) -> ! {
     eprintln!("error: {msg}");
     std::process::exit(1);
+}
+
+/// A stderr line that must never take the process down. Once a command's
+/// output is on stdout, even a closed stderr may not turn success into a
+/// panic — everything printed after that point goes through here.
+pub(crate) fn note(line: &str) {
+    use std::io::Write;
+    let _ = writeln!(std::io::stderr(), "{line}");
 }

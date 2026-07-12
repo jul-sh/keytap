@@ -29,6 +29,8 @@ aes-gcm = "0.10"
 getrandom = "0.2"
 ureq = "3"
 zeroize = "1"
+subtle = "2"
+libc = "0.2"
 
 [dev-dependencies]
 # The encrypt_roundtrip integration test exercises age directly.
