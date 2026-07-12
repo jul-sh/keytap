@@ -595,8 +595,7 @@ async function main() {
   completionsSpec = cliCompletions();
   commands.keytap = createKeytapCommand(ceremony, io);
 
-  io.out(`keytap ${cliVersion()} · passkeys that turn into real keys: ssh, file encryption, app secrets.`);
-  io.out('same passkey + same key name = the same key, on any device. nothing is stored, nothing to back up.');
+  io.out(`keytap ${cliVersion()} · a convenience CLI that derives stable secrets from a passkey: ssh keys, file encryption.`);
   writeLinkLine(
     'this page runs the CLI compiled to WebAssembly as a demo; install on your machine ',
     'https://github.com/jul-sh/keytap#install',
