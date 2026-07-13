@@ -16,9 +16,9 @@ const PROMPT = '$ ';
 
 // Chrome-authored literal commands; what they do is decided by the CLI.
 const SUGGESTIONS = [
-  { cmd: 'keytap init', note: 'creates a passkey (no account, deletable anytime)' },
-  { cmd: 'keytap reveal demo --as ssh', note: 'turns it into an ssh key named demo' },
-  { cmd: 'keytap', note: 'full command list' },
+  { cmd: 'keytap init', note: 'start here · create your passkey' },
+  { cmd: 'keytap reveal demo --as ssh', note: 'then derive a demo SSH key' },
+  { cmd: 'keytap', note: 'see every command' },
 ];
 
 const HELP = `keytap web terminal; the real CLI, compiled to WebAssembly.
@@ -217,16 +217,17 @@ const io = {
 };
 
 function printSuggestions() {
-  io.hint('tap a command to run it, or type:');
-  const width = Math.max(...SUGGESTIONS.map((s) => s.cmd.length));
+  io.hint('try it — tap a command or type:');
   for (const { cmd, note } of SUGGESTIONS) {
     const div = document.createElement('div');
-    div.className = 'ln hint';
+    div.className = 'ln hint suggestion';
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.className = 'cmd';
     btn.textContent = cmd;
-    div.append('  ', btn, ' '.repeat(width - cmd.length) + '    ' + note);
+    const description = document.createElement('span');
+    description.textContent = note;
+    div.append(btn, description);
     el.out.appendChild(div);
   }
   scrollToBottom();
@@ -595,8 +596,8 @@ async function main() {
   completionsSpec = cliCompletions();
   commands.keytap = createKeytapCommand(ceremony, io);
 
-  io.out(`keytap ${cliVersion()} · a convenience CLI that derives stable secrets from a passkey, e.g. ssh keys or file encryption.`);
-  io.out('same passkey + same key name = the same key, on any device. nothing is stored, nothing to back up.');
+  io.out(`keytap ${cliVersion()} · one passkey becomes reproducible SSH keys, age identities, and app secrets.`);
+  io.out('same passkey + same name = the same key, on any device. by default, nothing is stored and nothing leaves this page.');
   writeLinkLine(
     'this page runs the CLI compiled to WebAssembly as a demo; install on your machine ',
     'https://github.com/jul-sh/keytap#install',

@@ -1,5 +1,4 @@
-/* ─── keytap — BSOD brutalist ───
-   Palette and fonts come from theme.css, shared with the terminal. */
+/* The phone approval flow shares the terminal's palette and type. */
 
 * {
   box-sizing: border-box;
@@ -7,178 +6,82 @@
   padding: 0;
 }
 
-html, body {
+html,
+body {
   min-height: 100%;
 }
 
 body {
-  font: 18px/1.65 var(--body);
-  color: var(--fg);
-  background: var(--bg);
   display: grid;
   place-items: center;
   padding: 48px 24px;
+  font: 18px/1.65 var(--body);
+  color: var(--fg);
+  background: var(--bg);
 }
-
-/* ─── shell ─── */
 
 .shell {
   width: min(100%, 680px);
-  padding: 0;
-  border: none;
-  background: none;
 }
 
-/* ─── eyebrow / label ─── */
-
 .eyebrow {
-  font-family: var(--display);
-  text-transform: uppercase;
-  letter-spacing: 0.25em;
-  font-size: 1rem;
-  font-weight: 700;
-  color: var(--accent);
   margin-bottom: 8px;
+  font: 700 1rem var(--display);
+  letter-spacing: 0.25em;
+  text-transform: uppercase;
+  color: var(--accent);
 }
 
 .eyebrow::before {
   content: "> ";
 }
 
-/* ─── hero ─── */
-
-.hero {
-  display: flex;
-  align-items: center;
-  gap: 24px;
-  margin-bottom: 24px;
-}
-
-.hero-icon {
-  flex-shrink: 0;
-  border-radius: 22%;
-}
-
-.hero .eyebrow {
-  margin-bottom: 4px;
-}
-
-.hero h1 {
-  margin: 0;
-}
-
-/* ─── headings ─── */
-
 h1 {
-  font: 700 clamp(2rem, 5vw, 3rem)/1.1 var(--display);
-  color: var(--fg);
   margin: 8px 0 24px;
-}
-
-/* ─── text blocks ─── */
-
-.summary,
-.details,
-.status,
-.hint,
-.panel-note {
-  margin: 0;
+  font: 700 clamp(2rem, 5vw, 3rem)/1.1 var(--display);
 }
 
 .summary {
-  font-size: 1.1rem;
   max-width: 38rem;
+  font-size: 1.1rem;
   line-height: 1.7;
 }
 
-.details {
-  margin-top: 14px;
+.summary + .summary {
+  margin-top: 8px;
   color: var(--muted);
-  font-size: 0.95rem;
 }
 
-/* ─── inline code ─── */
-
 code {
+  padding: 1px 6px;
   font: inherit;
   color: var(--accent);
   background: hsla(0, 0%, 100%, 0.06);
-  padding: 1px 6px;
 }
 
-/* ─── links ─── */
-
-a {
-  color: var(--accent);
-  text-decoration: none;
-}
-
-a:hover {
-  text-decoration: underline;
-}
-
-/* ─── panel ─── */
-
-.panel {
-  margin-top: 28px;
-  padding: 20px 22px;
-  border: 1px solid var(--line);
-  background: var(--panel-bg);
-}
-
-.panel-label {
-  font-family: var(--display);
-  text-transform: uppercase;
-  letter-spacing: 0.2em;
-  font-size: 0.85rem;
-  font-weight: 700;
-  color: var(--accent);
-  margin: 0;
-}
-
-.panel-header {
-  display: flex;
-  gap: 16px;
-  justify-content: space-between;
-  align-items: baseline;
-  flex-wrap: wrap;
-}
-
-.panel-note {
-  color: hsl(240, 30%, 82%);
-  font-size: 0.95rem;
-}
-
-/* ─── steps ─── */
-
-.steps {
-  margin: 16px 0 0;
-  padding-left: 22px;
-  font-size: 1rem;
-}
-
-.steps li + li {
-  margin-top: 10px;
-}
-
-.steps li::marker {
-  color: var(--accent);
-  font-weight: 700;
-}
-
-/* ─── callout ─── */
-
-.callout {
-  margin-top: 20px;
-  padding: 16px 20px;
-  border: 1px solid var(--line);
-  border-left: 3px solid var(--accent);
-  background: var(--callout-bg);
-  font-size: 0.95rem;
+/* Technical detail stays available without competing with the decision. */
+.details {
+  margin-top: 18px;
   color: var(--muted);
+  font-size: 0.9rem;
 }
 
-/* ─── remember opt-in (post-auth offer) ─── */
+.details summary {
+  width: fit-content;
+  cursor: pointer;
+  text-decoration: underline dotted;
+  text-underline-offset: 3px;
+}
+
+.details[open] summary {
+  color: var(--fg);
+}
+
+.details p {
+  margin-top: 10px;
+  padding-left: 16px;
+  border-left: 2px solid var(--line);
+}
 
 .offer {
   margin-top: 28px;
@@ -192,9 +95,8 @@ a:hover {
 }
 
 .offer h2 {
+  margin-bottom: 10px;
   font: 700 1.3rem/1.3 var(--display);
-  color: var(--fg);
-  margin: 0 0 10px;
   outline: none;
 }
 
@@ -210,148 +112,88 @@ a:hover {
   margin-top: 20px;
 }
 
-.action.action-secondary {
-  border-color: var(--muted);
-  color: var(--muted);
+.hint {
   margin-top: 12px;
 }
-
-.action.action-secondary:hover:enabled {
-  background: var(--muted);
-  color: var(--accent-fg);
-}
-
-/* aria-disabled instead of disabled: keeps the button focusable so screen
-   reader focus is never ejected mid-ceremony. */
-.action[aria-disabled="true"] {
-  opacity: 0.35;
-  cursor: not-allowed;
-  border-color: var(--muted);
-  color: var(--muted);
-}
-
-:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
-}
-
-/* ─── action button ─── */
 
 .action {
   appearance: none;
   display: inline-block;
-  margin-top: 28px;
-  border: 2px solid var(--accent);
-  padding: 14px 28px;
-  font-family: var(--body);
-  font-weight: 700;
-  font-size: 1.1rem;
-  text-transform: uppercase;
-  letter-spacing: 0.1em;
-  background: transparent;
-  color: var(--accent);
-  cursor: pointer;
   min-width: 16rem;
+  margin-top: 28px;
+  padding: 14px 28px;
+  border: 2px solid var(--accent);
+  font: 700 1.05rem var(--body);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--accent);
+  background: transparent;
+  cursor: pointer;
   transition: background 60ms, color 60ms;
 }
 
 .action:hover:enabled {
-  background: var(--accent);
   color: var(--accent-fg);
+  background: var(--accent);
 }
 
 .action:active:enabled {
-  background: #00cc52;
   color: var(--accent-fg);
+  background: #00cc52;
 }
 
-.action:disabled {
-  opacity: 0.35;
-  cursor: not-allowed;
+.action.action-secondary {
+  margin-top: 12px;
   border-color: var(--muted);
   color: var(--muted);
 }
 
-/* ─── status / hint ─── */
+.action.action-secondary:hover:enabled {
+  color: var(--accent-fg);
+  background: var(--muted);
+}
 
-/* Status lines carry sentences now, not two-word blips: the body font
-   reads better and holds up for screen magnification. The pixel display
-   font stays for the eyebrow and headings only. */
-.status {
-  margin-top: 20px;
-  min-height: 1.6em;
-  font-family: var(--body);
-  font-size: 1.05rem;
+/* aria-disabled keeps focus stable while a passkey sheet is open. */
+.action[aria-disabled="true"],
+.action:disabled {
+  border-color: var(--muted);
   color: var(--muted);
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.status {
+  min-height: 1.6em;
+  margin-top: 20px;
+  font-size: 1.05rem;
   line-height: 1.5;
+  color: var(--muted);
   outline: none;
 }
 
 .status.alert {
-  margin-top: 8px;
   min-height: 0;
+  margin-top: 8px;
+  color: var(--error);
 }
 
-.hint {
-  margin-top: 12px;
-  color: var(--muted);
-  font-size: 0.95rem;
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
 }
-
-/* ─── result ─── */
-
-.result {
-  margin-top: 28px;
-  padding: 20px 22px;
-  border: 1px solid var(--accent);
-  background: var(--panel-bg);
-}
-
-.result-value {
-  margin: 14px 0 0;
-  font-family: var(--body);
-  font-size: 0.85rem;
-  line-height: 1.6;
-  color: var(--accent);
-  white-space: pre-wrap;
-  word-break: break-all;
-  user-select: all;
-}
-
-.copy-btn {
-  appearance: none;
-  border: 1px solid var(--accent);
-  padding: 4px 14px;
-  font-family: var(--display);
-  font-weight: 700;
-  font-size: 0.75rem;
-  text-transform: uppercase;
-  letter-spacing: 0.1em;
-  background: transparent;
-  color: var(--accent);
-  cursor: pointer;
-  transition: background 60ms, color 60ms;
-}
-
-.copy-btn:hover {
-  background: var(--accent);
-  color: var(--accent-fg);
-}
-
-/* ─── responsive ─── */
 
 @media (max-width: 640px) {
   body {
-    padding: 32px 16px;
+    align-items: start;
+    padding: 28px 16px;
+  }
+
+  h1 {
+    margin-bottom: 18px;
   }
 
   .action {
     width: 100%;
     min-width: 0;
-  }
-
-  .hero-icon {
-    width: 80px;
-    height: 80px;
   }
 }

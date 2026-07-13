@@ -53,28 +53,35 @@ function alertUser(...parts) {
 
 let config = null;
 let sessionId = null;
-/** First ceremony result: rawId (ArrayBuffer) plus its encodings. */
-let firstResult = null;
-/** Held envelopes: retries re-POST these, never re-run a ceremony. */
-let firstEnvelope = null;
-let rememberEnvelope = null;
-/** Precomputed at offer entry; pagehide handlers cannot run async crypto. */
-let doneEnvelope = null;
-let pendingEnvelopePromise = null;
-
-let offerShown = false;
-let ceremony2Started = false;
-let followUpInitiated = false;
-/** A done was sent (tap, beacon, or expiry) or the session is over. */
-let released = false;
-/** A POST or ceremony is in flight; the expiry timer waits it out. */
-let busy = false;
-let finished = false;
-let expiryAt = 0;
 let expiryTimer = 0;
-/** What #start does when tapped: rerun the ceremony or resend the held
- * first envelope. */
-let startMode = 'run';
+
+/**
+ * Every phase carries only the data valid in that phase. In particular,
+ * retries hold an already-encrypted envelope and the remember offer owns its
+ * expiry and pagehide messages.
+ * @typedef {
+ *   {kind: 'loading'} |
+ *   {kind: 'ready', action: 'run'} |
+ *   {kind: 'ready', action: 'resend-register', envelope: string} |
+ *   {kind: 'ready', action: 'resend-assert', envelope: string, firstResult: FirstResult} |
+ *   {kind: 'first-busy'} |
+ *   {kind: 'offer', data: OfferData} |
+ *   {kind: 'remembering', step: 'probe'|'ceremony', data: OfferData} |
+ *   {kind: 'remember-posting', envelope: string} |
+ *   {kind: 'remember-retry', envelope: string} |
+ *   {kind: 'released'} |
+ *   {kind: 'finished'}
+ * } Phase
+ * @typedef {{rawId: ArrayBuffer, credentialIdB64: string, prfFirstB64: string}} FirstResult
+ * @typedef {{
+ *   firstResult: FirstResult,
+ *   expiryAt: number,
+ *   pendingEnvelope: Promise<string>,
+ *   doneEnvelope: string|null
+ * }} OfferData
+ */
+/** @type {Phase} */
+let phase = { kind: 'loading' };
 
 function markerKey(sid) {
   return `keytap-sent-${sid}`;
@@ -228,23 +235,25 @@ function isCancel(e) {
 // ─── Offer expiry (page-local; the CLI's window is the real clock) ───
 
 function armExpiry() {
-  expiryAt = Date.now() + Math.max(config.windowSecs - 10, 5) * 1000;
+  if (phase.kind !== 'offer') return;
+  phase.data.expiryAt = Date.now() + Math.max(config.windowSecs - 10, 5) * 1000;
   scheduleExpiryCheck();
 }
 
 function scheduleExpiryCheck() {
+  if (phase.kind !== 'offer' && phase.kind !== 'remembering') return;
   clearTimeout(expiryTimer);
-  expiryTimer = setTimeout(checkExpiry, Math.max(expiryAt - Date.now(), 0) + 20);
+  expiryTimer = setTimeout(checkExpiry, Math.max(phase.data.expiryAt - Date.now(), 0) + 20);
 }
 
 function checkExpiry() {
-  if (finished || followUpInitiated) return;
-  if (busy) {
+  if (phase.kind === 'remembering') {
     // Never expire mid-ceremony or mid-POST; look again shortly.
     expiryTimer = setTimeout(checkExpiry, 1000);
     return;
   }
-  if (Date.now() >= expiryAt) {
+  if (phase.kind !== 'offer') return;
+  if (Date.now() >= phase.data.expiryAt) {
     expireOffer(true);
   } else {
     scheduleExpiryCheck();
@@ -254,11 +263,12 @@ function checkExpiry() {
 /** @param {boolean} releaseCli post the done envelope so the terminal frees
  * up as this guidance renders (skipped when the CLI already 410'd). */
 function expireOffer(releaseCli) {
-  finished = true;
+  if (phase.kind !== 'offer' && phase.kind !== 'remembering') return;
+  const { doneEnvelope } = phase.data;
+  phase = { kind: 'finished' };
   document.title = 'keytap: finished';
   $('offer').hidden = true;
-  if (releaseCli && doneEnvelope && !released) {
-    released = true;
+  if (releaseCli && doneEnvelope) {
     post(doneEnvelope).catch(() => {});
   }
   const name = config.keyName;
@@ -281,33 +291,39 @@ function setOfferButtonsDisabled(disabled) {
   }
 }
 
-function offerButtonsDisabled() {
-  return $('remember-btn').getAttribute('aria-disabled') === 'true';
-}
-
-function enterOffer() {
-  offerShown = true;
+function enterOffer(firstResult) {
   const name = config.keyName;
   render($('offer-body'),
     'That machine can keep ', { code: name }, ', so keytap stops prompting for it until ',
     { code: `keytap forget ${name}` }, '. Confirming takes one more passkey check.'
   );
   $('offer-hint').textContent =
-    `This offer ends when that machine stops waiting, in ${humanDuration(config.windowSecs)}. Done stores nothing.`;
+    `This offer ends when that machine stops waiting, in ${humanDuration(config.windowSecs)}. Don’t remember stores nothing.`;
   setOfferButtonsDisabled(false);
   $('offer').hidden = false;
   say('Sent. Your CLI has the key.');
   $('offer-heading').focus();
+  phase = {
+    kind: 'offer',
+    data: {
+      firstResult,
+      expiryAt: 0,
+      pendingEnvelope: encryptEnvelope({ type: 'remember-pending' }),
+      doneEnvelope: null,
+    },
+  };
   armExpiry();
   // The beacon cannot run async crypto inside pagehide, and the pending
-  // probe should not make the user wait; both envelopes are built now.
-  pendingEnvelopePromise = encryptEnvelope({ type: 'remember-pending' });
-  encryptEnvelope({ type: 'done' }).then(envelope => { doneEnvelope = envelope; }, () => {});
+  // probe should not make the user wait; its envelope was built above.
+  encryptEnvelope({ type: 'done' }).then(envelope => {
+    if (phase.kind === 'offer' || phase.kind === 'remembering') phase.data.doneEnvelope = envelope;
+  }, () => {});
 }
 
 async function onRememberTap() {
-  if (offerButtonsDisabled() || busy) return;
-  busy = true;
+  if (phase.kind !== 'offer') return;
+  const data = phase.data;
+  phase = { kind: 'remembering', step: 'probe', data };
   setOfferButtonsDisabled(true);
 
   // Liveness probe before any gesture is spent: a dead session becomes
@@ -315,9 +331,9 @@ async function onRememberTap() {
   const probeStarted = performance.now();
   let resp;
   try {
-    resp = await post(await pendingEnvelopePromise, 4000);
+    resp = await post(await data.pendingEnvelope, 4000);
   } catch {
-    busy = false;
+    phase = { kind: 'offer', data };
     setOfferButtonsDisabled(false);
     alertUser("Couldn't reach the relay. Nothing was stored. Tap Remember on that machine to try again.");
     $('remember-btn').focus();
@@ -325,27 +341,26 @@ async function onRememberTap() {
   }
   const probeMs = performance.now() - probeStarted;
   if (resp.status === 410) {
-    busy = false;
     expireOffer(false);
     return;
   }
   if (!resp.ok) {
-    busy = false;
+    phase = { kind: 'offer', data };
     setOfferButtonsDisabled(false);
     alertUser("Couldn't reach the relay. Nothing was stored. Tap Remember on that machine to try again.");
     $('remember-btn').focus();
     return;
   }
 
-  ceremony2Started = true;
+  phase = { kind: 'remembering', step: 'ceremony', data };
   say('Confirming with your passkey…');
   document.title = 'keytap: approve';
   const ceremonyStarted = performance.now();
   let second;
   try {
-    second = await runAssertion(firstResult.rawId);
+    second = await runAssertion(data.firstResult.rawId);
   } catch (e) {
-    busy = false;
+    phase = { kind: 'offer', data };
     setOfferButtonsDisabled(false);
     document.title = 'keytap: sent';
     if (isCancel(e) && performance.now() - ceremonyStarted < 200 && probeMs > 2000) {
@@ -364,9 +379,9 @@ async function onRememberTap() {
 
   // The sheet is pinned to the first credential, so a mismatch means a
   // broken authenticator UI; refuse locally, nothing leaves the page.
-  if (encodeBase64URL(second.credential.rawId) !== firstResult.credentialIdB64
-      || encodeBase64URL(second.prfFirst) !== firstResult.prfFirstB64) {
-    busy = false;
+  if (encodeBase64URL(second.credential.rawId) !== data.firstResult.credentialIdB64
+      || encodeBase64URL(second.prfFirst) !== data.firstResult.prfFirstB64) {
+    phase = { kind: 'offer', data };
     setOfferButtonsDisabled(false);
     document.title = 'keytap: sent';
     alertUser('That approval used a different passkey, so nothing was sent. Try again with the passkey that just derived the key.');
@@ -375,24 +390,22 @@ async function onRememberTap() {
   }
 
   say('Encrypting and sending…');
-  rememberEnvelope = await encryptEnvelope({
+  const envelope = await encryptEnvelope({
     type: 'assert-success',
-    credentialId: firstResult.credentialIdB64,
-    prfFirst: firstResult.prfFirstB64,
+    credentialId: data.firstResult.credentialIdB64,
+    prfFirst: data.firstResult.prfFirstB64,
     remember: true,
   });
-  // From here on the pagehide beacon stays silent: a done racing this
-  // follow-up could drop an explicitly confirmed remember.
-  followUpInitiated = true;
-  await postRemember();
+  phase = { kind: 'remember-posting', envelope };
+  await postRemember(envelope);
 }
 
-async function postRemember() {
+async function postRemember(envelope) {
   let resp;
   try {
-    resp = await post(rememberEnvelope);
+    resp = await post(envelope);
   } catch {
-    busy = false;
+    phase = { kind: 'remember-retry', envelope };
     alertUser("Couldn't reach the relay. Nothing was stored. Tap Try again to resend.");
     const btn = $('remember-btn');
     btn.textContent = 'Try again';
@@ -400,8 +413,7 @@ async function postRemember() {
     btn.focus();
     return;
   }
-  busy = false;
-  finished = true;
+  phase = { kind: 'finished' };
   $('offer').hidden = true;
   const name = config.keyName;
   if (resp.status === 410) {
@@ -420,12 +432,12 @@ async function postRemember() {
 }
 
 function onDoneTap() {
-  if (offerButtonsDisabled() || busy) return;
-  finished = true;
+  if (phase.kind !== 'offer') return;
+  const { doneEnvelope } = phase.data;
+  phase = { kind: 'finished' };
   document.title = 'keytap: finished';
   $('offer').hidden = true;
-  if (doneEnvelope && !released) {
-    released = true;
+  if (doneEnvelope) {
     // 410 just means the CLI already left; not an error.
     post(doneEnvelope).catch(() => {});
   }
@@ -435,12 +447,12 @@ function onDoneTap() {
 
 // Retry that resends the held remember envelope, never a new ceremony.
 function onRememberButton() {
-  if (followUpInitiated && rememberEnvelope) {
-    if ($('remember-btn').getAttribute('aria-disabled') === 'true') return;
+  if (phase.kind === 'remember-retry') {
+    const { envelope } = phase;
     $('remember-btn').setAttribute('aria-disabled', 'true');
-    busy = true;
+    phase = { kind: 'remember-posting', envelope };
     say('Encrypting and sending…');
-    postRemember();
+    postRemember(envelope);
   } else {
     onRememberTap();
   }
@@ -448,38 +460,45 @@ function onRememberButton() {
 
 // ─── First ceremony (assert) ───
 
-function enterSent() {
+function enterSent(firstResult) {
   document.title = 'keytap: sent';
+  $('summary').hidden = true;
   $('explainer').hidden = true;
   $('details').hidden = true;
   $('start').remove();
   if (config.operation === 'register') {
     // No marker: reloading a spent register session has nothing to finish.
-    say('Sent. You can close this page.');
+    $('title').textContent = 'Passkey created';
+    say('Sent to your CLI. You can close this page.');
+    phase = { kind: 'finished' };
     return;
   }
   $('title').textContent = 'Key sent';
   setMarker('sent');
   const name = config.keyName;
   if (config.windowSecs > 0) {
-    enterOffer();
+    enterOffer(firstResult);
   } else if (config.legacyRemember) {
     say(
       'Sent. You can close this page. To remember ', { code: name },
       ' on that machine, run ', { code: `keytap remember ${name}` }, ' there.'
     );
+    phase = { kind: 'finished' };
   } else {
     say('Sent. You can close this page.');
+    phase = { kind: 'finished' };
   }
 }
 
-async function postFirst() {
+async function postFirst(envelope, firstResult) {
   say('Encrypting and sending…');
   let resp;
   try {
-    resp = await post(firstEnvelope);
+    resp = await post(envelope);
   } catch {
-    startMode = 'resend';
+    phase = firstResult
+      ? { kind: 'ready', action: 'resend-assert', envelope, firstResult }
+      : { kind: 'ready', action: 'resend-register', envelope };
     const btn = $('start');
     btn.textContent = 'Try again';
     btn.disabled = false;
@@ -487,31 +506,37 @@ async function postFirst() {
     return;
   }
   if (resp.status === 410) {
+    phase = { kind: 'finished' };
     $('start').remove();
     alertUser('Your CLI stopped waiting. Run the command again and scan the fresh code.');
     return;
   }
   if (!resp.ok) {
-    startMode = 'resend';
+    phase = firstResult
+      ? { kind: 'ready', action: 'resend-assert', envelope, firstResult }
+      : { kind: 'ready', action: 'resend-register', envelope };
     const btn = $('start');
     btn.textContent = 'Try again';
     btn.disabled = false;
     alertUser("Couldn't reach the relay. Nothing was sent. Tap Try again to resend.");
     return;
   }
-  enterSent();
+  enterSent(firstResult);
 }
 
 async function runFirst() {
   const btn = $('start');
+  phase = { kind: 'first-busy' };
   btn.disabled = true;
   document.title = 'keytap: approve';
 
+  let envelope;
+  let firstResult;
   try {
     if (config.operation === 'register') {
       say('Waiting for passkey creation…');
       const credential = await runRegister();
-      firstEnvelope = await encryptEnvelope({
+      envelope = await encryptEnvelope({
         type: 'register-success',
         credentialId: encodeBase64URL(credential.rawId),
       });
@@ -530,11 +555,12 @@ async function runFirst() {
       };
       // Announce follow-up capability only to a CLI that lingers for it.
       if (config.windowSecs > 0) payload.follow = true;
-      firstEnvelope = await encryptEnvelope(payload);
+      envelope = await encryptEnvelope(payload);
     }
   } catch (e) {
+    phase = { kind: 'ready', action: 'run' };
     btn.disabled = false;
-    const label = config.operation === 'register' ? 'Create passkey' : 'Authenticate';
+    const label = config.operation === 'register' ? 'Create passkey' : 'Approve request';
     btn.textContent = label;
     if (isCancel(e)) {
       say(`The passkey prompt was cancelled or didn’t open. Nothing was sent. Tap ${label} to try again.`);
@@ -545,7 +571,7 @@ async function runFirst() {
     return;
   }
 
-  await postFirst();
+  await postFirst(envelope, firstResult);
 }
 
 // ─── Terminal states reached without a live session ───
@@ -553,11 +579,12 @@ async function runFirst() {
 function renderFinished(marker) {
   $('title').textContent = 'Key sent';
   document.title = 'keytap: finished';
+  $('summary').hidden = true;
   $('explainer').hidden = true;
   $('details').hidden = true;
   $('start')?.remove();
   $('offer').hidden = true;
-  finished = true;
+  phase = { kind: 'finished' };
   if (marker && marker.state === 'remembered') {
     document.title = 'keytap: remembered';
     say('Remember request sent. The terminal on that machine confirms where the key was stored. You can close this page.');
@@ -574,10 +601,13 @@ function renderFinished(marker) {
 // ─── Lifecycle ───
 
 window.addEventListener('pagehide', () => {
-  // Only from a live, undecided offer. Once a second ceremony started or
-  // the follow-up is on the wire, silence: the CLI's own window bounds it.
-  if (offerShown && !ceremony2Started && !followUpInitiated && !released && doneEnvelope) {
-    released = true;
+  // Once the second ceremony starts, silence: a done racing the remember
+  // follow-up could discard an explicitly confirmed choice.
+  const canRelease = phase.kind === 'offer'
+    || (phase.kind === 'remembering' && phase.step === 'probe');
+  if (canRelease && phase.data.doneEnvelope) {
+    const { doneEnvelope } = phase.data;
+    phase = { kind: 'released' };
     // A plain string rides as text/plain, the only content type beacons
     // can send cross-origin without a preflight.
     navigator.sendBeacon(`${RELAY_URL}/relay/${sessionId}`, doneEnvelope);
@@ -585,13 +615,13 @@ window.addEventListener('pagehide', () => {
 });
 
 window.addEventListener('pageshow', e => {
-  if (e.persisted && released && !finished) {
+  if (e.persisted && phase.kind === 'released') {
     renderFinished(getMarker(sessionId));
   }
 });
 
 document.addEventListener('visibilitychange', () => {
-  if (!document.hidden && offerShown && !finished) scheduleExpiryCheck();
+  if (!document.hidden && (phase.kind === 'offer' || phase.kind === 'remembering')) scheduleExpiryCheck();
 });
 
 // ─── Entry ───
@@ -601,6 +631,7 @@ async function main() {
   try {
     config = await fetchConfig();
   } catch (e) {
+    phase = { kind: 'finished' };
     $('start').remove();
     $('title').textContent = 'keytap';
     $('explainer').hidden = true;
@@ -623,29 +654,38 @@ async function main() {
   sessionId = config.sessionId;
 
   const isRegister = config.operation === 'register';
-  $('title').textContent = isRegister ? 'Create the keytap passkey' : 'Approve on this device';
+  $('title').textContent = isRegister ? 'Create your keytap passkey' : 'Approve this key request';
   if (isRegister) {
     $('summary').textContent = 'Create the passkey once, then keytap can recover the same keys anywhere.';
+    $('explainer').textContent = 'No account is needed. Your passkey stays in your password manager.';
   } else {
-    render($('summary'), 'Approve to derive key: ', { code: config.keyName });
+    render($('summary'), 'Your CLI requested key: ', { code: config.keyName });
   }
 
   $('remember-btn').addEventListener('click', onRememberButton);
   $('done-btn').addEventListener('click', onDoneTap);
 
   const btn = $('start');
-  btn.textContent = isRegister ? 'Create passkey' : 'Authenticate';
+  btn.textContent = isRegister ? 'Create passkey' : 'Approve request';
   btn.addEventListener('click', () => {
-    if (startMode === 'resend') {
+    if (phase.kind === 'ready' && phase.action === 'resend-register') {
+      const { envelope } = phase;
+      phase = { kind: 'first-busy' };
       btn.disabled = true;
-      postFirst();
-    } else {
+      postFirst(envelope, null);
+    } else if (phase.kind === 'ready' && phase.action === 'resend-assert') {
+      const { envelope, firstResult } = phase;
+      phase = { kind: 'first-busy' };
+      btn.disabled = true;
+      postFirst(envelope, firstResult);
+    } else if (phase.kind === 'ready' && phase.action === 'run') {
       runFirst();
     }
   });
 
   if (isRegister) {
     say('Ready.');
+    phase = { kind: 'ready', action: 'run' };
     btn.disabled = false;
   } else {
     // Opening the page from a QR scan provides transient user activation;

@@ -34,7 +34,7 @@ body {
   display: flex;
   align-items: center;
   gap: 20px;
-  padding: 10px var(--pad);
+  padding: 10px max(var(--pad), calc((100vw - var(--measure)) / 2 + var(--pad)));
   border-bottom: 1px solid var(--line);
 }
 
@@ -51,6 +51,11 @@ body {
 .term-title img {
   display: block;
   image-rendering: pixelated;
+}
+
+.term-tagline {
+  color: var(--muted);
+  font-size: 0.78rem;
 }
 
 .term-link {
@@ -72,6 +77,7 @@ body {
 
 :root {
   --pad: clamp(16px, 2.5vw, 28px);
+  --measure: 1120px;
 }
 
 .term-shell {
@@ -81,6 +87,8 @@ body {
 }
 
 .term-screen {
+  width: min(100%, var(--measure));
+  margin-inline: auto;
   height: 100%;
   overflow-y: auto;
   overscroll-behavior: contain;
@@ -139,6 +147,17 @@ button.cmd:focus-visible::before {
   right: 100%;
   color: var(--muted);
   text-decoration: none;
+}
+
+.suggestion {
+  display: grid;
+  grid-template-columns: minmax(18rem, max-content) 1fr;
+  gap: 0 2rem;
+  padding-left: 1.5rem;
+}
+
+.suggestion span {
+  color: var(--muted);
 }
 
 /* The ceremony line: state, reassurance, and cancel in one button. */
@@ -302,5 +321,21 @@ button.ln.busy:focus-visible {
 @media (prefers-reduced-motion: reduce) {
   .focused .term-cursor {
     animation: none;
+  }
+}
+
+@media (max-width: 620px) {
+  .term-tagline {
+    display: none;
+  }
+
+  .suggestion {
+    grid-template-columns: 1fr;
+    padding: 0.35rem 0 0.55rem 1rem;
+    line-height: 1.35;
+  }
+
+  .suggestion span {
+    font-size: 0.85rem;
   }
 }

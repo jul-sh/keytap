@@ -15,14 +15,17 @@
     <p class="eyebrow">keytap</p>
     <h1 id="title">Loading…</h1>
     <p class="summary" id="summary"></p>
-    <p class="summary" id="explainer">Authenticate with your passkey on this device to send the derived key material back to your CLI.</p>
-    <p class="details" id="details">Your CLI uploaded a one-time X25519 public key to the relay along with the session config. This page fetched it, so both sides can compute a shared secret. When you approve, the derived key material is encrypted with AES-256-GCM using that shared secret and posted back through a Cloudflare Worker relay; the relay only ever sees ciphertext. Choosing to remember sends a second, separately confirmed message the same way.</p>
+    <p class="summary" id="explainer">Approve with this device to send the derived key back to your waiting CLI.</p>
+    <details class="details" id="details">
+      <summary>How is this request protected?</summary>
+      <p>Your CLI and this page use one-time X25519 keys to create an encrypted channel. The derived key is protected with AES-256-GCM, so the relay only sees ciphertext. Remembering a key requires a second approval.</p>
+    </details>
     <section class="offer" id="offer" hidden>
       <h2 id="offer-heading" tabindex="-1">Remember on that machine?</h2>
       <p id="offer-body"></p>
       <p class="hint" id="offer-hint"></p>
       <button class="action" id="remember-btn" type="button" aria-describedby="offer-body">Remember on that machine</button>
-      <button class="action action-secondary" id="done-btn" type="button">Done</button>
+      <button class="action action-secondary" id="done-btn" type="button">Don’t remember</button>
     </section>
     <button class="action" id="start" type="button" disabled>Loading…</button>
     <p class="status" id="status" role="status" aria-live="polite" tabindex="-1"></p>
