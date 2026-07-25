@@ -4,6 +4,7 @@ mod keychain;
 mod nearby;
 mod nearby_identity;
 mod nearby_protocol;
+mod nearby_sas;
 mod remember;
 
 use keytap_cli_spec::{Command, Invocation};
@@ -36,9 +37,18 @@ fn main() {
                      cleared. Pass --force to replace the passkey.",
                 );
             }
-            let credential_id = register();
-            remember::after_init(&credential_id);
-            nearby_identity::after_init(&credential_id);
+            let init_mode = if force {
+                nearby_identity::InitMode::Replace
+            } else {
+                nearby_identity::InitMode::Create
+            };
+            let pending_init = nearby_identity::prepare_init(init_mode).unwrap_or_else(|error| {
+                die(&format!(
+                    "could not prepare the nearby identity update: {error}"
+                ))
+            });
+            let registration = register(pending_init);
+            remember::after_init(registration.credential_id());
         }
         Command::Public { ref name, format } => {
             with_derived_key(name, cli.prompt, |raw_key| emit_public_key(raw_key, format, name));
@@ -106,7 +116,7 @@ fn with_derived_key(name: &str, allow_prompt: bool, use_key: impl FnOnce(&[u8]))
     let assertion = authenticate(name, OFFER_REMEMBER);
     let raw_key = derive_key(&assertion.prf_output);
     if assertion.remember_requested {
-        remember::remember_requested_nearby(name, &assertion.credential_id, &raw_key);
+        let _ = remember::remember_requested_nearby(name, &assertion.credential_id, &raw_key);
     }
     use_key(&raw_key);
     if let Some(window) = assertion.followup {
@@ -115,12 +125,9 @@ fn with_derived_key(name: &str, allow_prompt: bool, use_key: impl FnOnce(&[u8]))
         // and a piped consumer deserves the key now, not after the wait.
         use std::io::Write;
         std::io::stdout().flush().ok();
-        if window.settle() {
-            remember::remember_requested_nearby(name, &assertion.credential_id, &raw_key);
-        }
+        window.settle(&raw_key);
     }
 }
-
 
 /// `init` and `remember` exist to run a ceremony; under `$CI` that still
 /// needs the same explicit opt-in as the derivation commands.
@@ -208,28 +215,39 @@ fn derive_key(prf_output: &[u8]) -> Zeroizing<Vec<u8>> {
     }))
 }
 
-/// Register a new passkey; returns its credential ID so init can rotate the
-/// remembered-keys root.
 #[cfg(feature = "native-passkey")]
-fn register() -> Vec<u8> {
+fn register(pending_init: nearby_identity::PendingInit) -> nearby_identity::PersistedInit {
     match keytap_macos::register() {
         keytap_macos::RegistrationOutcome::Success { credential_id } => {
-            eprintln!("Passkey registered successfully.");
-            credential_id
+            match pending_init.commit(&credential_id) {
+                Ok(registration) => {
+                    eprintln!("Passkey registered successfully.");
+                    registration
+                }
+                Err(nearby_identity::InitCommitError::NotPublished(error)) => die(&format!(
+                    "passkey was created, but its nearby identity anchor could not be stored: {error}"
+                )),
+                Err(nearby_identity::InitCommitError::PublishedButNotDurable(error)) => {
+                    remember::after_init(&credential_id);
+                    die(&format!(
+                        "passkey was created and its nearby identity anchor is visible, but durable storage could not be confirmed: {error}. Init is indeterminate; rerun `keytap init --force` before relying on it"
+                    ))
+                }
+            }
         }
         keytap_macos::RegistrationOutcome::Error(msg) if msg == "cancelled" => {
             die(&msg);
         }
         keytap_macos::RegistrationOutcome::Error(msg) => {
             eprintln!("Couldn't open native passkey flow: {msg}");
-            nearby::register_nearby()
+            nearby::register_nearby(pending_init)
         }
     }
 }
 
 #[cfg(not(feature = "native-passkey"))]
-fn register() -> Vec<u8> {
-    nearby::register_nearby()
+fn register(pending_init: nearby_identity::PendingInit) -> nearby_identity::PersistedInit {
+    nearby::register_nearby(pending_init)
 }
 
 fn emit_private_key(raw_key: &[u8], format: keytap_cli_spec::Format) {

@@ -1,13 +1,21 @@
 import {
   CLOUDFLARE_STUN_ONLY,
   ProtocolError,
+  createCliOfferVerifier,
   createNearbyIdentityProof,
   createNearbySessionBinding,
-  createSignalAuthenticator,
+  createPhoneAnswer,
+  createSasCommitment,
+  createSasContext,
+  createSasDigest,
   decodeBase64URL,
   encodeBase64URL,
   filterCloudflareIceServers,
+  parseSasWordList,
+  sasPhrase,
+  verifySasCommitment,
 } from './nearby-v2-protocol.js';
+import { requestPairingRelease } from './nearby-v2-pairing.js';
 
 const RELAY_ORIGIN = 'https://keytap-relay.julsh.workers.dev';
 const SIGNAL_OPEN_TIMEOUT_MS = 30_000;
@@ -21,6 +29,7 @@ const REMEMBER_CEREMONY_WINDOW_MS = 140_000;
 const MAX_SIGNAL_BYTES = 128 * 1024;
 const MAX_DATA_BYTES = 16 * 1024;
 const MAX_TURN_RESPONSE_BYTES = 64 * 1024;
+const MAX_SAS_WORD_LIST_BYTES = 32 * 1024;
 const encoder = new TextEncoder();
 const decoder = new TextDecoder('utf-8', { fatal: true });
 
@@ -57,28 +66,40 @@ function alertUser(...parts) {
  *
  * @typedef {
  *   {kind: 'boot'} |
- *   {kind: 'connecting'} |
+ *   {kind: 'connecting', data: ConnectingData} |
+ *   {kind: 'awaiting-request', session: DataSession} |
  *   {kind: 'ready', data: ReadyData} |
- *   {kind: 'first-busy', data: ReadyData} |
+ *   {kind: 'first-busy', data: FirstBusyData} |
+ *   {kind: 'pairing-ceremony', data: PairingCeremonyData} |
+ *   {kind: 'pairing-held', data: PairingHeldData} |
  *   {kind: 'registration-ack', session: DataSession} |
  *   {kind: 'assertion-ack', data: AssertionData} |
  *   {kind: 'offer', data: OfferData} |
  *   {kind: 'remember-begin', data: OfferData} |
- *   {kind: 'remember-ceremony', data: OfferData} |
+ *   {kind: 'remember-ceremony', data: RememberCeremonyData} |
  *   {kind: 'remember-ack', data: OfferData} |
  *   {kind: 'finished'} |
  *   {kind: 'failed'}
  * } Phase
- * @typedef {{session: DataSession, request: NearbyRequest, sessionBinding: Uint8Array}} ReadyData
+ * @typedef {{controller: AbortController}} ConnectingData
+ * @typedef {{session: DataSession, request: AssertRequest, sessionBinding: Uint8Array}} ReadyData
+ * @typedef {ReadyData & {controller: AbortController}} FirstBusyData
  * @typedef {{session: DataSession, request: AssertRequest, firstResult: FirstResult}} AssertionData
  * @typedef {AssertionData & {expiryAt: number}} OfferData
- * @typedef {{credentialId: Uint8Array, credentialIdB64: string, prfFirstB64: string}} FirstResult
+ * @typedef {OfferData & {controller: AbortController}} RememberCeremonyData
+ * @typedef {{credentialId: Uint8Array, prfFirst: Uint8Array, identity: object}} FirstResult
+ * @typedef {{session: DataSession, verifier: CliOfferVerifier, sessionBinding: Uint8Array, binding: {kind: 'bootstrap-sas', digest: Uint8Array}, phrase: string}} PairingBaseData
+ * @typedef {((PairingBaseData & {kind: 'registration', request: RegisterRequest}) | (PairingBaseData & {kind: 'assertion', request: AssertRequest})) & {controller: AbortController}} PairingCeremonyData
+ * @typedef {(PairingBaseData & {kind: 'registration', request: RegisterRequest, credential: PublicKeyCredential, releaseNonce: Uint8Array}) | (PairingBaseData & {kind: 'assertion', request: AssertRequest, result: FirstResult, releaseNonce: Uint8Array})} PairingHeldData
+ * @typedef {{verifyPairingRelease: (fields: object) => Promise<void>}} CliOfferVerifier
+ * @typedef {{kind: 'bootstrap-sas', digest: Uint8Array} | {kind: 'pinned-session', digest: Uint8Array}} ProofBinding
  * @typedef {
- *   {kind: 'register', challenge: Uint8Array, prfSalt: Uint8Array, userId: Uint8Array, userName: string} |
+ *   RegisterRequest |
  *   AssertRequest
  * } NearbyRequest
+ * @typedef {{kind: 'register', challenge: Uint8Array, prfSalt: Uint8Array, userId: Uint8Array, userName: string}} RegisterRequest
  * @typedef {{kind: 'assert', challenge: Uint8Array, prfSalt: Uint8Array, identitySalt: Uint8Array, identity: IdentityMode, keyName: string, remember: RememberMode}} AssertRequest
- * @typedef {{kind: 'tofu'} | {kind: 'pinned', credentialId: Uint8Array}} IdentityMode
+ * @typedef {{kind: 'pairing-any'} | {kind: 'pairing-credential', credentialId: Uint8Array} | {kind: 'pinned', credentialId: Uint8Array}} IdentityMode
  * @typedef {{kind: 'disabled'} | {kind: 'available', windowSecs: number}} RememberMode
  * @typedef {{send: (message: object) => void, next: (timeoutMs?: number) => Promise<object>, close: () => void, isOpen: () => boolean}} DataSession
  */
@@ -131,29 +152,79 @@ class AsyncQueue {
   }
 }
 
-function abortAfter(ms) {
-  if (typeof AbortSignal.timeout === 'function') return AbortSignal.timeout(ms);
+function abortFailure(signal) {
+  return signal.reason instanceof Error
+    ? signal.reason
+    : new DOMException('The operation was aborted.', 'AbortError');
+}
+
+function throwIfAborted(signal) {
+  if (signal?.aborted) throw abortFailure(signal);
+}
+
+function abortable(promise, signal) {
+  if (!signal) return promise;
+  try {
+    throwIfAborted(signal);
+  } catch (error) {
+    return Promise.reject(error);
+  }
+  return new Promise((resolve, reject) => {
+    const onAbort = () => reject(abortFailure(signal));
+    signal.addEventListener('abort', onAbort, { once: true });
+    Promise.resolve(promise).then(
+      value => {
+        signal.removeEventListener('abort', onAbort);
+        resolve(value);
+      },
+      error => {
+        signal.removeEventListener('abort', onAbort);
+        reject(error);
+      },
+    );
+  });
+}
+
+function abortAfter(ms, parentSignal) {
+  const timeoutSignal = typeof AbortSignal.timeout === 'function'
+    ? AbortSignal.timeout(ms)
+    : (() => {
+      const controller = new AbortController();
+      setTimeout(() => controller.abort(), ms);
+      return controller.signal;
+    })();
+  if (!parentSignal) return timeoutSignal;
+  if (typeof AbortSignal.any === 'function') {
+    return AbortSignal.any([parentSignal, timeoutSignal]);
+  }
   const controller = new AbortController();
-  setTimeout(() => controller.abort(), ms);
+  const forwardAbort = signal => {
+    if (!controller.signal.aborted) controller.abort(signal.reason);
+  };
+  parentSignal.addEventListener('abort', () => forwardAbort(parentSignal), { once: true });
+  timeoutSignal.addEventListener('abort', () => forwardAbort(timeoutSignal), { once: true });
+  if (parentSignal.aborted) forwardAbort(parentSignal);
   return controller.signal;
 }
 
-function takeCapabilityFromFragment() {
+function takeCliPublicKeyFromFragment() {
   const hash = location.hash.startsWith('#') ? location.hash.slice(1) : '';
   const params = new URLSearchParams(hash);
-  const values = params.getAll('q');
+  const values = params.getAll('k');
   // Fragments are never sent in HTTP requests. Remove this one immediately so
   // it also stays out of screenshots, copied URLs, history, and crash reports.
   history.replaceState(null, '', location.pathname + location.search);
-  if (values.length !== 1) throw new ProtocolError('No nearby capability in URL.');
-  let capability;
-  try {
-    capability = decodeBase64URL(values[0]);
-  } catch {
-    throw new ProtocolError('Invalid nearby capability.');
+  if (values.length !== 1 || [...params.keys()].some(key => key !== 'k')) {
+    throw new ProtocolError('No unambiguous nearby CLI public key in URL.');
   }
-  if (capability.length !== 32) throw new ProtocolError('Invalid nearby capability.');
-  return capability;
+  let publicKey;
+  try {
+    publicKey = decodeBase64URL(values[0]);
+  } catch {
+    throw new ProtocolError('Invalid nearby CLI public key.');
+  }
+  if (publicKey.length !== 32) throw new ProtocolError('Invalid nearby CLI public key.');
+  return publicKey;
 }
 
 function signalUrl(rendezvousId) {
@@ -164,7 +235,8 @@ function signalUrl(rendezvousId) {
   return url.href;
 }
 
-async function openSignalSocket(rendezvousId) {
+async function openSignalSocket(rendezvousId, cancellation) {
+  throwIfAborted(cancellation);
   const socket = new WebSocket(signalUrl(rendezvousId));
   const incoming = new AsyncQueue();
   socket.addEventListener('message', event => {
@@ -185,27 +257,38 @@ async function openSignalSocket(rendezvousId) {
   socket.addEventListener('close', () => incoming.fail(new ProtocolError('signaling connection closed')));
   socket.addEventListener('error', () => incoming.fail(new ProtocolError('signaling connection failed')));
 
-  await new Promise((resolve, reject) => {
-    let settled = false;
-    const fail = error => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      reject(error);
-    };
-    const timer = setTimeout(() => {
-      fail(new ProtocolError('timed out reaching signaling'));
-      socket.close();
-    }, SIGNAL_OPEN_TIMEOUT_MS);
-    socket.addEventListener('open', () => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      resolve();
-    }, { once: true });
-    socket.addEventListener('error', () => fail(new ProtocolError('could not reach signaling')), { once: true });
-    socket.addEventListener('close', () => fail(new ProtocolError('signaling connection closed')), { once: true });
-  });
+  try {
+    await abortable(new Promise((resolve, reject) => {
+      let settled = false;
+      const fail = error => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        reject(error);
+      };
+      const timer = setTimeout(() => {
+        fail(new ProtocolError('timed out reaching signaling'));
+        socket.close();
+      }, SIGNAL_OPEN_TIMEOUT_MS);
+      socket.addEventListener('open', () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve();
+      }, { once: true });
+      socket.addEventListener('error', () => fail(new ProtocolError('could not reach signaling')), { once: true });
+      socket.addEventListener('close', () => fail(new ProtocolError('signaling connection closed')), { once: true });
+    }), cancellation);
+  } catch (error) {
+    if (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING) socket.close();
+    throw error;
+  }
+
+  const closeOnAbort = () => {
+    incoming.fail(abortFailure(cancellation));
+    if (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING) socket.close();
+  };
+  cancellation.addEventListener('abort', closeOnAbort, { once: true });
 
   return {
     next: timeoutMs => incoming.next(timeoutMs),
@@ -216,6 +299,7 @@ async function openSignalSocket(rendezvousId) {
       socket.send(encoded);
     },
     close() {
+      cancellation.removeEventListener('abort', closeOnAbort);
       if (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING) socket.close();
     },
   };
@@ -243,7 +327,7 @@ async function waitForOffer(signal) {
   }
 }
 
-async function fetchIceServers(rendezvousId) {
+async function fetchIceServers(rendezvousId, cancellation) {
   const url = `${RELAY_ORIGIN}/v2/signal/${encodeURIComponent(rendezvousId)}/turn/phone`;
   let response;
   try {
@@ -251,7 +335,7 @@ async function fetchIceServers(rendezvousId) {
       cache: 'no-store',
       credentials: 'omit',
       headers: { Accept: 'application/json' },
-      signal: abortAfter(SIGNAL_OPEN_TIMEOUT_MS),
+      signal: abortAfter(SIGNAL_OPEN_TIMEOUT_MS, cancellation),
     });
   } catch {
     throw new ProtocolError('could not obtain ICE credentials');
@@ -271,14 +355,18 @@ async function fetchIceServers(rendezvousId) {
 }
 
 async function readBoundedJson(response, maximumBytes) {
+  return JSON.parse(decoder.decode(await readBoundedBytes(response, maximumBytes)));
+}
+
+async function readBoundedBytes(response, maximumBytes) {
   const declaredLength = Number(response.headers.get('Content-Length'));
   if (Number.isFinite(declaredLength) && declaredLength > maximumBytes) {
     throw new ProtocolError('response is too large');
   }
   if (!response.body?.getReader) {
-    const text = await response.text();
-    if (encoder.encode(text).length > maximumBytes) throw new ProtocolError('response is too large');
-    return JSON.parse(text);
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    if (bytes.length > maximumBytes) throw new ProtocolError('response is too large');
+    return bytes;
   }
 
   const reader = response.body.getReader();
@@ -300,7 +388,21 @@ async function readBoundedJson(response, maximumBytes) {
     bytes.set(chunk, offset);
     offset += chunk.byteLength;
   }
-  return JSON.parse(decoder.decode(bytes));
+  return bytes;
+}
+
+let sasWordsPromise;
+
+function loadSasWords() {
+  if (sasWordsPromise) return sasWordsPromise;
+  sasWordsPromise = fetch(new URL('./nearby-sas-words.txt', import.meta.url), {
+    cache: 'force-cache',
+    credentials: 'omit',
+  }).then(async response => {
+    if (!response.ok) throw new ProtocolError('could not load pairing words');
+    return parseSasWordList(await readBoundedBytes(response, MAX_SAS_WORD_LIST_BYTES));
+  });
+  return sasWordsPromise;
 }
 
 function waitForIceGathering(peer) {
@@ -339,8 +441,8 @@ function expectDataChannel(peer) {
       }
       claimed = true;
       const channel = event.channel;
-      if (channel.label !== 'keytap/2'
-          || channel.protocol !== 'keytap.v2'
+      if (channel.label !== 'keytap/3'
+          || channel.protocol !== 'keytap.v3'
           || !channel.ordered
           || channel.maxRetransmits !== null
           || channel.maxPacketLifeTime !== null) {
@@ -424,25 +526,28 @@ function makeDataSession(peer, channel) {
   };
 }
 
-async function establishPrivateChannel(authenticator) {
-  const signal = await openSignalSocket(authenticator.rendezvousId);
+async function establishPrivateChannel(verifier, cancellation) {
+  const signaling = await openSignalSocket(verifier.rendezvousId, cancellation);
   try {
-    await waitForPeer(signal);
+    await abortable(waitForPeer(signaling), cancellation);
     say('Found your CLI. Establishing a private connection…');
-    const icePromise = fetchIceServers(authenticator.rendezvousId).then(
+    const icePromise = fetchIceServers(verifier.rendezvousId, cancellation).then(
       iceServers => ({ kind: 'turn', iceServers }),
-      () => ({
-        kind: 'stun-only',
-        iceServers: CLOUDFLARE_STUN_ONLY.map(server => ({ urls: [...server.urls] })),
-      }),
+      () => {
+        throwIfAborted(cancellation);
+        return {
+          kind: 'stun-only',
+          iceServers: CLOUDFLARE_STUN_ONLY.map(server => ({ urls: [...server.urls] })),
+        };
+      },
     );
-    const offerEnvelope = await waitForOffer(signal);
-    const offerBytes = await authenticator.verify(offerEnvelope, 'cli', 0, 'offer');
+    const offerEnvelope = await abortable(waitForOffer(signaling), cancellation);
+    const offerBytes = await abortable(verifier.verifyOffer(offerEnvelope), cancellation);
     if (offerBytes.length === 0 || offerBytes.length > MAX_SIGNAL_BYTES) {
       throw new ProtocolError('invalid authenticated offer');
     }
     const offerSdp = decoder.decode(offerBytes);
-    const iceConfiguration = await icePromise;
+    const iceConfiguration = await abortable(icePromise, cancellation);
     if (iceConfiguration.kind === 'stun-only') {
       // TURN minting is an availability aid, not an authentication input.
       // A direct/STUN path may still work when credential generation is down.
@@ -452,37 +557,40 @@ async function establishPrivateChannel(authenticator) {
 
     if (typeof RTCPeerConnection !== 'function') throw new ProtocolError('WebRTC is unavailable in this browser');
     const peer = new RTCPeerConnection({ iceServers });
+    const closePeerOnAbort = () => peer.close();
+    cancellation.addEventListener('abort', closePeerOnAbort, { once: true });
     const channelPromise = expectDataChannel(peer).then(
       session => ({ kind: 'open', session }),
       error => ({ kind: 'failed', error }),
     );
     try {
-      // The HMAC check above is the important ordering: no relay-provided SDP,
+      // The signature check above is the important ordering: no relay-provided SDP,
       // including its DTLS fingerprint, reaches WebRTC before authentication.
-      await peer.setRemoteDescription({ type: 'offer', sdp: offerSdp });
-      const answer = await peer.createAnswer();
-      await peer.setLocalDescription(answer);
-      await waitForIceGathering(peer);
+      await abortable(peer.setRemoteDescription({ type: 'offer', sdp: offerSdp }), cancellation);
+      const answer = await abortable(peer.createAnswer(), cancellation);
+      await abortable(peer.setLocalDescription(answer), cancellation);
+      await abortable(waitForIceGathering(peer), cancellation);
       const answerSdp = peer.localDescription?.sdp;
       if (typeof answerSdp !== 'string' || answerSdp.length === 0) {
         throw new ProtocolError('could not create a complete WebRTC answer');
       }
-      const envelope = await authenticator.sign('phone', 0, 'answer', answerSdp);
-      signal.send(envelope);
-      const channel = await channelPromise;
+      signaling.send(createPhoneAnswer(answerSdp));
+      const channel = await abortable(channelPromise, cancellation);
       if (channel.kind === 'failed') throw channel.error;
-      const sessionBinding = await createNearbySessionBinding(
-        authenticator.capabilityBinding,
+      const sessionBinding = await abortable(createNearbySessionBinding(
+        verifier.cliPublicKey,
         offerBytes,
         encoder.encode(answerSdp),
-      );
+      ), cancellation);
+      cancellation.removeEventListener('abort', closePeerOnAbort);
       return { session: channel.session, sessionBinding };
     } catch (error) {
+      cancellation.removeEventListener('abort', closePeerOnAbort);
       peer.close();
       throw error;
     }
   } finally {
-    signal.close();
+    signaling.close();
   }
 }
 
@@ -508,7 +616,9 @@ function expectBytes(value, label, minimum, maximum) {
 
 function parseRequest(message) {
   expectObject(message, 'request message');
-  if (message.v !== 2 || message.type !== 'request') throw new ProtocolError('expected a v2 request');
+  if (message.v !== 3 || (message.type !== 'request' && message.type !== 'pairing-request')) {
+    throw new ProtocolError('expected a v3 request');
+  }
   const request = expectObject(message.request, 'request');
   const challenge = expectBytes(request.challenge, 'challenge', 16, 128);
 
@@ -536,8 +646,13 @@ function parseRequest(message) {
   }
   const identity = expectObject(request.identity, 'identity mode');
   let identityMode;
-  if (identity.kind === 'tofu') {
-    identityMode = { kind: 'tofu' };
+  if (identity.kind === 'pairing-any') {
+    identityMode = { kind: 'pairing-any' };
+  } else if (identity.kind === 'pairing-credential') {
+    identityMode = {
+      kind: 'pairing-credential',
+      credentialId: expectBytes(identity.credentialId, 'pairing credential ID', 1, 1024),
+    };
   } else if (identity.kind === 'pinned') {
     identityMode = {
       kind: 'pinned',
@@ -557,9 +672,231 @@ function parseRequest(message) {
   };
 }
 
+function parseInitialRequest(message) {
+  const request = parseRequest(message);
+  if (message.type === 'request') {
+    if (request.kind !== 'assert' || request.identity.kind !== 'pinned') {
+      throw new ProtocolError('an unpaired request cannot skip SAS');
+    }
+    return { kind: 'pinned', request };
+  }
+  const cliCommitment = expectBytes(
+    message.cliCommitment,
+    'CLI pairing commitment',
+    32,
+    32,
+  );
+  switch (request.kind) {
+    case 'register':
+      return { kind: 'pairing', request, cliCommitment };
+    case 'assert':
+      switch (request.identity.kind) {
+        case 'pairing-any':
+        case 'pairing-credential':
+          return { kind: 'pairing', request, cliCommitment };
+        case 'pinned':
+          throw new ProtocolError('a pinned request cannot restart pairing');
+      }
+  }
+  throw new ProtocolError('invalid initial request state');
+}
+
+async function nextSasCliReveal(session) {
+  const message = expectObject(await session.next(), 'CLI SAS reveal');
+  if (message.v !== 3 || message.type !== 'sas-cli-reveal') {
+    throw new ProtocolError('expected CLI SAS reveal');
+  }
+  return expectBytes(message.nonce, 'CLI pairing nonce', 32, 32);
+}
+
+async function startPairing(session, request, sessionBinding, cliCommitment, verifier) {
+  const context = await createSasContext(sessionBinding, request);
+  if (!isAwaitingRequest(session)) return;
+  const phoneNonce = crypto.getRandomValues(new Uint8Array(32));
+  const phoneCommitment = await createSasCommitment('phone', context, phoneNonce);
+  if (!isAwaitingRequest(session)) {
+    phoneNonce.fill(0);
+    return;
+  }
+  session.send({
+    v: 3,
+    type: 'sas-phone-commit',
+    commitment: encodeBase64URL(phoneCommitment),
+  });
+  const cliNonce = await nextSasCliReveal(session);
+  if (!isAwaitingRequest(session)) {
+    phoneNonce.fill(0);
+    cliNonce.fill(0);
+    return;
+  }
+  if (!await verifySasCommitment('cli', context, cliNonce, cliCommitment)) {
+    session.send({ v: 3, type: 'sas-phone-rejected' });
+    throw new ProtocolError('the CLI did not open its pairing commitment');
+  }
+  session.send({
+    v: 3,
+    type: 'sas-phone-reveal',
+    nonce: encodeBase64URL(phoneNonce),
+  });
+  const digest = await createSasDigest(
+    context,
+    cliCommitment,
+    phoneCommitment,
+    cliNonce,
+    phoneNonce,
+  );
+  cliNonce.fill(0);
+  phoneNonce.fill(0);
+  const words = await loadSasWords();
+  if (!isAwaitingRequest(session)) {
+    digest.fill(0);
+    return;
+  }
+  const phrase = sasPhrase(digest, words);
+
+  $('pairing-words').textContent = phrase;
+  $('pairing').hidden = false;
+  $('start').hidden = true;
+  $('title').textContent = request.kind === 'register'
+    ? 'Create your passkey'
+    : 'Approve this key request';
+  $('summary').textContent = 'Keep these words visible so you can compare them in your terminal afterward.';
+  $('explainer').textContent = 'Finish the passkey step on this phone first. Its result stays here until the terminal confirms the words.';
+  $('pairing-heading').focus();
+  const base = {
+    session,
+    verifier,
+    sessionBinding,
+    binding: { kind: 'bootstrap-sas', digest },
+    phrase,
+  };
+  const data = request.kind === 'register'
+    ? { ...base, kind: 'registration', request, controller: new AbortController() }
+    : { ...base, kind: 'assertion', request, controller: new AbortController() };
+  phase = { kind: 'pairing-ceremony', data };
+  await runPairingCeremony(data);
+}
+
+function isAwaitingRequest(session) {
+  return phase.kind === 'awaiting-request' && phase.session === session;
+}
+
+function discardHeld(data) {
+  data.releaseNonce.fill(0);
+  if (data.kind === 'assertion') data.result.prfFirst.fill(0);
+}
+
+async function runPairingCeremony(data) {
+  say(data.kind === 'registration'
+    ? 'Creating your passkey…'
+    : 'Waiting for passkey approval…');
+  let completed;
+  try {
+    if (data.kind === 'registration') {
+      completed = {
+        kind: 'registration',
+        credential: await runRegister(data.request, data.controller.signal),
+      };
+    } else {
+      completed = {
+        kind: 'assertion',
+        result: await runInitialAssertion(data.request, data.binding, data.controller.signal),
+      };
+    }
+  } catch (error) {
+    if (phase.kind !== 'pairing-ceremony' || phase.data !== data) return;
+    try { data.session.send({ v: 3, type: 'sas-phone-rejected' }); } catch { /* closed */ }
+    failSession(data.session, error);
+    return;
+  }
+
+  if (phase.kind !== 'pairing-ceremony' || phase.data !== data) {
+    if (completed.kind === 'assertion') completed.result.prfFirst.fill(0);
+    return;
+  }
+  const releaseNonce = crypto.getRandomValues(new Uint8Array(32));
+  const heldBase = {
+    session: data.session,
+    verifier: data.verifier,
+    sessionBinding: data.sessionBinding,
+    binding: data.binding,
+    phrase: data.phrase,
+    kind: data.kind,
+    request: data.request,
+  };
+  const heldData = completed.kind === 'registration'
+    ? { ...heldBase, credential: completed.credential, releaseNonce }
+    : { ...heldBase, result: completed.result, releaseNonce };
+  phase = { kind: 'pairing-held', data: heldData };
+  say('Phone complete. Within two minutes, confirm the same words once in your terminal; you do not need to return here.');
+  $('pairing-words').focus();
+  try {
+    const decision = await requestPairingRelease({
+      session: data.session,
+      verifier: data.verifier,
+      sessionBinding: data.sessionBinding,
+      sasDigest: data.binding.digest,
+      request: data.request,
+      releaseNonce,
+    });
+    if (phase.kind !== 'pairing-held' || phase.data !== heldData) {
+      discardHeld(heldData);
+      return;
+    }
+    if (decision.kind === 'rejected') {
+      discardHeld(heldData);
+      phase = { kind: 'finished' };
+      $('pairing').hidden = true;
+      $('title').textContent = 'Pairing rejected';
+      $('summary').textContent = 'The terminal did not confirm the pairing words.';
+      $('explainer').textContent = 'Run the command again and scan its fresh QR code to retry.';
+      alertUser(heldData.kind === 'registration'
+        ? 'The terminal rejected the pairing words. A passkey may have been created on this phone, but it was not paired or sent. Run init again for a fresh QR code.'
+        : 'The terminal rejected the pairing words. No key or identity was sent or trusted. Run the command again for a fresh QR code.');
+      $('alert').focus();
+      data.session.close();
+      return;
+    }
+
+    releaseNonce.fill(0);
+    $('pairing').hidden = true;
+    if (heldData.kind === 'registration') {
+      data.session.send({
+        v: 3,
+        type: 'paired-registration-result',
+        credentialId: encodeBase64URL(heldData.credential.rawId),
+        releaseSignature: encodeBase64URL(decision.signature),
+      });
+      phase = { kind: 'registration-ack', session: data.session };
+      await nextCliMessage(data.session, 'initial-accepted');
+      if (phase.kind !== 'registration-ack' || phase.session !== data.session) return;
+      finishRegistration(data.session);
+      return;
+    }
+
+    sendPairedAssertionResult(data.session, heldData.result, decision.signature);
+    const assertionData = {
+      session: data.session,
+      request: data.request,
+      firstResult: heldData.result,
+    };
+    phase = { kind: 'assertion-ack', data: assertionData };
+    await nextCliMessage(data.session, 'initial-accepted');
+    if (phase.kind !== 'assertion-ack' || phase.data !== assertionData) return;
+    if (data.request.remember.kind === 'available') {
+      enterOffer(assertionData, data.request.remember.windowSecs);
+    } else {
+      finishAssertion(data.session);
+    }
+  } catch (error) {
+    discardHeld(heldData);
+    failSession(data.session, error);
+  }
+}
+
 async function nextCliMessage(session, expectedType) {
   const message = expectObject(await session.next(), 'CLI message');
-  if (message.v !== 2 || typeof message.type !== 'string') throw new ProtocolError('invalid CLI message');
+  if (message.v !== 3 || typeof message.type !== 'string') throw new ProtocolError('invalid CLI message');
   if (message.type === 'protocol-error') {
     const codes = new Set(['invalid-message', 'unexpected-message', 'remember-mismatch']);
     if (!codes.has(message.code)) throw new ProtocolError('invalid CLI protocol error');
@@ -568,18 +905,73 @@ async function nextCliMessage(session, expectedType) {
   if (message.type === 'initial-rejected') {
     const reasons = new Set(['identity-mismatch', 'invalid-identity-proof', 'identity-store-unavailable']);
     if (!reasons.has(message.reason)) throw new ProtocolError('invalid CLI identity rejection');
-    throw new ProtocolError(`the CLI rejected the passkey identity (${message.reason})`);
+    throw new InitialRejectionError(message.reason);
+  }
+  if (message.type === 'initial-indeterminate'
+      && message.reason === 'identity-durability-unknown') {
+    throw new InitialIndeterminateError(message.reason);
   }
   if (message.type !== expectedType) throw new ProtocolError(`expected ${expectedType}`);
   return message;
 }
 
+class InitialRejectionError extends ProtocolError {
+  constructor(reason) {
+    super(`the CLI rejected the passkey identity (${reason})`);
+    this.name = 'InitialRejectionError';
+    this.reason = reason;
+  }
+}
+
+class InitialIndeterminateError extends ProtocolError {
+  constructor(reason) {
+    super(`the CLI could not determine whether the passkey identity is durable (${reason})`);
+    this.name = 'InitialIndeterminateError';
+    this.reason = reason;
+  }
+}
+
+export function initialRejectionMessage(reason, registration) {
+  if (reason === 'identity-store-unavailable') {
+    return registration
+      ? 'The CLI could not save the trusted identity. A passkey may have been created on this phone, but it was not paired or sent. Run init again.'
+      : 'The CLI could not access its trusted identity store, so no key was accepted. Check that machine and run the command again.';
+  }
+  return 'This passkey did not match the identity already trusted by the CLI, so no key was accepted.';
+}
+
+export function initialIndeterminateMessage(registration) {
+  return registration
+    ? 'Setup status unknown. The CLI received the new passkey but could not confirm that its identity was saved durably. Do not rely on it; check the terminal and rerun keytap init --force. The passkey may remain on this phone.'
+    : 'Pairing status unknown. The CLI refused the returned key because it could not confirm that the identity was saved durably. Check the terminal, then retry with a fresh QR code.';
+}
+
+export function sessionFailureMessage(error, phaseKind) {
+  if (error instanceof InitialRejectionError) {
+    return initialRejectionMessage(error.reason, phaseKind === 'registration-ack');
+  }
+  if (error instanceof InitialIndeterminateError) {
+    return initialIndeterminateMessage(phaseKind === 'registration-ack');
+  }
+  switch (phaseKind) {
+    case 'registration-ack':
+      return 'The passkey result was sent, but this phone could not confirm whether the CLI saved it. Check the terminal before retrying; a passkey may already have been paired.';
+    case 'assertion-ack':
+      return 'The key result was sent, but this phone could not confirm whether the CLI accepted it. Check the terminal before retrying.';
+    default:
+      return 'The private connection failed. Nothing else was sent. Run the command again and scan the fresh code.';
+  }
+}
+
 async function nextRememberOutcome(session) {
   const message = expectObject(await session.next(), 'CLI message');
-  if (message.v !== 2 || typeof message.type !== 'string') throw new ProtocolError('invalid CLI message');
+  if (message.v !== 3 || typeof message.type !== 'string') throw new ProtocolError('invalid CLI message');
   if (message.type === 'remember-accepted') return { kind: 'accepted' };
   if (message.type === 'remember-rejected' && message.reason === 'mismatch') {
     return { kind: 'rejected', reason: 'mismatch' };
+  }
+  if (message.type === 'remember-rejected' && message.reason === 'unavailable') {
+    return { kind: 'rejected', reason: 'unavailable' };
   }
   if (message.type === 'protocol-error') {
     const codes = new Set(['invalid-message', 'unexpected-message', 'remember-mismatch']);
@@ -589,8 +981,9 @@ async function nextRememberOutcome(session) {
   throw new ProtocolError('expected remember result acknowledgement');
 }
 
-function runRegister(request) {
+function runRegister(request, signal) {
   return navigator.credentials.create({
+    signal,
     publicKey: {
       challenge: request.challenge,
       rp: { id: 'keytap.jul.sh', name: 'keytap' },
@@ -610,7 +1003,7 @@ function runRegister(request) {
   });
 }
 
-async function runInitialAssertion(request, sessionBinding) {
+async function runInitialAssertion(request, binding, signal) {
   const publicKey = {
     challenge: request.challenge,
     rpId: 'keytap.jul.sh',
@@ -620,10 +1013,10 @@ async function runInitialAssertion(request, sessionBinding) {
       prf: { eval: { first: request.prfSalt, second: request.identitySalt } },
     },
   };
-  if (request.identity.kind === 'pinned') {
+  if (request.identity.kind === 'pinned' || request.identity.kind === 'pairing-credential') {
     publicKey.allowCredentials = [{ type: 'public-key', id: request.identity.credentialId }];
   }
-  const credential = await navigator.credentials.get({ publicKey });
+  const credential = await navigator.credentials.get({ publicKey, signal });
   const prfResults = credential?.getClientExtensionResults()?.prf?.results;
   const prfFirst = prfResults?.first;
   const prfSecond = prfResults?.second;
@@ -636,19 +1029,21 @@ async function runInitialAssertion(request, sessionBinding) {
   let identity;
   try {
     identity = await createNearbyIdentityProof({
-      sessionBinding,
+      binding,
       challenge: request.challenge,
       credentialId,
       prfFirst: prfFirstBytes,
       keyName: request.keyName,
     }, prfSecondBytes);
+  } catch (error) {
+    prfFirstBytes.fill(0);
+    throw error;
   } finally {
     prfSecondBytes.fill(0);
   }
   return {
     credentialId,
-    credentialIdB64: encodeBase64URL(credential.rawId),
-    prfFirstB64: encodeBase64URL(prfFirst),
+    prfFirst: prfFirstBytes,
     identity: {
       algorithm: 'ed25519',
       publicKey: encodeBase64URL(identity.publicKey),
@@ -657,7 +1052,7 @@ async function runInitialAssertion(request, sessionBinding) {
   };
 }
 
-async function runRememberAssertion(request, allowCredentialId) {
+async function runRememberAssertion(request, allowCredentialId, signal) {
   const publicKey = {
     challenge: request.challenge,
     rpId: 'keytap.jul.sh',
@@ -666,98 +1061,99 @@ async function runRememberAssertion(request, allowCredentialId) {
     extensions: { prf: { eval: { first: request.prfSalt } } },
     allowCredentials: [{ type: 'public-key', id: allowCredentialId }],
   };
-  const credential = await navigator.credentials.get({ publicKey });
+  const credential = await navigator.credentials.get({ publicKey, signal });
   const prfFirst = credential?.getClientExtensionResults()?.prf?.results?.first;
   if (!credential?.rawId || !prfFirst) throw new Error('PRF output was not returned.');
   return {
     credentialId: new Uint8Array(credential.rawId),
-    credentialIdB64: encodeBase64URL(credential.rawId),
-    prfFirstB64: encodeBase64URL(prfFirst),
+    prfFirst: new Uint8Array(prfFirst),
   };
+}
+
+function sendAssertionResult(session, result) {
+  try {
+    session.send({
+      v: 3,
+      type: 'assertion-result',
+      credentialId: encodeBase64URL(result.credentialId),
+      prfFirst: encodeBase64URL(result.prfFirst),
+      identity: result.identity,
+    });
+  } finally {
+    result.prfFirst.fill(0);
+  }
+}
+
+function sendPairedAssertionResult(session, result, releaseSignature) {
+  try {
+    session.send({
+      v: 3,
+      type: 'paired-assertion-result',
+      credentialId: encodeBase64URL(result.credentialId),
+      prfFirst: encodeBase64URL(result.prfFirst),
+      identity: result.identity,
+      releaseSignature: encodeBase64URL(releaseSignature),
+    });
+  } finally {
+    result.prfFirst.fill(0);
+  }
 }
 
 function isCancel(error) {
   return error && (error.name === 'NotAllowedError' || error.name === 'AbortError');
 }
 
-function configureForRequest(session, request, sessionBinding) {
+function configurePinnedRequest(session, request, sessionBinding) {
   $('offer').hidden = true;
+  $('pairing').hidden = true;
   const button = $('start');
   button.disabled = false;
   button.setAttribute('aria-disabled', 'false');
-  if (request.kind === 'register') {
-    $('title').textContent = 'Create your keytap passkey';
-    $('summary').textContent = 'Create the passkey once, then keytap can recover the same keys anywhere.';
-    $('explainer').textContent = 'No account is needed. Your passkey stays in your password manager.';
-    button.textContent = 'Create passkey';
-  } else {
-    $('title').textContent = 'Approve this key request';
-    render($('summary'), 'Your CLI requested key: ', { code: request.keyName });
-    $('explainer').textContent = 'Approve with this device to send the derived key over the encrypted peer connection.';
-    button.textContent = 'Approve request';
-  }
+  $('title').textContent = 'Approve this key request';
+  render($('summary'), 'Your CLI requested key: ', { code: request.keyName });
+  $('explainer').textContent = 'Approve with this device to send the derived key over the encrypted peer connection.';
+  button.textContent = 'Approve request';
   say('Ready.');
   phase = { kind: 'ready', data: { session, request, sessionBinding } };
-  if (request.kind === 'assert') runFirst();
+  runFirst();
 }
 
 function renderSecurityModel() {
   const paragraph = $('details').querySelector('p');
-  paragraph.textContent = 'The QR code authenticates the complete WebRTC setup. On first use, the CLI remembers a public identity derived from this passkey; later results must carry a fresh signature from that same identity. Cloudflare signaling and TURN can route or block the connection, but cannot read the encrypted DataChannel. First use still trusts whoever scans the QR first, and this webpage remains trusted. Remembering a key requires a second approval.';
+  paragraph.textContent = 'The QR contains a fresh CLI public key, not a secret. The phone verifies the signed WebRTC offer before using it, and WebRTC encrypts the data channel even through TURN. On first use, this phone completes WebAuthn and holds the result; you compare the two commit–reveal words and confirm only in the terminal. The CLI then signs a release bound to this exact session, request, full word digest, and a fresh post-WebAuthn nonce. The words authenticate the phone to the CLI with a one-in-4,194,304 collision chance per fresh approved pairing; later requests use the pinned passkey-derived identity. A QR reader or signaling service can race the phone side or deny service, and the webpage itself must remain trusted. Remembering requires a second approval.';
 }
 
 async function runFirst() {
   if (phase.kind !== 'ready') return;
-  const data = phase.data;
+  const readyData = phase.data;
+  const data = { ...readyData, controller: new AbortController() };
   phase = { kind: 'first-busy', data };
   const button = $('start');
   button.disabled = true;
   button.setAttribute('aria-disabled', 'true');
   document.title = 'keytap: approve';
 
-  if (data.request.kind === 'register') {
-    say('Waiting for passkey creation…');
-    let credential;
-    try {
-      credential = await runRegister(data.request);
-    } catch (error) {
-      restoreAfterCeremonyError(data, button, error);
-      return;
-    }
-    try {
-      data.session.send({
-        v: 2,
-        type: 'registration-result',
-        credentialId: encodeBase64URL(credential.rawId),
-      });
-      phase = { kind: 'registration-ack', session: data.session };
-      await nextCliMessage(data.session, 'initial-accepted');
-      finishRegistration(data.session);
-    } catch (error) {
-      failSession(data.session, error);
-    }
-    return;
-  }
-
   say('Waiting for passkey approval…');
   let firstResult;
   try {
-    firstResult = await runInitialAssertion(data.request, data.sessionBinding);
+    firstResult = await runInitialAssertion(data.request, {
+      kind: 'pinned-session',
+      digest: data.sessionBinding,
+    }, data.controller.signal);
   } catch (error) {
     restoreAfterCeremonyError(data, button, error);
     return;
   }
+  if (phase.kind !== 'first-busy' || phase.data !== data) {
+    firstResult.prfFirst.fill(0);
+    return;
+  }
   try {
-    data.session.send({
-      v: 2,
-      type: 'assertion-result',
-      credentialId: firstResult.credentialIdB64,
-      prfFirst: firstResult.prfFirstB64,
-      identity: firstResult.identity,
-    });
+    sendAssertionResult(data.session, firstResult);
     const assertionData = { session: data.session, request: data.request, firstResult };
     phase = { kind: 'assertion-ack', data: assertionData };
     await nextCliMessage(data.session, 'initial-accepted');
+    if (phase.kind !== 'assertion-ack' || phase.data !== assertionData) return;
     if (data.request.remember.kind === 'available') {
       enterOffer(assertionData, data.request.remember.windowSecs);
     } else {
@@ -769,8 +1165,13 @@ async function runFirst() {
 }
 
 function restoreAfterCeremonyError(data, button, error) {
-  if (phase.kind !== 'first-busy') return;
-  phase = { kind: 'ready', data };
+  if (phase.kind !== 'first-busy' || phase.data !== data) return;
+  const readyData = {
+    session: data.session,
+    request: data.request,
+    sessionBinding: data.sessionBinding,
+  };
+  phase = { kind: 'ready', data: readyData };
   button.disabled = false;
   button.setAttribute('aria-disabled', 'false');
   document.title = 'keytap';
@@ -796,6 +1197,7 @@ function finishRegistration(session) {
   $('details').hidden = true;
   $('start')?.remove();
   $('offer').hidden = true;
+  $('pairing').hidden = true;
   say('Sent to your CLI. You can close this page.');
   $('status').focus();
   setTimeout(() => session.close(), 750);
@@ -811,6 +1213,7 @@ function finishAssertion(session) {
   $('details').hidden = true;
   $('start')?.remove();
   $('offer').hidden = true;
+  $('pairing').hidden = true;
   say('Sent. Your CLI has the key. You can close this page.');
   $('status').focus();
   setTimeout(() => session.close(), 750);
@@ -859,7 +1262,7 @@ function scheduleExpiry() {
 function expireOffer() {
   if (phase.kind !== 'offer') return;
   const { session, request } = phase.data;
-  try { session.send({ v: 2, type: 'done' }); } catch { /* the CLI already left */ }
+  try { session.send({ v: 3, type: 'done' }); } catch { /* the CLI already left */ }
   phase = { kind: 'finished' };
   $('offer').hidden = true;
   document.title = 'keytap: finished';
@@ -873,34 +1276,67 @@ function expireOffer() {
 
 async function onRemember() {
   if (phase.kind !== 'offer') return;
-  const data = phase.data;
+  const beginData = phase.data;
   clearTimeout(expiryTimer);
   setOfferButtonsDisabled(true);
-  phase = { kind: 'remember-begin', data };
+  phase = { kind: 'remember-begin', data: beginData };
   say('Checking that your CLI is still waiting…');
   try {
-    data.session.send({ v: 2, type: 'remember-begin' });
-    await nextCliMessage(data.session, 'remember-ready');
-    data.expiryAt = Date.now() + REMEMBER_CEREMONY_WINDOW_MS;
-    phase = { kind: 'remember-ceremony', data };
+    beginData.session.send({ v: 3, type: 'remember-begin' });
+    await nextCliMessage(beginData.session, 'remember-ready');
+    if (phase.kind !== 'remember-begin' || phase.data !== beginData) return;
+    const ceremonyData = {
+      ...beginData,
+      expiryAt: Date.now() + REMEMBER_CEREMONY_WINDOW_MS,
+      controller: new AbortController(),
+    };
+    phase = { kind: 'remember-ceremony', data: ceremonyData };
     say('Confirming with your passkey…');
     document.title = 'keytap: approve';
-    const result = await runRememberAssertion(data.request, data.firstResult.credentialId);
-    data.session.send({
-      v: 2,
-      type: 'remember-result',
-      credentialId: result.credentialIdB64,
-      prfFirst: result.prfFirstB64,
-    });
-    phase = { kind: 'remember-ack', data };
-    const outcome = await nextRememberOutcome(data.session);
+    const result = await runRememberAssertion(
+      ceremonyData.request,
+      ceremonyData.firstResult.credentialId,
+      ceremonyData.controller.signal,
+    );
+    if (phase.kind !== 'remember-ceremony' || phase.data !== ceremonyData) {
+      result.prfFirst.fill(0);
+      return;
+    }
+    try {
+      ceremonyData.session.send({
+        v: 3,
+        type: 'remember-result',
+        credentialId: encodeBase64URL(result.credentialId),
+        prfFirst: encodeBase64URL(result.prfFirst),
+      });
+    } finally {
+      result.prfFirst.fill(0);
+    }
+    const ackData = {
+      session: ceremonyData.session,
+      request: ceremonyData.request,
+      firstResult: ceremonyData.firstResult,
+      expiryAt: ceremonyData.expiryAt,
+    };
+    phase = { kind: 'remember-ack', data: ackData };
+    const outcome = await nextRememberOutcome(ackData.session);
+    if (phase.kind !== 'remember-ack' || phase.data !== ackData) return;
     if (outcome.kind === 'rejected') {
-      if (Date.now() >= data.expiryAt) {
-        phase = { kind: 'offer', data };
+      if (outcome.reason === 'unavailable') {
+        phase = { kind: 'finished' };
+        $('offer').hidden = true;
+        document.title = 'keytap: sent';
+        alertUser('The key was sent, but the CLI could not access its secure storage, so nothing was remembered. Check that machine before trying again.');
+        $('alert').focus();
+        setTimeout(() => ackData.session.close(), 750);
+        return;
+      }
+      if (Date.now() >= ackData.expiryAt) {
+        phase = { kind: 'offer', data: ackData };
         expireOffer();
         return;
       }
-      phase = { kind: 'offer', data };
+      phase = { kind: 'offer', data: ackData };
       setOfferButtonsDisabled(false);
       document.title = 'keytap: sent';
       alertUser('That approval used a different passkey, so nothing was stored. Try again with the passkey that derived the key.');
@@ -913,19 +1349,21 @@ async function onRemember() {
     document.title = 'keytap: remembered';
     say('Remembered. The terminal confirms where the key was stored. You can close this page.');
     $('status').focus();
-    setTimeout(() => data.session.close(), 750);
+    setTimeout(() => ackData.session.close(), 750);
   } catch (error) {
+    if (phase.kind === 'finished' || phase.kind === 'failed') return;
     if (isCancel(error) && phase.kind === 'remember-ceremony') {
-      try { data.session.send({ v: 2, type: 'done' }); } catch { /* already closed */ }
+      const { session } = phase.data;
+      try { session.send({ v: 3, type: 'done' }); } catch { /* already closed */ }
       phase = { kind: 'finished' };
       $('offer').hidden = true;
       document.title = 'keytap: sent';
       say('Passkey check cancelled. The key was already sent; nothing was stored. You can close this page.');
       $('status').focus();
-      setTimeout(() => data.session.close(), 750);
+      setTimeout(() => session.close(), 750);
       return;
     }
-    failSession(data.session, error);
+    failSession(beginData.session, error);
   }
 }
 
@@ -935,7 +1373,7 @@ function onDone() {
   clearTimeout(expiryTimer);
   phase = { kind: 'finished' };
   setOfferButtonsDisabled(true);
-  try { session.send({ v: 2, type: 'done' }); } catch { /* the CLI already left */ }
+  try { session.send({ v: 3, type: 'done' }); } catch { /* the CLI already left */ }
   $('offer').hidden = true;
   document.title = 'keytap: finished';
   say('Done. You can close this page.');
@@ -945,15 +1383,14 @@ function onDone() {
 
 function failSession(session, error) {
   if (phase.kind === 'failed' || phase.kind === 'finished') return;
+  const failedPhase = phase.kind;
   session.close();
   phase = { kind: 'failed' };
   $('offer').hidden = true;
+  $('pairing').hidden = true;
   $('start')?.remove();
   document.title = 'keytap: connection failed';
-  const identityFailure = error instanceof ProtocolError && /identity/.test(error.message);
-  alertUser(identityFailure
-    ? 'This passkey did not match the identity already trusted by the CLI, so no key was accepted.'
-    : 'The private connection failed. Nothing else was sent. Run the command again and scan the fresh code.');
+  alertUser(sessionFailureMessage(error, failedPhase));
   $('alert').focus();
 }
 
@@ -961,74 +1398,139 @@ function failBeforeSession(error) {
   if (phase.kind === 'failed') return;
   phase = { kind: 'failed' };
   $('offer').hidden = true;
+  $('pairing').hidden = true;
   $('start')?.remove();
   $('title').textContent = 'keytap';
   $('explainer').hidden = true;
   $('details').hidden = true;
   document.title = 'keytap: connection failed';
-  const message = error instanceof ProtocolError && /capability|URL/.test(error.message)
+  const message = error instanceof ProtocolError && /public key|URL/.test(error.message)
     ? 'This nearby link is invalid. Run the keytap command again and scan the fresh code.'
     : 'Could not establish the private connection. Check both devices’ network access, then run the command again and scan the fresh code.';
   alertUser(message);
   $('alert').focus();
 }
 
-function sessionForPagehide() {
-  switch (phase.kind) {
-    case 'ready':
-    case 'first-busy':
-      return null;
-    case 'registration-ack':
-      return phase.session;
-    case 'assertion-ack':
-    case 'offer':
-    case 'remember-begin':
-      return phase.data.session;
-    case 'remember-ceremony':
-    case 'remember-ack':
-    case 'boot':
-    case 'connecting':
-    case 'finished':
-    case 'failed':
-      return null;
-  }
-}
-
 export async function main() {
   renderSecurityModel();
   $('title').textContent = 'Connecting to your CLI';
-  $('summary').textContent = 'The QR capability stays on this device while keytap establishes an authenticated WebRTC connection.';
+  $('summary').textContent = 'The public key in the QR authenticates your CLI while keytap establishes a WebRTC connection.';
   $('explainer').textContent = 'Cloudflare may route the connection with TURN when a direct path is unavailable.';
   $('start').disabled = true;
   $('start').textContent = 'Connecting…';
   say('Waiting for your CLI…');
-  phase = { kind: 'connecting' };
+  const connectingData = { controller: new AbortController() };
+  phase = { kind: 'connecting', data: connectingData };
 
   let session;
   try {
-    const capability = takeCapabilityFromFragment();
-    const authenticator = await createSignalAuthenticator(capability);
-    const established = await establishPrivateChannel(authenticator);
+    const cliPublicKey = takeCliPublicKeyFromFragment();
+    const verifier = await createCliOfferVerifier(cliPublicKey);
+    if (phase.kind !== 'connecting' || phase.data !== connectingData) return;
+    const established = await establishPrivateChannel(verifier, connectingData.controller.signal);
+    if (phase.kind !== 'connecting' || phase.data !== connectingData) {
+      established.session.close();
+      return;
+    }
     session = established.session;
+    phase = { kind: 'awaiting-request', session };
     say('Private connection established. Waiting for the request…');
-    const request = parseRequest(await session.next(SIGNAL_TIMEOUT_MS));
-    configureForRequest(session, request, established.sessionBinding);
+    const initial = parseInitialRequest(await session.next(SIGNAL_TIMEOUT_MS));
+    if (!isAwaitingRequest(session)) return;
+    switch (initial.kind) {
+      case 'pinned':
+        configurePinnedRequest(session, initial.request, established.sessionBinding);
+        break;
+      case 'pairing':
+        await startPairing(
+          session,
+          initial.request,
+          established.sessionBinding,
+          initial.cliCommitment,
+          verifier,
+        );
+        break;
+    }
   } catch (error) {
-    if (session) failSession(session, error);
-    else failBeforeSession(error);
+    if (session) {
+      if (phase.kind === 'finished' || phase.kind === 'failed') {
+        session.close();
+        return;
+      }
+      failSession(session, error);
+      return;
+    }
+    if (phase.kind !== 'connecting' || phase.data !== connectingData) {
+      return;
+    }
+    failBeforeSession(error);
   }
 }
 
-$('start').addEventListener('click', runFirst);
-$('remember-btn').addEventListener('click', onRemember);
-$('done-btn').addEventListener('click', onDone);
+export function terminatePhaseForPagehide(currentPhase) {
+  let session;
+  switch (currentPhase.kind) {
+    case 'connecting':
+      currentPhase.data.controller.abort();
+      return;
+    case 'first-busy':
+      currentPhase.data.controller.abort();
+      session = currentPhase.data.session;
+      break;
+    case 'pairing-ceremony':
+      currentPhase.data.controller.abort();
+      session = currentPhase.data.session;
+      if (session.isOpen()) {
+        try { session.send({ v: 3, type: 'sas-phone-rejected' }); } catch { /* leaving */ }
+      }
+      session.close();
+      return;
+    case 'pairing-held':
+      session = currentPhase.data.session;
+      discardHeld(currentPhase.data);
+      if (session.isOpen()) {
+        try { session.send({ v: 3, type: 'sas-phone-rejected' }); } catch { /* leaving */ }
+      }
+      session.close();
+      return;
+    case 'remember-ceremony':
+      currentPhase.data.controller.abort();
+      session = currentPhase.data.session;
+      break;
+    case 'awaiting-request':
+    case 'registration-ack':
+      session = currentPhase.session;
+      break;
+    case 'ready':
+    case 'assertion-ack':
+    case 'offer':
+    case 'remember-begin':
+    case 'remember-ack':
+      session = currentPhase.data.session;
+      break;
+    case 'boot':
+    case 'finished':
+    case 'failed':
+      return;
+  }
+  if (session.isOpen()) {
+    try { session.send({ v: 3, type: 'done' }); } catch { /* page is leaving */ }
+  }
+  session.close();
+}
 
-window.addEventListener('pagehide', () => {
-  const session = sessionForPagehide();
-  if (!session?.isOpen()) return;
-  try { session.send({ v: 2, type: 'done' }); } catch { /* page is leaving */ }
-});
+if (typeof document !== 'undefined' && typeof window !== 'undefined') {
+  $('start').addEventListener('click', runFirst);
+  $('remember-btn').addEventListener('click', onRemember);
+  $('done-btn').addEventListener('click', onDone);
 
-document.addEventListener('visibilitychange', () => {
-  if (!document.hidden && phase.kind === 'offer') scheduleExpiry();
-});
+  window.addEventListener('pagehide', () => {
+    const currentPhase = phase;
+    phase = { kind: 'finished' };
+    terminatePhaseForPagehide(currentPhase);
+  });
+
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden && phase.kind === 'offer') scheduleExpiry();
+  });
+}

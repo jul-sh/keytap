@@ -1,71 +1,100 @@
 //! Authentication for the nearby WebRTC signaling transcript.
 //!
-//! WebRTC's DTLS data channel protects the key material. This module protects
-//! the offer/answer exchange that tells each peer which DTLS certificate it is
-//! connecting to. The 32-byte capability is carried only in the QR fragment;
-//! the signaling service receives only its SHA-256 rendezvous identifier.
+//! The QR fragment contains a fresh Ed25519 public key. The CLI signs its
+//! complete WebRTC offer, including the DTLS fingerprint, so a phone that
+//! scanned the QR can authenticate the peer before it runs WebAuthn. The
+//! signaling service receives only a hash-derived rendezvous identifier.
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
-use hkdf::Hkdf;
-use hmac::{Hmac, Mac};
+#[cfg(test)]
+use ed25519_dalek::{Signature, VerifyingKey};
+use ed25519_dalek::{Signer, SigningKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
-const RID_DOMAIN: &[u8] = b"keytap:rendezvous:v2\0";
-const MAC_DOMAIN: &[u8] = b"keytap:signal:v2\0";
-const KEY_INFO_PREFIX: &[u8] = b"keytap:signal-key:v2:";
-const IDENTITY_BINDING_DOMAIN: &[u8] = b"keytap:nearby-identity-binding:v1\0";
-const IDENTITY_SESSION_DOMAIN: &[u8] = b"keytap:nearby-identity-session:v1\0";
+const RID_DOMAIN: &[u8] = b"keytap:rendezvous:v3\0";
+const OFFER_SIGNATURE_DOMAIN: &[u8] = b"keytap:signal-offer:v3\0";
+const SAS_RELEASE_DOMAIN: &[u8] = b"keytap:nearby-sas-release:v1\0";
+const IDENTITY_SESSION_DOMAIN: &[u8] = b"keytap:nearby-identity-session:v2\0";
+const SIGNAL_VERSION: u8 = 3;
 
-type HmacSha256 = Hmac<Sha256>;
-
-/// A one-time capability shared by the CLI and the page through the QR code.
-pub struct Capability {
-    secret: Zeroizing<[u8; 32]>,
+/// The one-time CLI authentication key whose public half is carried by QR.
+pub struct CliSessionKey {
+    seed: Zeroizing<[u8; 32]>,
+    public_key: [u8; 32],
     rendezvous: [u8; 32],
 }
 
-impl Capability {
+impl CliSessionKey {
     pub fn generate() -> Self {
-        let mut secret = Zeroizing::new([0u8; 32]);
-        getrandom::getrandom(secret.as_mut()).expect("failed to generate nearby capability");
-        Self::from_secret(secret)
+        let mut seed = Zeroizing::new([0u8; 32]);
+        getrandom::getrandom(seed.as_mut()).expect("failed to generate nearby CLI identity");
+        Self::from_seed(seed)
     }
 
-    fn from_secret(secret: Zeroizing<[u8; 32]>) -> Self {
-        let mut digest = Sha256::new();
-        digest.update(RID_DOMAIN);
-        digest.update(secret.as_ref());
-        let rendezvous: [u8; 32] = digest.finalize().into();
-        Self { secret, rendezvous }
+    fn from_seed(seed: Zeroizing<[u8; 32]>) -> Self {
+        let public_key = SigningKey::from_bytes(&seed)
+            .verifying_key()
+            .to_bytes();
+        let rendezvous = rendezvous_for(&public_key);
+        Self {
+            seed,
+            public_key,
+            rendezvous,
+        }
     }
 
+    /// The QR value is public, fixed-width, and remains 43 base64url chars.
     pub fn fragment_value(&self) -> String {
-        URL_SAFE_NO_PAD.encode(self.secret.as_ref())
+        URL_SAFE_NO_PAD.encode(self.public_key)
     }
 
     pub fn rendezvous_id(&self) -> String {
         URL_SAFE_NO_PAD.encode(self.rendezvous)
     }
 
-    /// Bind passkey identity proofs to this exact one-time QR capability.
-    /// The bytes remain local to the two endpoints and are never sent to the
-    /// signaling service.
-    fn identity_capability_binding(&self) -> [u8; 32] {
-        let mut digest = Sha256::new();
-        digest.update(IDENTITY_BINDING_DOMAIN);
-        digest.update(self.secret.as_ref());
-        digest.finalize().into()
+    pub fn sign_offer(&self, body: &[u8]) -> SignedCliOffer {
+        let signature = SigningKey::from_bytes(&self.seed)
+            .sign(&offer_signature_message(0, body))
+            .to_bytes();
+        SignedCliOffer {
+            version: SIGNAL_VERSION,
+            from: CliRole::Cli,
+            seq: 0,
+            kind: OfferKind::Offer,
+            body: URL_SAFE_NO_PAD.encode(body),
+            signature: URL_SAFE_NO_PAD.encode(signature),
+        }
     }
 
-    /// Bind a nearby identity proof to the QR capability and both complete
-    /// authenticated SDPs, including the DTLS fingerprints and ICE candidates.
+    /// Authorize release of a held WebAuthn result only after the local CLI
+    /// comparison. The phone nonce is generated after WebAuthn completes, so
+    /// a valid authorization cannot have been queued before the result existed.
+    pub fn sign_pairing_release(
+        &self,
+        session_binding: &[u8; 32],
+        sas_digest: &[u8; 32],
+        canonical_request: &[u8],
+        release_nonce: &[u8; 32],
+    ) -> [u8; 64] {
+        SigningKey::from_bytes(&self.seed)
+            .sign(&pairing_release_message(
+                &self.public_key,
+                session_binding,
+                sas_digest,
+                canonical_request,
+                release_nonce,
+            ))
+            .to_bytes()
+    }
+
+    /// Bind identity proofs and SAS to the QR key plus both complete SDPs.
     pub fn identity_session_binding(&self, offer: &[u8], answer: &[u8]) -> [u8; 32] {
         let mut digest = Sha256::new();
         digest.update(IDENTITY_SESSION_DOMAIN);
-        digest.update(self.identity_capability_binding());
+        digest.update(self.public_key);
         digest.update((offer.len() as u64).to_be_bytes());
         digest.update(offer);
         digest.update((answer.len() as u64).to_be_bytes());
@@ -73,188 +102,310 @@ impl Capability {
         digest.finalize().into()
     }
 
-    fn key_for(&self, role: SignalRole) -> [u8; 32] {
-        let hk = Hkdf::<Sha256>::new(Some(&self.rendezvous), self.secret.as_ref());
-        let mut info = KEY_INFO_PREFIX.to_vec();
-        info.extend_from_slice(role.as_str().as_bytes());
-        let mut key = [0u8; 32];
-        hk.expand(&info, &mut key)
-            .expect("32-byte HKDF output is valid");
-        key
+    #[cfg(test)]
+    pub fn verify_offer(&self, envelope: &SignedCliOffer) -> Result<Vec<u8>, String> {
+        envelope.verify_with(&self.public_key)
     }
+}
 
-    pub fn sign(
-        &self,
-        role: SignalRole,
-        seq: u64,
-        kind: SignalKind,
-        body: &[u8],
-    ) -> SignalEnvelope {
-        let key = Zeroizing::new(self.key_for(role));
-        let mut mac = HmacSha256::new_from_slice(key.as_ref()).expect("HMAC accepts 32-byte keys");
-        update_mac(&mut mac, role, seq, kind, body);
-        SignalEnvelope {
-            version: 2,
-            from: role,
-            seq,
-            kind,
-            body: URL_SAFE_NO_PAD.encode(body),
-            mac: URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes()),
-        }
-    }
+fn rendezvous_for(public_key: &[u8; 32]) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest.update(RID_DOMAIN);
+    digest.update(public_key);
+    digest.finalize().into()
+}
 
-    pub fn verify(
-        &self,
-        envelope: &SignalEnvelope,
-        expected_role: SignalRole,
-        expected_seq: u64,
-        expected_kind: SignalKind,
-    ) -> Result<Vec<u8>, String> {
-        if envelope.version != 2 {
-            return Err("unsupported signaling version".into());
-        }
-        if envelope.from != expected_role
-            || envelope.seq != expected_seq
-            || envelope.kind != expected_kind
-        {
+fn offer_signature_message(seq: u64, body: &[u8]) -> Vec<u8> {
+    let mut message = Vec::with_capacity(OFFER_SIGNATURE_DOMAIN.len() + body.len() + 25);
+    message.extend_from_slice(OFFER_SIGNATURE_DOMAIN);
+    message.push(SIGNAL_VERSION);
+    message.extend_from_slice(b"cli\0");
+    message.extend_from_slice(&seq.to_be_bytes());
+    message.extend_from_slice(b"offer\0");
+    message.extend_from_slice(&(body.len() as u64).to_be_bytes());
+    message.extend_from_slice(body);
+    message
+}
+
+fn pairing_release_message(
+    cli_public_key: &[u8; 32],
+    session_binding: &[u8; 32],
+    sas_digest: &[u8; 32],
+    canonical_request: &[u8],
+    release_nonce: &[u8; 32],
+) -> Vec<u8> {
+    let mut message = Vec::with_capacity(
+        SAS_RELEASE_DOMAIN.len() + cli_public_key.len() + session_binding.len()
+            + sas_digest.len() + canonical_request.len() + release_nonce.len() + 9,
+    );
+    message.extend_from_slice(SAS_RELEASE_DOMAIN);
+    message.push(3);
+    message.extend_from_slice(cli_public_key);
+    message.extend_from_slice(session_binding);
+    message.extend_from_slice(sas_digest);
+    message.extend_from_slice(&(canonical_request.len() as u64).to_be_bytes());
+    message.extend_from_slice(canonical_request);
+    message.extend_from_slice(release_nonce);
+    message
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum CliRole {
+    Cli,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum PhoneRole {
+    Phone,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum OfferKind {
+    Offer,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum AnswerKind {
+    Answer,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SignedCliOffer {
+    #[serde(rename = "v")]
+    version: u8,
+    from: CliRole,
+    seq: u64,
+    kind: OfferKind,
+    body: String,
+    signature: String,
+}
+
+impl SignedCliOffer {
+    #[cfg(test)]
+    fn verify_with(&self, public_key: &[u8; 32]) -> Result<Vec<u8>, String> {
+        if self.version != SIGNAL_VERSION || self.seq != 0 {
             return Err("unexpected signaling state".into());
         }
-        let body = URL_SAFE_NO_PAD
-            .decode(&envelope.body)
-            .map_err(|_| "invalid signaling body encoding".to_string())?;
-        let tag = URL_SAFE_NO_PAD
-            .decode(&envelope.mac)
-            .map_err(|_| "invalid signaling MAC encoding".to_string())?;
-        let key = Zeroizing::new(self.key_for(expected_role));
-        let mut mac = HmacSha256::new_from_slice(key.as_ref()).expect("HMAC accepts 32-byte keys");
-        update_mac(&mut mac, expected_role, expected_seq, expected_kind, &body);
-        mac.verify_slice(&tag)
+        let body = decode_canonical(&self.body, "signaling body")?;
+        let signature = decode_fixed::<64>(&self.signature, "offer signature")?;
+        let verifying_key = VerifyingKey::from_bytes(public_key)
+            .map_err(|_| "invalid CLI public key".to_string())?;
+        verifying_key
+            .verify_strict(
+                &offer_signature_message(self.seq, &body),
+                &Signature::from_bytes(&signature),
+            )
             .map_err(|_| "signaling authentication failed".to_string())?;
         Ok(body)
     }
 }
 
-fn update_mac(mac: &mut HmacSha256, role: SignalRole, seq: u64, kind: SignalKind, body: &[u8]) {
-    mac.update(MAC_DOMAIN);
-    mac.update(role.as_str().as_bytes());
-    mac.update(&[0]);
-    mac.update(&seq.to_be_bytes());
-    mac.update(kind.as_str().as_bytes());
-    mac.update(&[0]);
-    mac.update(&(body.len() as u64).to_be_bytes());
-    mac.update(body);
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum SignalRole {
-    Cli,
-    Phone,
-}
-
-impl SignalRole {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Cli => "cli",
-            Self::Phone => "phone",
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum SignalKind {
-    Offer,
-    Answer,
-}
-
-impl SignalKind {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Offer => "offer",
-            Self::Answer => "answer",
-        }
-    }
-}
-
 #[derive(Debug, Deserialize, Serialize)]
-pub struct SignalEnvelope {
+#[serde(deny_unknown_fields)]
+pub struct PhoneAnswer {
     #[serde(rename = "v")]
-    pub version: u8,
-    pub from: SignalRole,
-    pub seq: u64,
-    pub kind: SignalKind,
-    pub body: String,
-    pub mac: String,
+    version: u8,
+    from: PhoneRole,
+    seq: u64,
+    kind: AnswerKind,
+    body: String,
+}
+
+impl PhoneAnswer {
+    #[cfg(test)]
+    pub fn new(body: &[u8]) -> Self {
+        Self {
+            version: SIGNAL_VERSION,
+            from: PhoneRole::Phone,
+            seq: 0,
+            kind: AnswerKind::Answer,
+            body: URL_SAFE_NO_PAD.encode(body),
+        }
+    }
+
+    pub fn decode(text: &str) -> Result<Vec<u8>, String> {
+        let envelope: Self = serde_json::from_str(text)
+            .map_err(|_| "invalid phone signaling envelope".to_string())?;
+        if envelope.version != SIGNAL_VERSION || envelope.seq != 0 {
+            return Err("unexpected signaling state".into());
+        }
+        decode_canonical(&envelope.body, "signaling body")
+    }
+}
+
+fn decode_canonical(value: &str, label: &str) -> Result<Vec<u8>, String> {
+    let bytes = URL_SAFE_NO_PAD
+        .decode(value)
+        .map_err(|_| format!("invalid {label} encoding"))?;
+    if URL_SAFE_NO_PAD.encode(&bytes) != value {
+        return Err(format!("non-canonical {label} encoding"));
+    }
+    Ok(bytes)
+}
+
+#[cfg(test)]
+fn decode_fixed<const N: usize>(value: &str, label: &str) -> Result<[u8; N], String> {
+    decode_canonical(value, label)?
+        .try_into()
+        .map_err(|_| format!("invalid {label} length"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn fixed_capability() -> Capability {
-        Capability::from_secret(Zeroizing::new([0x42; 32]))
+    fn fixed_key() -> CliSessionKey {
+        CliSessionKey::from_seed(Zeroizing::new([7; 32]))
     }
 
     #[test]
-    fn rendezvous_is_stable_and_does_not_reveal_capability() {
-        let capability = fixed_capability();
+    fn qr_contains_only_the_public_key() {
+        let key = fixed_key();
         assert_eq!(
-            capability.fragment_value(),
-            "QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkI"
+            key.fragment_value(),
+            "6kpsY-KcUgq-9VB7Ey7F-ZVHdq6-vnuSQh7qaRRG0iw"
+        );
+        assert_ne!(key.fragment_value(), URL_SAFE_NO_PAD.encode([7; 32]));
+        assert_eq!(key.fragment_value().len(), 43);
+        assert_eq!(
+            key.rendezvous_id(),
+            "MFHH-4Il-dVD-AwsB7c-4kdD25EFZ_aGEczf569GW8U"
         );
         assert_eq!(
-            capability.rendezvous_id(),
-            "6_2qUdwr2cvl5omCEB61Ys263Y1nu0TIjppVQPePcUA"
-        );
-        assert_eq!(
-            URL_SAFE_NO_PAD.encode(capability.identity_session_binding(b"offer", b"answer")),
-            "OCbUzlIS3pmQOcOtyIfbACBko5QZou4dTY4-dsa34Pc"
-        );
-        assert_eq!(
-            URL_SAFE_NO_PAD.encode(capability.key_for(SignalRole::Cli)),
-            "3WRsRm1tbJnFAp8FuyV6TUTOY5ouwjbG_Q26FHhnHTk"
-        );
-        assert_eq!(
-            URL_SAFE_NO_PAD.encode(capability.key_for(SignalRole::Phone)),
-            "m1an7BpTty_CiWJmoO1dgD00qyLh45eSg_uvUJXdLk8"
+            URL_SAFE_NO_PAD.encode(key.identity_session_binding(b"offer", b"answer")),
+            "4onRCvmREapRgbR1UvtUZ_AJ0aCKjDR0Q1fWTksrzJY"
         );
     }
 
     #[test]
-    fn signal_round_trip_is_role_and_state_bound() {
-        let capability = fixed_capability();
-        let offer = capability.sign(
-            SignalRole::Cli,
-            0,
-            SignalKind::Offer,
-            br#"{"type":"offer"}"#,
-        );
-        assert_eq!(offer.mac, "FoqM9kpeEx726l8vB0Whib5XjyzePgjWQwBiOFQtZ1E");
+    fn signed_offer_is_state_and_body_bound() {
+        let key = fixed_key();
+        let mut offer = key.sign_offer(br#"{"type":"offer"}"#);
         assert_eq!(
-            capability
-                .verify(&offer, SignalRole::Cli, 0, SignalKind::Offer)
-                .unwrap(),
+            offer.signature,
+            "U2k9m3s7XkIf9QF0ShT4TNY-FzYYAfoF4RX9zLBWoo5TYwS5-oblqKqQdK7mQVxO92UWDTidykN6Nm3vXeWPDg"
+        );
+        assert_eq!(
+            key.verify_offer(&offer).unwrap(),
             br#"{"type":"offer"}"#
         );
-        assert!(capability
-            .verify(&offer, SignalRole::Phone, 0, SignalKind::Offer)
-            .is_err());
-        assert!(capability
-            .verify(&offer, SignalRole::Cli, 1, SignalKind::Offer)
-            .is_err());
-        assert!(capability
-            .verify(&offer, SignalRole::Cli, 0, SignalKind::Answer)
+        offer.body = URL_SAFE_NO_PAD.encode(b"different");
+        assert!(key.verify_offer(&offer).is_err());
+    }
+
+    #[test]
+    fn release_signature_is_bound_to_post_ceremony_nonce_and_full_pairing() {
+        let key = fixed_key();
+        let signature = key.sign_pairing_release(
+            &[1; 32],
+            &[2; 32],
+            b"request",
+            &[3; 32],
+        );
+        assert_eq!(
+            URL_SAFE_NO_PAD.encode(signature),
+            "Iyw_IiGnfBf7isag5c_waK22c6C0vdyERCWS9R5JZZA1GTYmasb6nG5S39sJKA7AR1szG6vp4HaIcNo5mq86Dw"
+        );
+        let verifying_key = SigningKey::from_bytes(&[7; 32]).verifying_key();
+        let message = pairing_release_message(
+            &verifying_key.to_bytes(),
+            &[1; 32],
+            &[2; 32],
+            b"request",
+            &[3; 32],
+        );
+        verifying_key
+            .verify_strict(&message, &Signature::from_bytes(&signature))
+            .unwrap();
+
+        let changed_messages = [
+            pairing_release_message(
+                &verifying_key.to_bytes(),
+                &[9; 32],
+                &[2; 32],
+                b"request",
+                &[3; 32],
+            ),
+            pairing_release_message(
+                &verifying_key.to_bytes(),
+                &[1; 32],
+                &[9; 32],
+                b"request",
+                &[3; 32],
+            ),
+            pairing_release_message(
+                &verifying_key.to_bytes(),
+                &[1; 32],
+                &[2; 32],
+                b"changed",
+                &[3; 32],
+            ),
+            pairing_release_message(
+                &verifying_key.to_bytes(),
+                &[1; 32],
+                &[2; 32],
+                b"request",
+                &[4; 32],
+            ),
+        ];
+        for changed in changed_messages {
+            assert!(verifying_key
+                .verify_strict(&changed, &Signature::from_bytes(&signature))
+                .is_err());
+        }
+        assert!(SigningKey::from_bytes(&[8; 32])
+            .verifying_key()
+            .verify_strict(&message, &Signature::from_bytes(&signature))
             .is_err());
     }
 
     #[test]
-    fn tampering_fails_authentication() {
-        let capability = fixed_capability();
-        let mut answer = capability.sign(SignalRole::Phone, 0, SignalKind::Answer, b"answer");
-        answer.body = URL_SAFE_NO_PAD.encode(b"different");
-        assert!(capability
-            .verify(&answer, SignalRole::Phone, 0, SignalKind::Answer)
-            .is_err());
+    fn release_signature_matches_the_browser_canonical_request_vector() {
+        let key = fixed_key();
+        let canonical_request = URL_SAFE_NO_PAD.decode(
+            "AQAAACABAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQAAACACAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgAAACADAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwAAAAZkZXBsb3kBAAAABGNyZWQBAAAAAAAAADw",
+        ).unwrap();
+        assert_eq!(
+            URL_SAFE_NO_PAD.encode(key.sign_pairing_release(
+                &[4; 32],
+                &[5; 32],
+                &canonical_request,
+                &[6; 32],
+            )),
+            "Z1ZC9SnoBK3gYjh2AYlxTRx9HAfKUsOmRm7sAQhM63Yj3VXjZGHVsQIhFkmsQMJC-_Z0ZZ61zJny3_4EgbsgDQ"
+        );
+    }
+
+    #[test]
+    fn phone_answer_is_strict_and_canonical() {
+        let answer = PhoneAnswer::new(b"answer");
+        let encoded = serde_json::to_string(&answer).unwrap();
+        assert_eq!(PhoneAnswer::decode(&encoded).unwrap(), b"answer");
+        assert!(PhoneAnswer::decode(
+            r#"{"v":2,"from":"phone","seq":0,"kind":"answer","body":"YW5zd2Vy"}"#
+        )
+        .is_err());
+        assert!(PhoneAnswer::decode(
+            r#"{"v":3,"from":"phone","seq":0,"kind":"answer","body":"YW5zd2Vy="}"#
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn session_binding_changes_with_each_authenticated_input() {
+        let key = fixed_key();
+        let baseline = key.identity_session_binding(b"offer", b"answer");
+        assert_ne!(baseline, key.identity_session_binding(b"changed", b"answer"));
+        assert_ne!(baseline, key.identity_session_binding(b"offer", b"changed"));
+        assert_ne!(
+            baseline,
+            CliSessionKey::from_seed(Zeroizing::new([8; 32]))
+                .identity_session_binding(b"offer", b"answer")
+        );
     }
 }

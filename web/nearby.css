@@ -110,6 +110,7 @@ code {
   border-left: 2px solid var(--line);
 }
 
+.pairing,
 .offer {
   margin-top: 28px;
   padding: 20px 22px;
@@ -117,16 +118,19 @@ code {
   background: var(--callout-bg);
 }
 
+.pairing[hidden],
 .offer[hidden] {
   display: none;
 }
 
+.pairing h2,
 .offer h2 {
   margin-bottom: 10px;
   font: 700 1.3rem/1.3 var(--display);
   outline: none;
 }
 
+.pairing p,
 .offer p {
   color: var(--muted);
   font-size: 0.95rem;
@@ -137,6 +141,18 @@ code {
   width: 100%;
   min-width: 0;
   margin-top: 20px;
+}
+
+.pairing-words {
+  display: block;
+  margin: 18px 0;
+  padding: 16px;
+  border: 1px solid var(--accent);
+  font: 700 clamp(1.45rem, 7vw, 2.1rem)/1.2 var(--display);
+  letter-spacing: 0.04em;
+  text-align: center;
+  color: var(--accent);
+  background: hsla(0, 0%, 100%, 0.04);
 }
 
 .hint {

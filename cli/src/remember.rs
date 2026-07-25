@@ -63,8 +63,12 @@ fn open_stores() -> Result<Vec<Box<dyn Keychain>>, KeychainError> {
 /// deliberately swallows (a stateless user on a keychain-less machine should
 /// not see warnings on every command).
 pub fn lookup(name: &str) -> Option<Zeroizing<Vec<u8>>> {
+    // The identity file is the generation authority. In particular, an init
+    // that published its new credential but crashed before keychain cleanup
+    // must make every old-root entry unreachable immediately.
+    let authority = crate::nearby_identity::remember_authority().ok()?;
     for store in open_stores().unwrap_or_default() {
-        match lookup_in(store.as_ref(), name) {
+        match lookup_authorized_in(store.as_ref(), name, &authority) {
             Ok(Resolution::Hit(key)) => return Some(key),
             Ok(Resolution::Miss) | Err(_) => {}
             Ok(Resolution::Invalid) => eprintln!(
@@ -73,6 +77,32 @@ pub fn lookup(name: &str) -> Option<Zeroizing<Vec<u8>>> {
         }
     }
     None
+}
+
+fn lookup_authorized_in(
+    kc: &(impl Keychain + ?Sized),
+    name: &str,
+    authority: &crate::nearby_identity::RememberAuthority,
+) -> Result<Resolution, KeychainError> {
+    let resolution = match authority.credential_id() {
+        Some(credential_id) => {
+            let authoritative_root = root_id(credential_id);
+            match read_active_root(kc)? {
+                Some(active_root) if active_root == authoritative_root => {
+                    lookup_root_in(kc, &authoritative_root, name)?
+                }
+                // Identity publication happens before best-effort cleanup.
+                // Until the marker catches up, fail closed rather than look
+                // directly into either generation's namespace.
+                Some(_) | None => Resolution::Miss,
+            }
+        }
+        None => lookup_in(kc, name)?,
+    };
+    match authority.revalidate() {
+        Ok(true) => Ok(resolution),
+        Ok(false) | Err(_) => Ok(Resolution::Miss),
+    }
 }
 
 /// Where `keytap remember` will store the key, resolved and validated BEFORE
@@ -148,7 +178,18 @@ pub fn remember(target: &mut WriteTarget, name: &str, credential_id: &[u8], raw_
 /// `keytap remember`, storing is best-effort: the command's real job is the
 /// key it just derived, so trouble remembering warns and the command
 /// carries on.
-pub fn remember_requested_nearby(name: &str, credential_id: &[u8], raw_key: &[u8]) {
+pub enum NearbyRememberOutcome {
+    Stored,
+    /// Identity authority or durable local storage was unavailable. This is
+    /// distinct from the phone returning a different credential/PRF result.
+    Unavailable,
+}
+
+pub fn remember_requested_nearby(
+    name: &str,
+    credential_id: &[u8],
+    raw_key: &[u8],
+) -> NearbyRememberOutcome {
     // This runs after the command's output is already on stdout, so every
     // line goes through the non-panicking printer.
     let could_not = |why: &str| {
@@ -156,23 +197,58 @@ pub fn remember_requested_nearby(name: &str, credential_id: &[u8], raw_key: &[u8
             "warning: you asked on your phone to remember '{name}' on this machine, but {why}"
         ));
     };
+    let authority = match crate::nearby_identity::remember_authority() {
+        Ok(authority) => authority,
+        Err(error) => {
+            could_not(&format!(
+                "the passkey identity could not be checked: {error}"
+            ));
+            return NearbyRememberOutcome::Unavailable;
+        }
+    };
+    if authority
+        .credential_id()
+        .is_some_and(|expected| expected != credential_id)
+    {
+        could_not("the passkey is no longer this machine's current nearby identity");
+        return NearbyRememberOutcome::Unavailable;
+    }
+
     let mut target = match resolve_write_target() {
         Ok(target) => target,
-        Err(e) => return could_not(&e.to_string()),
+        Err(e) => {
+            could_not(&e.to_string());
+            return NearbyRememberOutcome::Unavailable;
+        }
     };
     match remember_in(target.store.as_mut(), name, credential_id, raw_key) {
-        Ok(RememberOutcome::Stored) => crate::note(&format!(
-            "Remembered '{name}' in {location}, as requested on your phone. Future keytap \
-             commands for this name will not prompt until you run `keytap forget {name}` or \
-             replace the passkey.",
-            location = target.location
-        )),
-        Ok(RememberOutcome::RootMismatch) => could_not(
-            "the passkey you just used is not this machine's active keytap root, so the stored \
-             key would never be used. Run `keytap init` to make this passkey the root (that \
-             clears existing remembered keys)",
-        ),
-        Err(e) => could_not(&e.to_string()),
+        Ok(RememberOutcome::Stored) => match authority.revalidate() {
+            Ok(true) => {
+                crate::note(&format!(
+                    "Remembered '{name}' in {location}, as requested on your phone. Future keytap \
+                     commands for this name will not prompt until you run `keytap forget {name}` or \
+                     replace the passkey.",
+                    location = target.location
+                ));
+                NearbyRememberOutcome::Stored
+            }
+            Ok(false) | Err(_) => {
+                could_not("the nearby identity changed while the key was being stored");
+                NearbyRememberOutcome::Unavailable
+            }
+        },
+        Ok(RememberOutcome::RootMismatch) => {
+            could_not(
+                "the passkey you just used is not this machine's active keytap root, so the stored \
+                 key would never be used. Run `keytap init` to make this passkey the root (that \
+                 clears existing remembered keys)",
+            );
+            NearbyRememberOutcome::Unavailable
+        }
+        Err(e) => {
+            could_not(&e.to_string());
+            NearbyRememberOutcome::Unavailable
+        }
     }
 }
 
@@ -344,6 +420,14 @@ fn lookup_in(kc: &(impl Keychain + ?Sized), name: &str) -> Result<Resolution, Ke
     let Some(root) = read_active_root(kc)? else {
         return Ok(Resolution::Miss);
     };
+    lookup_root_in(kc, &root, name)
+}
+
+fn lookup_root_in(
+    kc: &(impl Keychain + ?Sized),
+    root: &str,
+    name: &str,
+) -> Result<Resolution, KeychainError> {
     let Some(value) = kc.get(&remember_account(&root, name))? else {
         return Ok(Resolution::Miss);
     };
@@ -555,6 +639,42 @@ mod tests {
         // …and without any active root, nothing resolves at all.
         kc.delete(ACTIVE_ROOT_ACCOUNT).unwrap();
         assert!(matches!(lookup_in(&kc, "deploy").unwrap(), Resolution::Miss));
+    }
+
+    #[test]
+    fn identity_commit_revokes_old_root_before_keychain_rotation() {
+        let path = std::env::temp_dir()
+            .join(format!(
+                "keytap-remember-identity-authority-test-{}",
+                std::process::id()
+            ))
+            .join("nearby-identity.json");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+
+        crate::nearby_identity::prepare_init_at(
+            path.clone(),
+            crate::nearby_identity::InitMode::Create,
+        )
+        .unwrap()
+        .commit(CRED_1)
+        .unwrap();
+        let mut kc = MemoryKeychain::default();
+        assert_stored(remember_in(&mut kc, "deploy", CRED_1, &KEY_A).unwrap());
+        let replacement = crate::nearby_identity::prepare_init_at(
+            path.clone(),
+            crate::nearby_identity::InitMode::Replace,
+        )
+        .unwrap();
+        replacement.commit(CRED_2).unwrap();
+
+        // This models a crash immediately after identity publication and
+        // before after_init rotates the keychain marker away from CRED_1.
+        let authority = crate::nearby_identity::remember_authority_at(path.clone()).unwrap();
+        assert!(matches!(
+            lookup_authorized_in(&kc, "deploy", &authority).unwrap(),
+            Resolution::Miss
+        ));
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
     #[test]

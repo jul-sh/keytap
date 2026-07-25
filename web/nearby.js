@@ -694,11 +694,12 @@ async function main() {
   btn.disabled = false;
 }
 
-// A v2 QR carries only its one-time capability in `#q`. Keep the deployed
-// `#s` / `#cfg` paths intact during rollout so older CLIs still complete their
-// X25519 relay flow, while current CLIs load the authenticated WebRTC module.
+// A current QR carries only its one-time CLI public key in `#k`. Keep the
+// deployed `#s` / `#cfg` paths intact so older CLIs still complete their
+// X25519 relay flow. `#k` is a hard protocol discriminator: signature failure
+// never falls back to the legacy or symmetric-capability protocol.
 const entryParams = new URLSearchParams(location.hash.startsWith('#') ? location.hash.slice(1) : '');
-if (entryParams.has('q')) {
+if (entryParams.has('k')) {
   import('./nearby-v2.js').then(module => module.main()).catch(error => {
     console.error(error);
     history.replaceState(null, '', location.pathname + location.search);

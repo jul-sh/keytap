@@ -2,6 +2,6 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --test nearby-v2-protocol.test.js"
+    "test": "node --test *.test.js"
   }
 }

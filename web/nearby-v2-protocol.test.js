@@ -1,63 +1,81 @@
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 
 import {
   CLOUDFLARE_STUN_ONLY,
   ProtocolError,
+  createCliOfferVerifier,
   createNearbyIdentityProof,
   createNearbySessionBinding,
-  createSignalAuthenticator,
+  createPhoneAnswer,
+  createSasCommitment,
+  createSasContext,
+  createSasDigest,
   decodeBase64URL,
   encodeBase64URL,
   filterCloudflareIceServers,
   isAllowedCloudflareIceUrl,
   nearbyIdentityProofMessage,
+  nearbySasRequestBytes,
+  parseSasWordList,
+  sasPhrase,
+  verifySasCommitment,
 } from './nearby-v2-protocol.js';
 
-test('matches the Rust rendezvous, HKDF, and HMAC vector', async () => {
-  const capability = new Uint8Array(32).fill(0x42);
+test('verifies the Rust-signed CLI offer and compact public-key QR vector', async () => {
+  const cliPublicKey = decodeBase64URL('6kpsY-KcUgq-9VB7Ey7F-ZVHdq6-vnuSQh7qaRRG0iw');
   assert.equal(
-    encodeBase64URL(capability),
-    'QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkI',
+    encodeBase64URL(cliPublicKey).length,
+    43,
   );
-  const authenticator = await createSignalAuthenticator(capability);
-  assert.equal(capability.every(byte => byte === 0), true, 'raw capability is erased after key import');
+  const verifier = await createCliOfferVerifier(cliPublicKey);
   assert.equal(
-    authenticator.rendezvousId,
-    '6_2qUdwr2cvl5omCEB61Ys263Y1nu0TIjppVQPePcUA',
+    verifier.rendezvousId,
+    'MFHH-4Il-dVD-AwsB7c-4kdD25EFZ_aGEczf569GW8U',
   );
-  assert.equal(
-    encodeBase64URL(authenticator.capabilityBinding),
-    'xSlvZCIXRPywtFu-jlyNoi-WW45oSc_ufGvoTdYb54I',
-  );
-
-  const envelope = await authenticator.sign('cli', 0, 'offer', '{"type":"offer"}');
+  const envelope = {
+    v: 3,
+    from: 'cli',
+    seq: 0,
+    kind: 'offer',
+    body: encodeBase64URL(new TextEncoder().encode('{"type":"offer"}')),
+    signature: 'U2k9m3s7XkIf9QF0ShT4TNY-FzYYAfoF4RX9zLBWoo5TYwS5-oblqKqQdK7mQVxO92UWDTidykN6Nm3vXeWPDg',
+  };
   assert.deepEqual(envelope, {
-    v: 2,
+    v: 3,
     from: 'cli',
     seq: 0,
     kind: 'offer',
     body: 'eyJ0eXBlIjoib2ZmZXIifQ',
-    mac: 'FoqM9kpeEx726l8vB0Whib5XjyzePgjWQwBiOFQtZ1E',
+    signature: 'U2k9m3s7XkIf9QF0ShT4TNY-FzYYAfoF4RX9zLBWoo5TYwS5-oblqKqQdK7mQVxO92UWDTidykN6Nm3vXeWPDg',
   });
   assert.equal(
-    new TextDecoder().decode(await authenticator.verify(envelope, 'cli', 0, 'offer')),
+    new TextDecoder().decode(await verifier.verifyOffer(envelope)),
     '{"type":"offer"}',
   );
-
-  const answer = await authenticator.sign('phone', 0, 'answer', 'v=0\r\n');
-  assert.equal(answer.mac, 'Ob2oYFx6NK-1_LOY2br0jKfkJL-Pcxim2X-mAVRKuao');
+  assert.deepEqual(createPhoneAnswer('v=0\r\n'), {
+    v: 3,
+    from: 'phone',
+    seq: 0,
+    kind: 'answer',
+    body: 'dj0wDQo',
+  });
 });
 
 test('derives a stable Ed25519 identity and signs the exact nearby result', async () => {
-  const authenticator = await createSignalAuthenticator(new Uint8Array(32).fill(0x42));
+  const cliPublicKey = decodeBase64URL('6kpsY-KcUgq-9VB7Ey7F-ZVHdq6-vnuSQh7qaRRG0iw');
   const sessionBinding = await createNearbySessionBinding(
-    authenticator.capabilityBinding,
+    cliPublicKey,
     new TextEncoder().encode('offer'),
     new TextEncoder().encode('answer'),
   );
+  assert.equal(
+    encodeBase64URL(sessionBinding),
+    '4onRCvmREapRgbR1UvtUZ_AJ0aCKjDR0Q1fWTksrzJY',
+  );
   const fields = {
-    sessionBinding,
+    binding: { kind: 'bootstrap-sas', digest: new Uint8Array(32).fill(0x42) },
     challenge: new Uint8Array(32).fill(0x24),
     credentialId: new TextEncoder().encode('credential-one'),
     prfFirst: new Uint8Array(32).fill(0x11),
@@ -69,7 +87,7 @@ test('derives a stable Ed25519 identity and signs the exact nearby result', asyn
   assert.equal(encodeBase64URL(proof.publicKey), '6kpsY-KcUgq-9VB7Ey7F-ZVHdq6-vnuSQh7qaRRG0iw');
   assert.equal(
     encodeBase64URL(proof.signature),
-    '2UnoDFl5z93sC3gNM7-S3lYG6ckXzu3rIwedCYQvWDU2v-YvpuXlKtOnnLIscb0TSghY6_gUB6zcnTkPZHutAA',
+    'NVy39fNzZCAiPt1NmmwKtykd-vRk9SPzvlxnHd_Lp8smT5qNZZJ5OVvlObjz3hrsPoCVNDtZU4onn_bgPqyFDQ',
   );
   const message = nearbyIdentityProofMessage({ ...fields, publicKey: proof.publicKey });
   const publicKey = await crypto.subtle.importKey(
@@ -89,26 +107,121 @@ test('derives a stable Ed25519 identity and signs the exact nearby result', asyn
   assert.equal(await crypto.subtle.verify('Ed25519', publicKey, proof.signature, changed), false);
 });
 
-test('binds signaling authentication to role, sequence, kind, and body', async () => {
-  const authenticator = await createSignalAuthenticator(new Uint8Array(32).fill(7));
-  const envelope = await authenticator.sign('phone', 0, 'answer', 'v=0\r\n');
+test('matches the Rust commit–reveal SAS vector and pinned word list', async () => {
+  const context = new Uint8Array(32).fill(0x42);
+  const cliNonce = new Uint8Array(32).fill(0x11);
+  const phoneNonce = new Uint8Array(32).fill(0x22);
+  const cliCommitment = await createSasCommitment('cli', context, cliNonce);
+  const phoneCommitment = await createSasCommitment('phone', context, phoneNonce);
+  assert.equal(
+    encodeBase64URL(cliCommitment),
+    'cvH8dRwfyO39Y_o_PCBXIQPtJ2CgNAF2dCLBJs4YldA',
+  );
+  assert.equal(
+    encodeBase64URL(phoneCommitment),
+    '-uZ7M59bEXt4cV1iqI2FbkKRwgznmHmb79X7bqcHUtk',
+  );
+  assert.equal(await verifySasCommitment('cli', context, cliNonce, cliCommitment), true);
+  const changed = cliCommitment.slice();
+  changed[0] ^= 1;
+  assert.equal(await verifySasCommitment('cli', context, cliNonce, changed), false);
 
+  const digest = await createSasDigest(
+    context,
+    cliCommitment,
+    phoneCommitment,
+    cliNonce,
+    phoneNonce,
+  );
+  assert.equal(
+    encodeBase64URL(digest),
+    '5ZQGmH1q3mt_ppkjl_U99IdhuExmijw475WdClYiSR0',
+  );
+  const words = await parseSasWordList(
+    new Uint8Array(await readFile(new URL('./nearby-sas-words.txt', import.meta.url))),
+  );
+  assert.equal(sasPhrase(digest, words), 'tortoise parent');
+});
+
+test('canonically binds the exact pairing request', async () => {
+  const request = {
+    kind: 'assert',
+    challenge: new Uint8Array(32).fill(1),
+    prfSalt: new Uint8Array(32).fill(2),
+    identitySalt: new Uint8Array(32).fill(3),
+    keyName: 'deploy',
+    identity: { kind: 'pairing-credential', credentialId: new TextEncoder().encode('cred') },
+    remember: { kind: 'available', windowSecs: 60 },
+  };
+  assert.equal(
+    encodeBase64URL(nearbySasRequestBytes(request)),
+    'AQAAACABAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQAAACACAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgAAACADAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwAAAAZkZXBsb3kBAAAABGNyZWQBAAAAAAAAADw',
+  );
+  assert.equal(
+    encodeBase64URL(await createSasContext(new Uint8Array(32).fill(4), request)),
+    'ov2kOyVpend0ognXvoqine2hW54dYUqDikvCzmw4xqE',
+  );
+  const verifier = await createCliOfferVerifier(
+    decodeBase64URL('6kpsY-KcUgq-9VB7Ey7F-ZVHdq6-vnuSQh7qaRRG0iw'),
+  );
+  await verifier.verifyPairingRelease({
+    signature: decodeBase64URL('Z1ZC9SnoBK3gYjh2AYlxTRx9HAfKUsOmRm7sAQhM63Yj3VXjZGHVsQIhFkmsQMJC-_Z0ZZ61zJny3_4EgbsgDQ'),
+    sessionBinding: new Uint8Array(32).fill(4),
+    sasDigest: new Uint8Array(32).fill(5),
+    request,
+    releaseNonce: new Uint8Array(32).fill(6),
+  });
+  const signature = decodeBase64URL('Z1ZC9SnoBK3gYjh2AYlxTRx9HAfKUsOmRm7sAQhM63Yj3VXjZGHVsQIhFkmsQMJC-_Z0ZZ61zJny3_4EgbsgDQ');
+  const valid = {
+    signature,
+    sessionBinding: new Uint8Array(32).fill(4),
+    sasDigest: new Uint8Array(32).fill(5),
+    request,
+    releaseNonce: new Uint8Array(32).fill(6),
+  };
+  const mutations = [
+    { ...valid, sessionBinding: new Uint8Array(32).fill(9) },
+    { ...valid, sasDigest: new Uint8Array(32).fill(9) },
+    { ...valid, request: { ...request, keyName: 'production' } },
+    { ...valid, releaseNonce: new Uint8Array(32).fill(7) },
+  ];
+  for (const mutation of mutations) {
+    await assert.rejects(
+      verifier.verifyPairingRelease(mutation),
+      /invalid pairing release signature/,
+    );
+  }
+});
+
+test('binds CLI offer authentication to key, version, state, and body', async () => {
+  const verifier = await createCliOfferVerifier(
+    decodeBase64URL('6kpsY-KcUgq-9VB7Ey7F-ZVHdq6-vnuSQh7qaRRG0iw'),
+  );
+  const envelope = {
+    v: 3,
+    from: 'cli',
+    seq: 0,
+    kind: 'offer',
+    body: 'eyJ0eXBlIjoib2ZmZXIifQ',
+    signature: 'U2k9m3s7XkIf9QF0ShT4TNY-FzYYAfoF4RX9zLBWoo5TYwS5-oblqKqQdK7mQVxO92UWDTidykN6Nm3vXeWPDg',
+  };
   await assert.rejects(
-    authenticator.verify(envelope, 'cli', 0, 'answer'),
+    verifier.verifyOffer({ ...envelope, v: 2 }),
     ProtocolError,
   );
   await assert.rejects(
-    authenticator.verify(envelope, 'phone', 1, 'answer'),
+    verifier.verifyOffer({ ...envelope, seq: 1 }),
     ProtocolError,
   );
   await assert.rejects(
-    authenticator.verify(envelope, 'phone', 0, 'offer'),
+    verifier.verifyOffer({ ...envelope, from: 'phone' }),
     ProtocolError,
   );
   await assert.rejects(
-    authenticator.verify({ ...envelope, body: encodeBase64URL(new TextEncoder().encode('changed')) }, 'phone', 0, 'answer'),
+    verifier.verifyOffer({ ...envelope, body: encodeBase64URL(new TextEncoder().encode('changed')) }),
     /authentication failed/,
   );
+  await assert.rejects(verifier.verifyOffer({ ...envelope, mac: 'legacy' }), /invalid signaling envelope/);
 });
 
 test('accepts canonical base64url only', () => {

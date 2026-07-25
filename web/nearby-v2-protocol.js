@@ -1,11 +1,19 @@
 const encoder = new TextEncoder();
 
-const RID_DOMAIN = encoder.encode('keytap:rendezvous:v2\0');
-const MAC_DOMAIN = encoder.encode('keytap:signal:v2\0');
-const KEY_INFO_PREFIX = 'keytap:signal-key:v2:';
-const IDENTITY_BINDING_DOMAIN = encoder.encode('keytap:nearby-identity-binding:v1\0');
-const IDENTITY_SESSION_DOMAIN = encoder.encode('keytap:nearby-identity-session:v1\0');
-const IDENTITY_PROOF_DOMAIN = encoder.encode('keytap:nearby-identity-proof:v1\0');
+const RID_DOMAIN = encoder.encode('keytap:rendezvous:v3\0');
+const OFFER_SIGNATURE_DOMAIN = encoder.encode('keytap:signal-offer:v3\0');
+const IDENTITY_SESSION_DOMAIN = encoder.encode('keytap:nearby-identity-session:v2\0');
+const IDENTITY_PROOF_DOMAIN = encoder.encode('keytap:nearby-identity-proof:v2\0');
+const SAS_CONTEXT_DOMAIN = encoder.encode('keytap:nearby-sas-context:v1\0');
+const SAS_COMMIT_DOMAIN = encoder.encode('keytap:nearby-sas-commit:v1\0');
+const SAS_DIGEST_DOMAIN = encoder.encode('keytap:nearby-sas-digest:v1\0');
+const SAS_RELEASE_DOMAIN = encoder.encode('keytap:nearby-sas-release:v1\0');
+const SAS_WORD_LIST_SHA256 = Uint8Array.from([
+  0x2f, 0x5e, 0xed, 0x53, 0xa4, 0x72, 0x7b, 0x4b,
+  0xf8, 0x88, 0x0d, 0x8f, 0x3f, 0x19, 0x9e, 0xfc,
+  0x90, 0xe5, 0x85, 0x03, 0x64, 0x6d, 0x9f, 0xf8,
+  0xef, 0xf3, 0xa2, 0xed, 0x3b, 0x24, 0xdb, 0xda,
+]);
 const ED25519_PKCS8_SEED_PREFIX = Uint8Array.from([
   0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06,
   0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04, 0x20,
@@ -75,24 +83,191 @@ function lengthPrefixed(value) {
 }
 
 export async function createNearbySessionBinding(
-  capabilityBinding,
+  cliPublicKey,
   offer,
   answer,
   webCrypto = globalThis.crypto,
 ) {
-  if (!(capabilityBinding instanceof Uint8Array) || capabilityBinding.length !== 32
+  if (!(cliPublicKey instanceof Uint8Array) || cliPublicKey.length !== 32
       || !(offer instanceof Uint8Array) || !(answer instanceof Uint8Array)) {
     throw new ProtocolError('invalid nearby identity session');
   }
   if (!webCrypto?.subtle) throw new ProtocolError('WebCrypto is unavailable');
   return new Uint8Array(await webCrypto.subtle.digest('SHA-256', concatBytes(
     IDENTITY_SESSION_DOMAIN,
-    capabilityBinding,
+    cliPublicKey,
     u64(offer.length),
     offer,
     u64(answer.length),
     answer,
   )));
+}
+
+/** Canonical bytes for the exact request authenticated by first-use SAS. */
+export function nearbySasRequestBytes(request) {
+  if (!request || typeof request !== 'object' || Array.isArray(request)) {
+    throw new ProtocolError('invalid SAS request');
+  }
+  if (request.kind === 'register') {
+    return concatBytes(
+      new Uint8Array([0]),
+      lengthPrefixed(request.challenge),
+      lengthPrefixed(request.prfSalt),
+      lengthPrefixed(request.userId),
+      lengthPrefixed(encoder.encode(request.userName)),
+    );
+  }
+  if (request.kind !== 'assert') throw new ProtocolError('invalid SAS request');
+  let identity;
+  switch (request.identity?.kind) {
+    case 'pairing-any':
+      identity = new Uint8Array([0]);
+      break;
+    case 'pairing-credential':
+      identity = concatBytes(
+        new Uint8Array([1]),
+        lengthPrefixed(request.identity.credentialId),
+      );
+      break;
+    case 'pinned':
+      identity = concatBytes(
+        new Uint8Array([2]),
+        lengthPrefixed(request.identity.credentialId),
+      );
+      break;
+    default:
+      throw new ProtocolError('invalid SAS identity mode');
+  }
+  let remember;
+  switch (request.remember?.kind) {
+    case 'disabled':
+      remember = new Uint8Array([0]);
+      break;
+    case 'available':
+      remember = concatBytes(new Uint8Array([1]), u64(request.remember.windowSecs));
+      break;
+    default:
+      throw new ProtocolError('invalid SAS remember mode');
+  }
+  return concatBytes(
+    new Uint8Array([1]),
+    lengthPrefixed(request.challenge),
+    lengthPrefixed(request.prfSalt),
+    lengthPrefixed(request.identitySalt),
+    lengthPrefixed(encoder.encode(request.keyName)),
+    identity,
+    remember,
+  );
+}
+
+export async function createSasContext(
+  sessionBinding,
+  request,
+  webCrypto = globalThis.crypto,
+) {
+  if (!(sessionBinding instanceof Uint8Array) || sessionBinding.length !== 32) {
+    throw new ProtocolError('invalid SAS session binding');
+  }
+  const canonicalRequest = nearbySasRequestBytes(request);
+  return new Uint8Array(await webCrypto.subtle.digest('SHA-256', concatBytes(
+    SAS_CONTEXT_DOMAIN,
+    sessionBinding,
+    u64(canonicalRequest.length),
+    canonicalRequest,
+  )));
+}
+
+function sasRole(role) {
+  if (role === 'cli') return encoder.encode('cli\0');
+  if (role === 'phone') return encoder.encode('phone\0');
+  throw new ProtocolError('invalid SAS role');
+}
+
+export async function createSasCommitment(
+  role,
+  context,
+  nonce,
+  webCrypto = globalThis.crypto,
+) {
+  if (!(context instanceof Uint8Array) || context.length !== 32
+      || !(nonce instanceof Uint8Array) || nonce.length !== 32) {
+    throw new ProtocolError('invalid SAS commitment input');
+  }
+  return new Uint8Array(await webCrypto.subtle.digest('SHA-256', concatBytes(
+    SAS_COMMIT_DOMAIN,
+    sasRole(role),
+    context,
+    nonce,
+  )));
+}
+
+export async function verifySasCommitment(
+  role,
+  context,
+  nonce,
+  expected,
+  webCrypto = globalThis.crypto,
+) {
+  if (!(expected instanceof Uint8Array) || expected.length !== 32) return false;
+  const actual = await createSasCommitment(role, context, nonce, webCrypto);
+  let difference = 0;
+  for (let index = 0; index < actual.length; index += 1) {
+    difference |= actual[index] ^ expected[index];
+  }
+  return difference === 0;
+}
+
+export async function createSasDigest(
+  context,
+  cliCommitment,
+  phoneCommitment,
+  cliNonce,
+  phoneNonce,
+  webCrypto = globalThis.crypto,
+) {
+  const values = [context, cliCommitment, phoneCommitment, cliNonce, phoneNonce];
+  if (values.some(value => !(value instanceof Uint8Array) || value.length !== 32)) {
+    throw new ProtocolError('invalid SAS digest input');
+  }
+  return new Uint8Array(await webCrypto.subtle.digest('SHA-256', concatBytes(
+    SAS_DIGEST_DOMAIN,
+    ...values,
+  )));
+}
+
+export function sasPhrase(digest, words) {
+  if (!(digest instanceof Uint8Array) || digest.length !== 32
+      || !Array.isArray(words) || words.length !== 2048) {
+    throw new ProtocolError('invalid SAS phrase input');
+  }
+  const first = (digest[0] << 3) | (digest[1] >> 5);
+  const second = ((digest[1] & 0x1f) << 6) | (digest[2] >> 2);
+  return `${words[first]} ${words[second]}`;
+}
+
+export async function parseSasWordList(bytes, webCrypto = globalThis.crypto) {
+  if (!(bytes instanceof Uint8Array) || bytes.length > 32 * 1024) {
+    throw new ProtocolError('invalid SAS word list');
+  }
+  const digest = new Uint8Array(await webCrypto.subtle.digest('SHA-256', bytes));
+  let difference = 0;
+  for (let index = 0; index < digest.length; index += 1) {
+    difference |= digest[index] ^ SAS_WORD_LIST_SHA256[index];
+  }
+  if (difference !== 0) throw new ProtocolError('unexpected SAS word list');
+  let text;
+  try {
+    text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+  } catch {
+    throw new ProtocolError('invalid SAS word list');
+  }
+  const words = text.trimEnd().split('\n');
+  if (words.length !== 2048
+      || new Set(words).size !== 2048
+      || words.some(word => !/^[a-z]{1,8}$/.test(word))) {
+    throw new ProtocolError('invalid SAS word list');
+  }
+  return Object.freeze(words);
 }
 
 /**
@@ -101,18 +276,20 @@ export async function createNearbySessionBinding(
  * key name, and submitted public identity.
  */
 export function nearbyIdentityProofMessage({
-  sessionBinding,
+  binding,
   challenge,
   credentialId,
   prfFirst,
   keyName,
   publicKey,
 }) {
-  const byteFields = [sessionBinding, challenge, credentialId, prfFirst, publicKey];
+  const bindingDigest = binding?.digest;
+  const byteFields = [bindingDigest, challenge, credentialId, prfFirst, publicKey];
   if (byteFields.some(value => !(value instanceof Uint8Array))) {
     throw new ProtocolError('invalid identity proof field');
   }
-  if (sessionBinding.length !== 32
+  if ((binding.kind !== 'bootstrap-sas' && binding.kind !== 'pinned-session')
+      || bindingDigest.length !== 32
       || challenge.length < 16 || challenge.length > 128
       || credentialId.length < 1 || credentialId.length > 1024
       || prfFirst.length !== 32
@@ -124,7 +301,8 @@ export function nearbyIdentityProofMessage({
   if (name.length < 1 || name.length > 128) throw new ProtocolError('invalid identity proof key name');
   return concatBytes(
     IDENTITY_PROOF_DOMAIN,
-    lengthPrefixed(sessionBinding),
+    new Uint8Array([binding.kind === 'bootstrap-sas' ? 0 : 1]),
+    lengthPrefixed(bindingDigest),
     lengthPrefixed(challenge),
     lengthPrefixed(credentialId),
     lengthPrefixed(prfFirst),
@@ -171,123 +349,153 @@ export async function createNearbyIdentityProof(fields, prfSecond, webCrypto = g
   }
 }
 
-function roleBytes(role) {
-  if (role !== 'cli' && role !== 'phone') throw new ProtocolError('invalid signaling role');
-  return encoder.encode(role);
-}
-
-function kindBytes(kind) {
-  if (kind !== 'offer' && kind !== 'answer') throw new ProtocolError('invalid signaling kind');
-  return encoder.encode(kind);
-}
-
-function transcript(role, seq, kind, body) {
+function offerSignatureMessage(seq, body) {
   return concatBytes(
-    MAC_DOMAIN,
-    roleBytes(role),
-    new Uint8Array([0]),
+    OFFER_SIGNATURE_DOMAIN,
+    new Uint8Array([3]),
+    encoder.encode('cli\0'),
     u64(seq),
-    kindBytes(kind),
-    new Uint8Array([0]),
+    encoder.encode('offer\0'),
     u64(body.length),
     body,
   );
 }
 
+function pairingReleaseMessage(
+  cliPublicKey,
+  sessionBinding,
+  sasDigest,
+  canonicalRequest,
+  releaseNonce,
+) {
+  const fixed = [cliPublicKey, sessionBinding, sasDigest, releaseNonce];
+  if (fixed.some(value => !(value instanceof Uint8Array) || value.length !== 32)
+      || !(canonicalRequest instanceof Uint8Array)) {
+    throw new ProtocolError('invalid pairing release input');
+  }
+  return concatBytes(
+    SAS_RELEASE_DOMAIN,
+    new Uint8Array([3]),
+    cliPublicKey,
+    sessionBinding,
+    sasDigest,
+    u64(canonicalRequest.length),
+    canonicalRequest,
+    releaseNonce,
+  );
+}
+
 /**
- * Build the authenticated signaling context from the one-time QR capability.
- * The raw capability is copied into non-extractable WebCrypto keys and then
- * erased from JavaScript-owned memory.
+ * Build a verifier for the one-time CLI public key carried in the QR fragment.
+ * A valid offer signature authenticates the offer's DTLS fingerprint, which
+ * in turn authenticates every later data-channel message from the CLI.
  *
- * @param {Uint8Array} capabilityBytes exactly 32 random bytes
+ * @param {Uint8Array} cliPublicKeyBytes exactly 32 Ed25519 public-key bytes
  * @param {Crypto} webCrypto injectable only for tests
  */
-export async function createSignalAuthenticator(capabilityBytes, webCrypto = globalThis.crypto) {
-  if (!(capabilityBytes instanceof Uint8Array) || capabilityBytes.length !== 32) {
-    throw new ProtocolError('invalid nearby capability');
+export async function createCliOfferVerifier(cliPublicKeyBytes, webCrypto = globalThis.crypto) {
+  if (!(cliPublicKeyBytes instanceof Uint8Array) || cliPublicKeyBytes.length !== 32) {
+    throw new ProtocolError('invalid nearby CLI public key');
   }
   if (!webCrypto?.subtle) throw new ProtocolError('WebCrypto is unavailable');
 
-  const secret = capabilityBytes.slice();
+  const cliPublicKey = cliPublicKeyBytes.slice();
   const rendezvous = new Uint8Array(
-    await webCrypto.subtle.digest('SHA-256', concatBytes(RID_DOMAIN, secret)),
+    await webCrypto.subtle.digest('SHA-256', concatBytes(RID_DOMAIN, cliPublicKey)),
   );
-  const identityBinding = new Uint8Array(
-    await webCrypto.subtle.digest('SHA-256', concatBytes(IDENTITY_BINDING_DOMAIN, secret)),
-  );
-  const keyMaterial = await webCrypto.subtle.importKey('raw', secret, 'HKDF', false, ['deriveKey']);
-
-  async function deriveKey(role) {
-    return webCrypto.subtle.deriveKey(
-      {
-        name: 'HKDF',
-        hash: 'SHA-256',
-        salt: rendezvous,
-        info: encoder.encode(KEY_INFO_PREFIX + role),
-      },
-      keyMaterial,
-      { name: 'HMAC', hash: 'SHA-256', length: 256 },
+  let verificationKey;
+  try {
+    verificationKey = await webCrypto.subtle.importKey(
+      'raw',
+      cliPublicKey,
+      { name: 'Ed25519' },
       false,
-      ['sign', 'verify'],
+      ['verify'],
     );
+  } catch {
+    throw new ProtocolError('invalid nearby CLI public key');
   }
 
-  const [cliKey, phoneKey] = await Promise.all([deriveKey('cli'), deriveKey('phone')]);
-  secret.fill(0);
-  capabilityBytes.fill(0);
-
-  const keys = { cli: cliKey, phone: phoneKey };
   return Object.freeze({
     rendezvousId: encodeBase64URL(rendezvous),
-    capabilityBinding: identityBinding,
+    cliPublicKey,
 
-    /** @returns {Promise<{v: 2, from: 'cli'|'phone', seq: number, kind: 'offer'|'answer', body: string, mac: string}>} */
-    async sign(role, seq, kind, bodyValue) {
-      let body;
-      if (bodyValue instanceof Uint8Array) {
-        body = bodyValue;
-      } else if (bodyValue instanceof ArrayBuffer) {
-        body = new Uint8Array(bodyValue);
-      } else if (typeof bodyValue === 'string') {
-        body = encoder.encode(bodyValue);
-      } else {
-        throw new ProtocolError('invalid signaling body');
-      }
-      const mac = await webCrypto.subtle.sign('HMAC', keys[role], transcript(role, seq, kind, body));
-      return {
-        v: 2,
-        from: role,
-        seq,
-        kind,
-        body: encodeBase64URL(body),
-        mac: encodeBase64URL(mac),
-      };
-    },
-
-    /** Verify state and HMAC before returning the authenticated body bytes. */
-    async verify(envelope, expectedRole, expectedSeq, expectedKind) {
-      if (!envelope || typeof envelope !== 'object' || Array.isArray(envelope)) {
-        throw new ProtocolError('invalid signaling envelope');
-      }
-      if (envelope.v !== 2
-          || envelope.from !== expectedRole
-          || envelope.seq !== expectedSeq
-          || envelope.kind !== expectedKind) {
+    /** Verify exact state and signature before returning the offer bytes. */
+    async verifyOffer(envelope) {
+      if (!envelope || typeof envelope !== 'object' || Array.isArray(envelope)
+          || envelope.v !== 3
+          || envelope.from !== 'cli'
+          || envelope.seq !== 0
+          || envelope.kind !== 'offer') {
         throw new ProtocolError('unexpected signaling state');
       }
+      const keys = Object.keys(envelope).sort();
+      const expectedKeys = ['body', 'from', 'kind', 'seq', 'signature', 'v'];
+      if (keys.length !== expectedKeys.length
+          || keys.some((key, index) => key !== expectedKeys[index])) {
+        throw new ProtocolError('invalid signaling envelope');
+      }
       const body = decodeBase64URL(envelope.body);
-      const mac = decodeBase64URL(envelope.mac);
-      if (mac.length !== 32) throw new ProtocolError('invalid signaling MAC');
+      const signature = decodeBase64URL(envelope.signature);
+      if (signature.length !== 64) throw new ProtocolError('invalid offer signature');
       const valid = await webCrypto.subtle.verify(
-        'HMAC',
-        keys[expectedRole],
-        mac,
-        transcript(expectedRole, expectedSeq, expectedKind, body),
+        'Ed25519',
+        verificationKey,
+        signature,
+        offerSignatureMessage(envelope.seq, body),
       );
       if (!valid) throw new ProtocolError('signaling authentication failed');
       return body;
     },
+
+    /** Verify the CLI's post-comparison authorization for a held result. */
+    async verifyPairingRelease({
+      signature,
+      sessionBinding,
+      sasDigest,
+      request,
+      releaseNonce,
+    }) {
+      if (!(signature instanceof Uint8Array) || signature.length !== 64) {
+        throw new ProtocolError('invalid pairing release signature');
+      }
+      const message = pairingReleaseMessage(
+        cliPublicKey,
+        sessionBinding,
+        sasDigest,
+        nearbySasRequestBytes(request),
+        releaseNonce,
+      );
+      const valid = await webCrypto.subtle.verify(
+        'Ed25519',
+        verificationKey,
+        signature,
+        message,
+      );
+      if (!valid) throw new ProtocolError('invalid pairing release signature');
+    },
   });
+}
+
+/** Construct the strictly typed, unauthenticated phone answer envelope. */
+export function createPhoneAnswer(bodyValue) {
+  let body;
+  if (bodyValue instanceof Uint8Array) {
+    body = bodyValue;
+  } else if (bodyValue instanceof ArrayBuffer) {
+    body = new Uint8Array(bodyValue);
+  } else if (typeof bodyValue === 'string') {
+    body = encoder.encode(bodyValue);
+  } else {
+    throw new ProtocolError('invalid signaling body');
+  }
+  return {
+    v: 3,
+    from: 'phone',
+    seq: 0,
+    kind: 'answer',
+    body: encodeBase64URL(body),
+  };
 }
 
 export const CLOUDFLARE_STUN_ONLY = Object.freeze([
