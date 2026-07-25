@@ -137,20 +137,9 @@ To verify a downloaded release was built from this repository:
 gh attestation verify keytap-*.zip -R jul-sh/keytap
 ```
 
-## Choosing names
+## Guides
 
-Names are cheap, so use them liberally.
-A good rule is: one name per purpose.
-
-For example:
-
-- `github`
-- `gitlab`
-- `backup`
-- `terraform`
-- `notes`
-
-This is cleaner than reusing one key everywhere, and easier to reason about than a pile of manually managed key files.
+- [Share an encrypted `.env` through Git with multiple developers](docs/team-env.md)
 
 ## Security
 
