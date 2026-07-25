@@ -52,7 +52,6 @@ const RP_ID: &str = "keytap.jul.sh";
 const REG_NAME: &str = "keytap";
 const REG_USER_ID: &[u8] = b"keytap-user";
 const HKDF_INFO: &[u8] = b"keytap:key";
-const NEARBY_IDENTITY_PRF_CONTEXT: &[u8] = b"keytap:nearby-identity-prf:v1";
 
 pub fn registration_config() -> RegistrationConfig {
     RegistrationConfig {
@@ -76,14 +75,6 @@ pub fn assertion_config(key_name: &str, preferred_credential_id: Option<Vec<u8>>
 pub fn prf_salt_for_name(key_name: &str) -> Result<Vec<u8>, KeytapError> {
     validate_key_name(key_name)?;
     Ok(Sha256::digest(format!("keytap:prf:{key_name}")).to_vec())
-}
-
-/// The second PRF input used by nearby flows to derive a stable signing
-/// identity from the same passkey approval as the requested named key.
-/// Keeping this outside the user-controlled name namespace makes the two PRF
-/// outputs independent even if a key name resembles the identity label.
-pub fn nearby_identity_prf_salt() -> [u8; 32] {
-    Sha256::digest(NEARBY_IDENTITY_PRF_CONTEXT).into()
 }
 
 pub fn derive_raw_key(prf_output: &[u8]) -> Result<Vec<u8>, KeytapError> {

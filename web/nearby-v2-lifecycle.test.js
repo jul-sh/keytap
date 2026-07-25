@@ -15,7 +15,6 @@ function fakeSession() {
     sent,
     send(message) { sent.push(message); },
     close() { closed = true; },
-    isOpen() { return !closed; },
     get closed() { return closed; },
   };
 }
@@ -34,7 +33,7 @@ test('pagehide aborts WebAuthn before closing a normal request', () => {
     data: { controller, session },
   });
   assert.equal(controller.signal.aborted, true);
-  assert.deepEqual(session.sent, [{ v: 3, type: 'done' }]);
+  assert.deepEqual(session.sent, [{ type: 'done' }]);
   assert.equal(session.closed, true);
 });
 
@@ -46,7 +45,7 @@ test('pagehide aborts pairing WebAuthn and rejects without a result', () => {
     data: { controller, session },
   });
   assert.equal(controller.signal.aborted, true);
-  assert.deepEqual(session.sent, [{ v: 3, type: 'sas-phone-rejected' }]);
+  assert.deepEqual(session.sent, [{ type: 'sas-phone-rejected' }]);
   assert.equal(session.closed, true);
 });
 
@@ -65,7 +64,7 @@ test('pagehide destroys a held assertion before rejecting pairing', () => {
   });
   assert.deepEqual(releaseNonce, new Uint8Array(32));
   assert.deepEqual(prfFirst, new Uint8Array(32));
-  assert.deepEqual(session.sent, [{ v: 3, type: 'sas-phone-rejected' }]);
+  assert.deepEqual(session.sent, [{ type: 'sas-phone-rejected' }]);
   assert.equal(session.closed, true);
 });
 

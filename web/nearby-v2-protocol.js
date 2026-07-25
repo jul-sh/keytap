@@ -8,6 +8,7 @@ const SAS_CONTEXT_DOMAIN = encoder.encode('keytap:nearby-sas-context:v1\0');
 const SAS_COMMIT_DOMAIN = encoder.encode('keytap:nearby-sas-commit:v1\0');
 const SAS_DIGEST_DOMAIN = encoder.encode('keytap:nearby-sas-digest:v1\0');
 const SAS_RELEASE_DOMAIN = encoder.encode('keytap:nearby-sas-release:v1\0');
+const webCrypto = globalThis.crypto;
 const SAS_WORD_LIST_SHA256 = Uint8Array.from([
   0x2f, 0x5e, 0xed, 0x53, 0xa4, 0x72, 0x7b, 0x4b,
   0xf8, 0x88, 0x0d, 0x8f, 0x3f, 0x19, 0x9e, 0xfc,
@@ -51,6 +52,98 @@ export function decodeBase64URL(value) {
   return bytes;
 }
 
+function expectObject(value, label) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new ProtocolError(`invalid ${label}`);
+  }
+  return value;
+}
+
+function expectBytes(value, label, length) {
+  if (typeof value !== 'string' || value.length === 0 || value.length > 128) {
+    throw new ProtocolError(`invalid ${label}`);
+  }
+  const bytes = decodeBase64URL(value);
+  if (bytes.length !== length) throw new ProtocolError(`invalid ${label}`);
+  return bytes;
+}
+
+function bytesEqual(left, right) {
+  if (!(left instanceof Uint8Array) || !(right instanceof Uint8Array)
+      || left.length !== right.length) return false;
+  let difference = 0;
+  for (let index = 0; index < left.length; index += 1) {
+    difference |= left[index] ^ right[index];
+  }
+  return difference === 0;
+}
+
+function hasExactKeys(message, expected) {
+  const actual = Object.keys(message).sort();
+  const sortedExpected = [...expected].sort();
+  return actual.length === sortedExpected.length
+    && actual.every((key, index) => key === sortedExpected[index]);
+}
+
+/**
+ * Announce that WebAuthn is complete, then authenticate the sole terminal
+ * decision. The caller still owns the held credential/PRF result and must not
+ * release it unless this function returns `accepted`.
+ */
+export async function requestPairingRelease({
+  session,
+  verifier,
+  sessionBinding,
+  sasDigest,
+  request,
+  releaseNonce,
+}) {
+  if (!(releaseNonce instanceof Uint8Array) || releaseNonce.length !== 32) {
+    throw new ProtocolError('invalid phone release nonce');
+  }
+  session.send({
+    type: 'sas-phone-complete',
+    releaseNonce: encodeBase64URL(releaseNonce),
+  });
+
+  const message = expectObject(await session.next(150_000), 'CLI SAS decision');
+  if (typeof message.type !== 'string') {
+    throw new ProtocolError('invalid CLI SAS decision');
+  }
+  if (message.type === 'sas-cli-rejected') {
+    if (!hasExactKeys(message, ['type', 'releaseNonce'])) {
+      throw new ProtocolError('invalid CLI SAS rejection');
+    }
+    const nonce = expectBytes(message.releaseNonce, 'CLI release nonce', 32);
+    if (!bytesEqual(nonce, releaseNonce)) {
+      throw new ProtocolError('CLI rejected a different pairing instance');
+    }
+    return { kind: 'rejected' };
+  }
+  if (message.type === 'sas-cli-accepted') {
+    if (!hasExactKeys(message, ['type', 'releaseNonce', 'signature'])) {
+      throw new ProtocolError('invalid CLI SAS acceptance');
+    }
+    const nonce = expectBytes(message.releaseNonce, 'CLI release nonce', 32);
+    if (!bytesEqual(nonce, releaseNonce)) {
+      throw new ProtocolError('CLI released a different pairing instance');
+    }
+    const signature = expectBytes(message.signature, 'CLI release signature', 64);
+    await verifier.verifyPairingRelease({
+      signature,
+      sessionBinding,
+      sasDigest,
+      request,
+      releaseNonce,
+    });
+    return { kind: 'accepted', signature };
+  }
+  if (message.type === 'protocol-error') {
+    throw new ProtocolError('the CLI rejected the pairing protocol');
+  }
+  throw new ProtocolError('expected CLI SAS decision');
+}
+
 /** @param {...Uint8Array} arrays */
 function concatBytes(...arrays) {
   const result = new Uint8Array(arrays.reduce((length, array) => length + array.length, 0));
@@ -86,7 +179,6 @@ export async function createNearbySessionBinding(
   cliPublicKey,
   offer,
   answer,
-  webCrypto = globalThis.crypto,
 ) {
   if (!(cliPublicKey instanceof Uint8Array) || cliPublicKey.length !== 32
       || !(offer instanceof Uint8Array) || !(answer instanceof Uint8Array)) {
@@ -129,12 +221,6 @@ export function nearbySasRequestBytes(request) {
         lengthPrefixed(request.identity.credentialId),
       );
       break;
-    case 'pinned':
-      identity = concatBytes(
-        new Uint8Array([2]),
-        lengthPrefixed(request.identity.credentialId),
-      );
-      break;
     default:
       throw new ProtocolError('invalid SAS identity mode');
   }
@@ -163,7 +249,6 @@ export function nearbySasRequestBytes(request) {
 export async function createSasContext(
   sessionBinding,
   request,
-  webCrypto = globalThis.crypto,
 ) {
   if (!(sessionBinding instanceof Uint8Array) || sessionBinding.length !== 32) {
     throw new ProtocolError('invalid SAS session binding');
@@ -187,7 +272,6 @@ export async function createSasCommitment(
   role,
   context,
   nonce,
-  webCrypto = globalThis.crypto,
 ) {
   if (!(context instanceof Uint8Array) || context.length !== 32
       || !(nonce instanceof Uint8Array) || nonce.length !== 32) {
@@ -206,10 +290,9 @@ export async function verifySasCommitment(
   context,
   nonce,
   expected,
-  webCrypto = globalThis.crypto,
 ) {
   if (!(expected instanceof Uint8Array) || expected.length !== 32) return false;
-  const actual = await createSasCommitment(role, context, nonce, webCrypto);
+  const actual = await createSasCommitment(role, context, nonce);
   let difference = 0;
   for (let index = 0; index < actual.length; index += 1) {
     difference |= actual[index] ^ expected[index];
@@ -223,7 +306,6 @@ export async function createSasDigest(
   phoneCommitment,
   cliNonce,
   phoneNonce,
-  webCrypto = globalThis.crypto,
 ) {
   const values = [context, cliCommitment, phoneCommitment, cliNonce, phoneNonce];
   if (values.some(value => !(value instanceof Uint8Array) || value.length !== 32)) {
@@ -245,7 +327,7 @@ export function sasPhrase(digest, words) {
   return `${words[first]} ${words[second]}`;
 }
 
-export async function parseSasWordList(bytes, webCrypto = globalThis.crypto) {
+export async function parseSasWordList(bytes) {
   if (!(bytes instanceof Uint8Array) || bytes.length > 32 * 1024) {
     throw new ProtocolError('invalid SAS word list');
   }
@@ -312,14 +394,13 @@ export function nearbyIdentityProofMessage({
 }
 
 /** Derive and use the stable Ed25519 identity from WebAuthn PRF's second output. */
-export async function createNearbyIdentityProof(fields, prfSecond, webCrypto = globalThis.crypto) {
+export async function createNearbyIdentityProof(fields, prfSecond) {
   if (!(prfSecond instanceof Uint8Array) || prfSecond.length !== 32) {
     throw new ProtocolError('invalid identity PRF output');
   }
   if (!webCrypto?.subtle) throw new ProtocolError('WebCrypto is unavailable');
 
-  const seed = prfSecond.slice();
-  const pkcs8 = concatBytes(ED25519_PKCS8_SEED_PREFIX, seed);
+  const pkcs8 = concatBytes(ED25519_PKCS8_SEED_PREFIX, prfSecond);
   try {
     const privateKey = await webCrypto.subtle.importKey(
       'pkcs8',
@@ -345,7 +426,6 @@ export async function createNearbyIdentityProof(fields, prfSecond, webCrypto = g
     throw new ProtocolError('this browser cannot create the nearby Ed25519 identity proof');
   } finally {
     pkcs8.fill(0);
-    seed.fill(0);
   }
 }
 
@@ -391,9 +471,8 @@ function pairingReleaseMessage(
  * in turn authenticates every later data-channel message from the CLI.
  *
  * @param {Uint8Array} cliPublicKeyBytes exactly 32 Ed25519 public-key bytes
- * @param {Crypto} webCrypto injectable only for tests
  */
-export async function createCliOfferVerifier(cliPublicKeyBytes, webCrypto = globalThis.crypto) {
+export async function createCliOfferVerifier(cliPublicKeyBytes) {
   if (!(cliPublicKeyBytes instanceof Uint8Array) || cliPublicKeyBytes.length !== 32) {
     throw new ProtocolError('invalid nearby CLI public key');
   }
@@ -477,27 +556,6 @@ export async function createCliOfferVerifier(cliPublicKeyBytes, webCrypto = glob
   });
 }
 
-/** Construct the strictly typed, unauthenticated phone answer envelope. */
-export function createPhoneAnswer(bodyValue) {
-  let body;
-  if (bodyValue instanceof Uint8Array) {
-    body = bodyValue;
-  } else if (bodyValue instanceof ArrayBuffer) {
-    body = new Uint8Array(bodyValue);
-  } else if (typeof bodyValue === 'string') {
-    body = encoder.encode(bodyValue);
-  } else {
-    throw new ProtocolError('invalid signaling body');
-  }
-  return {
-    v: 3,
-    from: 'phone',
-    seq: 0,
-    kind: 'answer',
-    body: encodeBase64URL(body),
-  };
-}
-
 export const CLOUDFLARE_STUN_ONLY = Object.freeze([
   Object.freeze({ urls: Object.freeze(['stun:stun.cloudflare.com:3478']) }),
 ]);
@@ -538,27 +596,4 @@ export function filterCloudflareIceServers(value) {
       credential: credentials.credential,
     },
   ];
-}
-
-export function isAllowedCloudflareIceUrl(value) {
-  if (typeof value !== 'string') return false;
-  const match = /^(stun|turn|turns):([a-z0-9.-]+):(\d+)(?:\?transport=(udp|tcp))?$/i.exec(value);
-  if (!match) return false;
-  const [, rawScheme, rawHost, rawPort, rawTransport] = match;
-  const scheme = rawScheme.toLowerCase();
-  const host = rawHost.toLowerCase();
-  const port = Number(rawPort);
-  const transport = rawTransport?.toLowerCase();
-
-  if (scheme === 'stun') {
-    return host === 'stun.cloudflare.com' && port === 3478 && transport === undefined;
-  }
-  if (host !== 'turn.cloudflare.com') return false;
-  if (scheme === 'turn') {
-    return (port === 3478 && (transport === 'udp' || transport === 'tcp'))
-      || (port === 80 && transport === 'tcp');
-  }
-  return scheme === 'turns'
-    && (port === 5349 || port === 443)
-    && transport === 'tcp';
 }

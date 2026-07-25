@@ -7,24 +7,19 @@
 //! `keytap forget`, `keytap forget --all`, or the passkey is replaced.
 //!
 //! Every remembered key is tied to a *root*: a fingerprint of the WebAuthn
-//! credential that produced it. `keytap init` is the root boundary — it wipes
-//! all remembered entries and records the new credential's fingerprint as the
-//! active root. Lookups only ever consult entries under the active root, so
-//! even if that wipe partially fails, keys from a replaced passkey are never
-//! used.
+//! credential that produced it. The nearby identity file is the sole root
+//! authority. Publishing a replacement identity makes old-root entries
+//! unreachable immediately, even if their best-effort cleanup fails.
 //!
 //! Storage layout (service `keytap`, see `keychain.rs`):
 //!   account `remember:<root_id>:<name>` → value `keytap-remember-v1:<hex key>`
-//!   account `active-root`               → value `keytap-root-v1:<root_id>`
 
 use crate::keychain::{self, Keychain, KeychainError};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
 const REMEMBER_ACCOUNT_PREFIX: &str = "remember:";
-const ACTIVE_ROOT_ACCOUNT: &str = "active-root";
 const KEY_VALUE_PREFIX: &str = "keytap-remember-v1:";
-const ROOT_VALUE_PREFIX: &str = "keytap-root-v1:";
 
 /// Domain separator for credential fingerprints, so a root id can never be
 /// confused with any other hash of the credential ID.
@@ -35,10 +30,8 @@ const ROOT_ID_CONTEXT: &[u8] = b"keytap:root-id:v1:";
 /// The stores that may hold remembered keys, in lookup order: the OS keychain
 /// first, then the plain-file store. The keychain participates when this
 /// machine can open one; the file store once some `keytap remember` has
-/// stored into it (that is what brings it into existence). Each store carries
-/// its own root marker and entries, so the per-store invariants hold
-/// independently. `Err` means this machine has no store at all and carries
-/// the keychain's reason.
+/// stored into it (that is what brings it into existence). `Err` means this
+/// machine has no store at all and carries the keychain's reason.
 fn open_stores() -> Result<Vec<Box<dyn Keychain>>, KeychainError> {
     let mut stores: Vec<Box<dyn Keychain>> = Vec::new();
     let keychain_error = match keychain::open() {
@@ -57,7 +50,7 @@ fn open_stores() -> Result<Vec<Box<dyn Keychain>>, KeychainError> {
     }
 }
 
-/// Resolve a remembered key for `name` under the active root, if any store
+/// Resolve a remembered key for `name` under the authoritative root, if any store
 /// holds one. Never fails: any keychain trouble falls back to `None`, i.e. a
 /// normal passkey ceremony. `keytap remembered` surfaces the errors this path
 /// deliberately swallows (a stateless user on a keychain-less machine should
@@ -84,21 +77,7 @@ fn lookup_authorized_in(
     name: &str,
     authority: &crate::nearby_identity::RememberAuthority,
 ) -> Result<Resolution, KeychainError> {
-    let resolution = match authority.credential_id() {
-        Some(credential_id) => {
-            let authoritative_root = root_id(credential_id);
-            match read_active_root(kc)? {
-                Some(active_root) if active_root == authoritative_root => {
-                    lookup_root_in(kc, &authoritative_root, name)?
-                }
-                // Identity publication happens before best-effort cleanup.
-                // Until the marker catches up, fail closed rather than look
-                // directly into either generation's namespace.
-                Some(_) | None => Resolution::Miss,
-            }
-        }
-        None => lookup_in(kc, name)?,
-    };
+    let resolution = lookup_root_in(kc, &root_id(authority.credential_id()), name)?;
     match authority.revalidate() {
         Ok(true) => Ok(resolution),
         Ok(false) | Err(_) => Ok(Resolution::Miss),
@@ -126,12 +105,18 @@ fn resolve_write_target() -> Result<WriteTarget, KeychainError> {
     match keychain::open() {
         Ok(mut kc) => {
             probe_writable(&mut kc)?;
-            Ok(WriteTarget { store: Box::new(kc), location: "the OS keychain".to_string() })
+            Ok(WriteTarget {
+                store: Box::new(kc),
+                location: "the OS keychain".to_string(),
+            })
         }
         Err(_) => {
             let store = keychain::file::open_default()?;
             Ok(WriteTarget {
-                location: format!("{} (a plain file, not encrypted at rest)", store.path().display()),
+                location: format!(
+                    "{} (a plain file, not encrypted at rest)",
+                    store.path().display()
+                ),
                 store: Box::new(store),
             })
         }
@@ -139,16 +124,15 @@ fn resolve_write_target() -> Result<WriteTarget, KeychainError> {
 }
 
 /// Account name for the write probe below. Deliberately outside the
-/// `remember:` namespace so `remembered`, `forget`, and root rotation never
+/// `remember:` namespace so `remembered` and `forget` never
 /// see it, and self-describing in case a crash ever leaves it behind.
 const WRITE_PROBE_ACCOUNT: &str = "write-probe";
 
-/// Exercise the operations `remember` will need after the ceremony — the
-/// active-root read and a real write — so a store that would refuse them
+/// Exercise the write operations `remember` will need after the ceremony so a
+/// store that would refuse them
 /// (a keychain that needs an unlock dialog in a session that can't show one,
 /// an ACL denial) fails BEFORE the user's passkey tap, not after it.
 fn probe_writable(kc: &mut (impl Keychain + ?Sized)) -> Result<(), KeychainError> {
-    read_active_root(kc)?;
     kc.set(WRITE_PROBE_ACCOUNT, b"keytap write probe; safe to delete")?;
     kc.delete(WRITE_PROBE_ACCOUNT)?;
     Ok(())
@@ -157,26 +141,40 @@ fn probe_writable(kc: &mut (impl Keychain + ?Sized)) -> Result<(), KeychainError
 /// Store a freshly derived key under the root of the credential that produced
 /// it. Called by `keytap remember` after the ceremony.
 pub fn remember(target: &mut WriteTarget, name: &str, credential_id: &[u8], raw_key: &[u8]) {
-    match remember_in(target.store.as_mut(), name, credential_id, raw_key) {
-        Ok(RememberOutcome::Stored) => eprintln!(
+    let authority = crate::nearby_identity::remember_authority().unwrap_or_else(|error| {
+        crate::die(&format!(
+            "could not verify the current passkey identity before remembering: {error}"
+        ))
+    });
+    if authority.credential_id() != credential_id {
+        crate::die(
+            "the passkey you just used is not this machine's current passkey identity; refusing \
+             to remember a key that later commands would not use",
+        );
+    }
+    remember_root_in(
+        target.store.as_mut(),
+        name,
+        &root_id(authority.credential_id()),
+        raw_key,
+    )
+    .unwrap_or_else(|error| crate::die(&error.to_string()));
+    match authority.revalidate() {
+        Ok(true) => eprintln!(
             "Remembered '{name}' in {location}. Future keytap commands for this name will not \
              prompt until you run `keytap forget {name}` or replace the passkey.",
             location = target.location
         ),
-        Ok(RememberOutcome::RootMismatch) => crate::die(
-            "the passkey you just used is not this machine's active keytap root, so remembering \
-             under it would store a key that later commands never use. Retry and pick the \
-             previously registered passkey, or run `keytap init` to make a fresh passkey the \
-             root (that clears existing remembered keys)",
+        Ok(false) | Err(_) => crate::die(
+            "the passkey identity changed while the key was being stored; the stale entry will \
+             not be used",
         ),
-        Err(e) => crate::die(&e.to_string()),
     }
 }
 
-/// Honor a remember opt-in from the phone page (a second passkey ceremony
-/// there, or the first payload from legacy checkbox pages). Unlike
-/// `keytap remember`, storing is best-effort: the command's real job is the
-/// key it just derived, so trouble remembering warns and the command
+/// Honor a remember opt-in from the phone page's second passkey ceremony.
+/// Unlike `keytap remember`, storing is best-effort: the command's real job is
+/// the key it just derived, so trouble remembering warns and the command
 /// carries on.
 pub enum NearbyRememberOutcome {
     Stored,
@@ -206,10 +204,7 @@ pub fn remember_requested_nearby(
             return NearbyRememberOutcome::Unavailable;
         }
     };
-    if authority
-        .credential_id()
-        .is_some_and(|expected| expected != credential_id)
-    {
+    if authority.credential_id() != credential_id {
         could_not("the passkey is no longer this machine's current nearby identity");
         return NearbyRememberOutcome::Unavailable;
     }
@@ -221,8 +216,13 @@ pub fn remember_requested_nearby(
             return NearbyRememberOutcome::Unavailable;
         }
     };
-    match remember_in(target.store.as_mut(), name, credential_id, raw_key) {
-        Ok(RememberOutcome::Stored) => match authority.revalidate() {
+    match remember_root_in(
+        target.store.as_mut(),
+        name,
+        &root_id(authority.credential_id()),
+        raw_key,
+    ) {
+        Ok(()) => match authority.revalidate() {
             Ok(true) => {
                 crate::note(&format!(
                     "Remembered '{name}' in {location}, as requested on your phone. Future keytap \
@@ -237,14 +237,6 @@ pub fn remember_requested_nearby(
                 NearbyRememberOutcome::Unavailable
             }
         },
-        Ok(RememberOutcome::RootMismatch) => {
-            could_not(
-                "the passkey you just used is not this machine's active keytap root, so the stored \
-                 key would never be used. Run `keytap init` to make this passkey the root (that \
-                 clears existing remembered keys)",
-            );
-            NearbyRememberOutcome::Unavailable
-        }
         Err(e) => {
             could_not(&e.to_string());
             NearbyRememberOutcome::Unavailable
@@ -252,21 +244,34 @@ pub fn remember_requested_nearby(
     }
 }
 
-/// Delete the remembered key for `name` under the active root, from every
+/// Delete the remembered key for `name` under the authoritative root, from every
 /// store that holds one.
 pub fn forget(name: &str) {
+    let authority = crate::nearby_identity::remember_authority().unwrap_or_else(|error| {
+        crate::die(&format!(
+            "could not determine the current passkey identity: {error}; use `keytap forget --all` to clear every root"
+        ))
+    });
+    let root = root_id(authority.credential_id());
     let mut stores = open_stores().unwrap_or_else(|e| crate::die(&e.to_string()));
     let mut deleted = false;
     for store in &mut stores {
-        match forget_in(store.as_mut(), name) {
+        match forget_root_in(store.as_mut(), &root, name) {
             Ok(d) => deleted |= d,
             Err(e) => crate::die(&e.to_string()),
         }
     }
+    if !matches!(authority.revalidate(), Ok(true)) {
+        crate::die(
+            "the passkey identity changed while the remembered key was being deleted; retry",
+        );
+    }
     if deleted {
         eprintln!("Forgot '{name}'. The next keytap command for this name will prompt again.");
     } else {
-        crate::die(&format!("no remembered key named '{name}' for the current passkey"));
+        crate::die(&format!(
+            "no remembered key named '{name}' for the current passkey"
+        ));
     }
 }
 
@@ -290,19 +295,28 @@ pub fn forget_all() {
     }
 }
 
-/// Print the names remembered under the active root, one per line, across
+/// Print the names remembered under the authoritative root, one per line, across
 /// every store (each name once, even when stores overlap).
 pub fn remembered() {
+    let authority = crate::nearby_identity::remember_authority().unwrap_or_else(|error| {
+        crate::die(&format!(
+            "could not determine the current passkey identity: {error}"
+        ))
+    });
+    let root = root_id(authority.credential_id());
     let stores = open_stores().unwrap_or_else(|e| crate::die(&e.to_string()));
     let mut names: Vec<String> = Vec::new();
     for store in &stores {
-        match list_in(store.as_ref()) {
+        match list_root_in(store.as_ref(), &root) {
             Ok(mut listed) => names.append(&mut listed),
             Err(e) => crate::die(&e.to_string()),
         }
     }
     names.sort();
     names.dedup();
+    if !matches!(authority.revalidate(), Ok(true)) {
+        crate::die("the passkey identity changed while remembered keys were being listed; retry");
+    }
     if names.is_empty() {
         eprintln!("No remembered keys for the current passkey.");
     } else {
@@ -312,23 +326,9 @@ pub fn remembered() {
     }
 }
 
-/// Best-effort evidence that a passkey already serves as this machine's
-/// keytap root — the signal `init` uses to refuse a silent replacement.
-/// Errors read as "no evidence": a store that can't answer must never lock
-/// the user out of initializing.
-pub fn previously_initialized() -> bool {
-    open_stores()
-        .unwrap_or_default()
-        .iter()
-        .any(|store| matches!(read_active_root(store.as_ref()), Ok(Some(_))))
-}
-
-/// Root rotation after a successful `keytap init`: record the new credential's
-/// fingerprint as the active root and wipe every remembered entry, in every
-/// store. Must never fail init — the registration already succeeded — so
-/// trouble here is only reported, and lookups stay safe regardless because
-/// they are scoped to the active root.
-pub fn after_init(credential_id: &[u8]) {
+/// Best-effort cleanup after a successful init. Identity publication already
+/// made every old-root entry unreachable, so cleanup failure cannot revive it.
+pub fn after_init() {
     let mut stores: Vec<Box<dyn Keychain>> = Vec::new();
     match keychain::open() {
         Ok(kc) => stores.push(Box::new(kc)),
@@ -342,10 +342,9 @@ pub fn after_init(credential_id: &[u8]) {
         stores.push(Box::new(store));
     }
 
-    let root = root_id(credential_id);
     let mut removed = 0;
     for store in &mut stores {
-        match rotate_root_in(store.as_mut(), &root) {
+        match forget_all_in(store.as_mut()) {
             Ok(n) => removed += n,
             Err(e) => eprintln!(
                 "warning: {e}; couldn't fully clear remembered keys tied to the previous passkey. \
@@ -379,7 +378,9 @@ fn remember_account(root: &str, name: &str) -> String {
 /// Names may themselves contain `:`; roots are fixed-format hex, so the first
 /// separator after the prefix is unambiguous.
 fn parse_remember_account(account: &str) -> Option<(&str, &str)> {
-    account.strip_prefix(REMEMBER_ACCOUNT_PREFIX)?.split_once(':')
+    account
+        .strip_prefix(REMEMBER_ACCOUNT_PREFIX)?
+        .split_once(':')
 }
 
 fn encode_key_value(raw_key: &[u8]) -> Zeroizing<String> {
@@ -392,35 +393,12 @@ fn decode_key_value(value: &[u8]) -> Option<Zeroizing<Vec<u8>>> {
     (bytes.len() == 32).then(|| Zeroizing::new(bytes))
 }
 
-/// The active root id, or `None` when absent or unparseable (a corrupt marker
-/// self-heals: the next `init` or root-adopting `remember` rewrites it).
-fn read_active_root(kc: &(impl Keychain + ?Sized)) -> Result<Option<String>, KeychainError> {
-    let Some(value) = kc.get(ACTIVE_ROOT_ACCOUNT)? else {
-        return Ok(None);
-    };
-    Ok(std::str::from_utf8(&value)
-        .ok()
-        .and_then(|text| text.strip_prefix(ROOT_VALUE_PREFIX))
-        .map(str::to_string))
-}
-
-fn store_active_root(kc: &mut (impl Keychain + ?Sized), root: &str) -> Result<(), KeychainError> {
-    kc.set(ACTIVE_ROOT_ACCOUNT, format!("{ROOT_VALUE_PREFIX}{root}").as_bytes())
-}
-
 enum Resolution {
     Hit(Zeroizing<Vec<u8>>),
     Miss,
     /// An entry exists but its value doesn't parse; callers treat it as a
     /// miss (fall back to the ceremony) but may want to tell the user.
     Invalid,
-}
-
-fn lookup_in(kc: &(impl Keychain + ?Sized), name: &str) -> Result<Resolution, KeychainError> {
-    let Some(root) = read_active_root(kc)? else {
-        return Ok(Resolution::Miss);
-    };
-    lookup_root_in(kc, &root, name)
 }
 
 fn lookup_root_in(
@@ -437,41 +415,30 @@ fn lookup_root_in(
     })
 }
 
-enum RememberOutcome {
-    Stored,
-    /// The asserting credential differs from the active root; storing would
-    /// create an entry lookups can never legitimately serve.
-    RootMismatch,
-}
-
-fn remember_in(
+fn remember_root_in(
     kc: &mut (impl Keychain + ?Sized),
     name: &str,
-    credential_id: &[u8],
+    root: &str,
     raw_key: &[u8],
-) -> Result<RememberOutcome, KeychainError> {
-    let root = root_id(credential_id);
-    match read_active_root(kc)? {
-        // Inits that predate remembered keys stored no root marker; adopt the
-        // credential that just asserted as the active root.
-        None => store_active_root(kc, &root)?,
-        Some(active) if active != root => return Ok(RememberOutcome::RootMismatch),
-        Some(_) => {}
-    }
-    kc.set(&remember_account(&root, name), encode_key_value(raw_key).as_bytes())?;
-    Ok(RememberOutcome::Stored)
+) -> Result<(), KeychainError> {
+    kc.set(
+        &remember_account(&root, name),
+        encode_key_value(raw_key).as_bytes(),
+    )?;
+    Ok(())
 }
 
-/// Whether the entry for `name` under the active root existed (and was deleted).
-fn forget_in(kc: &mut (impl Keychain + ?Sized), name: &str) -> Result<bool, KeychainError> {
-    let Some(root) = read_active_root(kc)? else {
-        return Ok(false);
-    };
+/// Whether the entry for `name` under `root` existed (and was deleted).
+fn forget_root_in(
+    kc: &mut (impl Keychain + ?Sized),
+    root: &str,
+    name: &str,
+) -> Result<bool, KeychainError> {
     kc.delete(&remember_account(&root, name))
 }
 
 /// Delete every `remember:*` entry regardless of root; returns how many.
-/// Leaves the active-root marker and any user-managed entries alone.
+/// Leaves unrelated user-managed entries alone.
 fn forget_all_in(kc: &mut (impl Keychain + ?Sized)) -> Result<usize, KeychainError> {
     let mut deleted = 0;
     for account in kc.accounts()? {
@@ -482,11 +449,8 @@ fn forget_all_in(kc: &mut (impl Keychain + ?Sized)) -> Result<usize, KeychainErr
     Ok(deleted)
 }
 
-/// Names remembered under the active root, sorted.
-fn list_in(kc: &(impl Keychain + ?Sized)) -> Result<Vec<String>, KeychainError> {
-    let Some(root) = read_active_root(kc)? else {
-        return Ok(Vec::new());
-    };
+/// Names remembered under `root`, sorted.
+fn list_root_in(kc: &(impl Keychain + ?Sized), root: &str) -> Result<Vec<String>, KeychainError> {
     let accounts = kc.accounts()?;
     let mut names: Vec<String> = accounts
         .iter()
@@ -499,15 +463,6 @@ fn list_in(kc: &(impl Keychain + ?Sized)) -> Result<Vec<String>, KeychainError> 
     Ok(names)
 }
 
-/// Make `new_root` the active root, then wipe every remembered entry from any
-/// root. Ordered so that even a partial failure leaves stale entries
-/// unreachable: once the marker points at the new root, lookups can no longer
-/// see them.
-fn rotate_root_in(kc: &mut (impl Keychain + ?Sized), new_root: &str) -> Result<usize, KeychainError> {
-    store_active_root(kc, new_root)?;
-    forget_all_in(kc)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -518,10 +473,6 @@ mod tests {
     const CRED_1: &[u8] = b"credential-one";
     const CRED_2: &[u8] = b"credential-two";
 
-    fn assert_stored(outcome: RememberOutcome) {
-        assert!(matches!(outcome, RememberOutcome::Stored));
-    }
-
     /// A store that answers reads but refuses writes, like a keychain that
     /// can't show its unlock dialog.
     struct ReadOnlyKeychain;
@@ -531,10 +482,14 @@ mod tests {
             Ok(None)
         }
         fn set(&mut self, _: &str, _: &[u8]) -> Result<(), KeychainError> {
-            Err(KeychainError::Backend("interaction not allowed".to_string()))
+            Err(KeychainError::Backend(
+                "interaction not allowed".to_string(),
+            ))
         }
         fn delete(&mut self, _: &str) -> Result<bool, KeychainError> {
-            Err(KeychainError::Backend("interaction not allowed".to_string()))
+            Err(KeychainError::Backend(
+                "interaction not allowed".to_string(),
+            ))
         }
         fn accounts(&self) -> Result<Vec<String>, KeychainError> {
             Ok(Vec::new())
@@ -545,7 +500,10 @@ mod tests {
     fn probe_passes_on_a_working_store_and_leaves_no_trace() {
         let mut kc = MemoryKeychain::default();
         probe_writable(&mut kc).unwrap();
-        assert!(kc.accounts().unwrap().is_empty(), "the probe must clean up after itself");
+        assert!(
+            kc.accounts().unwrap().is_empty(),
+            "the probe must clean up after itself"
+        );
     }
 
     #[test]
@@ -564,85 +522,67 @@ mod tests {
     #[test]
     fn remember_then_lookup_round_trips() {
         let mut kc = MemoryKeychain::default();
-        assert_stored(remember_in(&mut kc, "deploy", CRED_1, &KEY_A).unwrap());
-        match lookup_in(&kc, "deploy").unwrap() {
+        let root = root_id(CRED_1);
+        remember_root_in(&mut kc, "deploy", &root, &KEY_A).unwrap();
+        match lookup_root_in(&kc, &root, "deploy").unwrap() {
             Resolution::Hit(key) => assert_eq!(&key[..], &KEY_A),
             _ => panic!("expected a hit"),
         }
         // A name that was never remembered stays a miss.
-        assert!(matches!(lookup_in(&kc, "other").unwrap(), Resolution::Miss));
+        assert!(matches!(
+            lookup_root_in(&kc, &root, "other").unwrap(),
+            Resolution::Miss
+        ));
     }
 
     /// The full remember policy over the plain-file store: it is just another
-    /// `Keychain`, so root scoping and rotation behave exactly as they do in
+    /// `Keychain`, so root scoping and cleanup behave exactly as they do in
     /// the OS keychain.
     #[test]
     fn remember_policy_holds_over_the_file_store() {
-        let dir = std::env::temp_dir()
-            .join(format!("keytap-remember-file-test-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("keytap-remember-file-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let mut store = crate::keychain::file::FileStore::at(dir.join("remembered.json"));
 
-        assert_stored(remember_in(&mut store, "deploy", CRED_1, &KEY_A).unwrap());
-        match lookup_in(&store, "deploy").unwrap() {
+        let root_one = root_id(CRED_1);
+        let root_two = root_id(CRED_2);
+        remember_root_in(&mut store, "deploy", &root_one, &KEY_A).unwrap();
+        match lookup_root_in(&store, &root_one, "deploy").unwrap() {
             Resolution::Hit(key) => assert_eq!(&key[..], &KEY_A),
             _ => panic!("expected a hit"),
         }
 
-        // A different credential can't overwrite entries under the active root.
+        remember_root_in(&mut store, "deploy", &root_two, &KEY_B).unwrap();
+        match lookup_root_in(&store, &root_one, "deploy").unwrap() {
+            Resolution::Hit(key) => assert_eq!(&key[..], &KEY_A),
+            _ => panic!("the other root must not overwrite this one"),
+        }
+        assert_eq!(forget_all_in(&mut store).unwrap(), 2);
         assert!(matches!(
-            remember_in(&mut store, "deploy", CRED_2, &KEY_B).unwrap(),
-            RememberOutcome::RootMismatch
+            lookup_root_in(&store, &root_one, "deploy").unwrap(),
+            Resolution::Miss
         ));
-
-        // Root rotation wipes the file store like any other store.
-        assert_eq!(rotate_root_in(&mut store, &root_id(CRED_2)).unwrap(), 1);
-        assert!(matches!(lookup_in(&store, "deploy").unwrap(), Resolution::Miss));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn first_remember_adopts_the_asserting_credential_as_root() {
+    fn lookup_is_scoped_to_the_authoritative_root() {
         let mut kc = MemoryKeychain::default();
-        assert!(read_active_root(&kc).unwrap().is_none());
-        assert_stored(remember_in(&mut kc, "deploy", CRED_1, &KEY_A).unwrap());
-        assert_eq!(read_active_root(&kc).unwrap().unwrap(), root_id(CRED_1));
-    }
-
-    #[test]
-    fn remember_refuses_a_credential_that_is_not_the_active_root() {
-        let mut kc = MemoryKeychain::default();
-        assert_stored(remember_in(&mut kc, "deploy", CRED_1, &KEY_A).unwrap());
-        assert!(matches!(
-            remember_in(&mut kc, "deploy", CRED_2, &KEY_B).unwrap(),
-            RememberOutcome::RootMismatch
-        ));
-        // The original entry is untouched.
-        match lookup_in(&kc, "deploy").unwrap() {
-            Resolution::Hit(key) => assert_eq!(&key[..], &KEY_A),
-            _ => panic!("expected the original key"),
-        }
-    }
-
-    #[test]
-    fn lookup_is_scoped_to_the_active_root() {
-        let mut kc = MemoryKeychain::default();
-        // An entry under some other root must never be served…
         kc.set(
             &remember_account(&root_id(CRED_2), "deploy"),
             encode_key_value(&KEY_B).as_bytes(),
         )
         .unwrap();
-        store_active_root(&mut kc, &root_id(CRED_1)).unwrap();
-        assert!(matches!(lookup_in(&kc, "deploy").unwrap(), Resolution::Miss));
-        // …and without any active root, nothing resolves at all.
-        kc.delete(ACTIVE_ROOT_ACCOUNT).unwrap();
-        assert!(matches!(lookup_in(&kc, "deploy").unwrap(), Resolution::Miss));
+        assert!(matches!(
+            lookup_root_in(&kc, &root_id(CRED_1), "deploy").unwrap(),
+            Resolution::Miss
+        ));
     }
 
     #[test]
-    fn identity_commit_revokes_old_root_before_keychain_rotation() {
+    fn identity_commit_revokes_old_root_before_keychain_cleanup() {
         let path = std::env::temp_dir()
             .join(format!(
                 "keytap-remember-identity-authority-test-{}",
@@ -659,7 +599,7 @@ mod tests {
         .commit(CRED_1)
         .unwrap();
         let mut kc = MemoryKeychain::default();
-        assert_stored(remember_in(&mut kc, "deploy", CRED_1, &KEY_A).unwrap());
+        remember_root_in(&mut kc, "deploy", &root_id(CRED_1), &KEY_A).unwrap();
         let replacement = crate::nearby_identity::prepare_init_at(
             path.clone(),
             crate::nearby_identity::InitMode::Replace,
@@ -668,7 +608,7 @@ mod tests {
         replacement.commit(CRED_2).unwrap();
 
         // This models a crash immediately after identity publication and
-        // before after_init rotates the keychain marker away from CRED_1.
+        // before after_init removes the stale keychain entry.
         let authority = crate::nearby_identity::remember_authority_at(path.clone()).unwrap();
         assert!(matches!(
             lookup_authorized_in(&kc, "deploy", &authority).unwrap(),
@@ -678,41 +618,50 @@ mod tests {
     }
 
     #[test]
-    fn init_rotation_wipes_all_roots_and_sets_the_new_one() {
+    fn init_cleanup_wipes_all_roots() {
         let mut kc = MemoryKeychain::default();
-        assert_stored(remember_in(&mut kc, "deploy", CRED_1, &KEY_A).unwrap());
-        assert_stored(remember_in(&mut kc, "backup", CRED_1, &KEY_B).unwrap());
+        remember_root_in(&mut kc, "deploy", &root_id(CRED_1), &KEY_A).unwrap();
+        remember_root_in(&mut kc, "backup", &root_id(CRED_1), &KEY_B).unwrap();
         // A stray entry from an even older root is wiped too.
         kc.set(
             &remember_account(&root_id(b"ancient"), "old"),
             encode_key_value(&KEY_B).as_bytes(),
         )
         .unwrap();
-        // A user-managed entry under the keytap service survives rotation.
+        // A user-managed entry under the keytap service survives cleanup.
         kc.set("deploy", b"user-managed").unwrap();
 
-        assert_eq!(rotate_root_in(&mut kc, &root_id(CRED_2)).unwrap(), 3);
-        assert_eq!(read_active_root(&kc).unwrap().unwrap(), root_id(CRED_2));
-        assert!(list_in(&kc).unwrap().is_empty());
-        assert!(matches!(lookup_in(&kc, "deploy").unwrap(), Resolution::Miss));
+        assert_eq!(forget_all_in(&mut kc).unwrap(), 3);
+        assert!(list_root_in(&kc, &root_id(CRED_1)).unwrap().is_empty());
+        assert!(matches!(
+            lookup_root_in(&kc, &root_id(CRED_1), "deploy").unwrap(),
+            Resolution::Miss
+        ));
         assert_eq!(&kc.get("deploy").unwrap().unwrap()[..], b"user-managed");
     }
 
     #[test]
     fn forget_removes_only_the_named_entry() {
         let mut kc = MemoryKeychain::default();
-        assert_stored(remember_in(&mut kc, "deploy", CRED_1, &KEY_A).unwrap());
-        assert_stored(remember_in(&mut kc, "backup", CRED_1, &KEY_B).unwrap());
-        assert!(forget_in(&mut kc, "deploy").unwrap());
-        assert!(!forget_in(&mut kc, "deploy").unwrap(), "already gone");
-        assert!(!forget_in(&mut kc, "never-stored").unwrap());
-        assert_eq!(list_in(&kc).unwrap(), vec!["backup".to_string()]);
+        let root = root_id(CRED_1);
+        remember_root_in(&mut kc, "deploy", &root, &KEY_A).unwrap();
+        remember_root_in(&mut kc, "backup", &root, &KEY_B).unwrap();
+        assert!(forget_root_in(&mut kc, &root, "deploy").unwrap());
+        assert!(
+            !forget_root_in(&mut kc, &root, "deploy").unwrap(),
+            "already gone"
+        );
+        assert!(!forget_root_in(&mut kc, &root, "never-stored").unwrap());
+        assert_eq!(
+            list_root_in(&kc, &root).unwrap(),
+            vec!["backup".to_string()]
+        );
     }
 
     #[test]
     fn forget_all_clears_every_root_but_spares_everything_else() {
         let mut kc = MemoryKeychain::default();
-        assert_stored(remember_in(&mut kc, "deploy", CRED_1, &KEY_A).unwrap());
+        remember_root_in(&mut kc, "deploy", &root_id(CRED_1), &KEY_A).unwrap();
         kc.set(
             &remember_account(&root_id(CRED_2), "stale"),
             encode_key_value(&KEY_B).as_bytes(),
@@ -722,51 +671,46 @@ mod tests {
 
         assert_eq!(forget_all_in(&mut kc).unwrap(), 2);
         assert_eq!(forget_all_in(&mut kc).unwrap(), 0, "idempotent");
-        // The root marker and user-managed entries are not "remembered keys".
-        assert!(read_active_root(&kc).unwrap().is_some());
+        // User-managed entries are not "remembered keys".
         assert_eq!(&kc.get("deploy").unwrap().unwrap()[..], b"user-managed");
     }
 
     #[test]
-    fn list_reports_names_for_the_active_root_sorted() {
+    fn list_reports_names_for_one_root_sorted() {
         let mut kc = MemoryKeychain::default();
-        assert_stored(remember_in(&mut kc, "zeta", CRED_1, &KEY_A).unwrap());
-        assert_stored(remember_in(&mut kc, "alpha", CRED_1, &KEY_B).unwrap());
+        let root = root_id(CRED_1);
+        remember_root_in(&mut kc, "zeta", &root, &KEY_A).unwrap();
+        remember_root_in(&mut kc, "alpha", &root, &KEY_B).unwrap();
         // Names may contain the account separator.
-        assert_stored(remember_in(&mut kc, "ns:key", CRED_1, &KEY_A).unwrap());
+        remember_root_in(&mut kc, "ns:key", &root, &KEY_A).unwrap();
         kc.set(
             &remember_account(&root_id(CRED_2), "foreign"),
             encode_key_value(&KEY_B).as_bytes(),
         )
         .unwrap();
 
-        assert_eq!(list_in(&kc).unwrap(), vec!["alpha", "ns:key", "zeta"]);
+        assert_eq!(
+            list_root_in(&kc, &root).unwrap(),
+            vec!["alpha", "ns:key", "zeta"]
+        );
     }
 
     #[test]
     fn malformed_entries_resolve_to_invalid_not_a_key() {
         let mut kc = MemoryKeychain::default();
         let root = root_id(CRED_1);
-        store_active_root(&mut kc, &root).unwrap();
         for bad in [
-            b"garbage".as_slice(),                       // no prefix
-            b"keytap-remember-v1:zz".as_slice(),         // not hex
-            b"keytap-remember-v1:aabb".as_slice(),       // wrong length
-            b"\xff\xfe".as_slice(),                      // not UTF-8
+            b"garbage".as_slice(),                 // no prefix
+            b"keytap-remember-v1:zz".as_slice(),   // not hex
+            b"keytap-remember-v1:aabb".as_slice(), // wrong length
+            b"\xff\xfe".as_slice(),                // not UTF-8
         ] {
             kc.set(&remember_account(&root, "deploy"), bad).unwrap();
-            assert!(matches!(lookup_in(&kc, "deploy").unwrap(), Resolution::Invalid));
+            assert!(matches!(
+                lookup_root_in(&kc, &root, "deploy").unwrap(),
+                Resolution::Invalid
+            ));
         }
-    }
-
-    #[test]
-    fn corrupt_active_root_marker_reads_as_absent_and_self_heals() {
-        let mut kc = MemoryKeychain::default();
-        kc.set(ACTIVE_ROOT_ACCOUNT, b"not-a-root-marker").unwrap();
-        assert!(read_active_root(&kc).unwrap().is_none());
-        // The next remember adopts a fresh root over the corrupt marker.
-        assert_stored(remember_in(&mut kc, "deploy", CRED_1, &KEY_A).unwrap());
-        assert_eq!(read_active_root(&kc).unwrap().unwrap(), root_id(CRED_1));
     }
 
     #[test]

@@ -4,7 +4,6 @@ import {
   createCliOfferVerifier,
   createNearbyIdentityProof,
   createNearbySessionBinding,
-  createPhoneAnswer,
   createSasCommitment,
   createSasContext,
   createSasDigest,
@@ -12,10 +11,10 @@ import {
   encodeBase64URL,
   filterCloudflareIceServers,
   parseSasWordList,
+  requestPairingRelease,
   sasPhrase,
   verifySasCommitment,
 } from './nearby-v2-protocol.js';
-import { requestPairingRelease } from './nearby-v2-pairing.js';
 
 const RELAY_ORIGIN = 'https://keytap-relay.julsh.workers.dev';
 const SIGNAL_OPEN_TIMEOUT_MS = 30_000;
@@ -88,20 +87,15 @@ function alertUser(...parts) {
  * @typedef {AssertionData & {expiryAt: number}} OfferData
  * @typedef {OfferData & {controller: AbortController}} RememberCeremonyData
  * @typedef {{credentialId: Uint8Array, prfFirst: Uint8Array, identity: object}} FirstResult
- * @typedef {{session: DataSession, verifier: CliOfferVerifier, sessionBinding: Uint8Array, binding: {kind: 'bootstrap-sas', digest: Uint8Array}, phrase: string}} PairingBaseData
+ * @typedef {{session: DataSession, verifier: CliOfferVerifier, sessionBinding: Uint8Array, binding: {kind: 'bootstrap-sas', digest: Uint8Array}}} PairingBaseData
  * @typedef {((PairingBaseData & {kind: 'registration', request: RegisterRequest}) | (PairingBaseData & {kind: 'assertion', request: AssertRequest})) & {controller: AbortController}} PairingCeremonyData
- * @typedef {(PairingBaseData & {kind: 'registration', request: RegisterRequest, credential: PublicKeyCredential, releaseNonce: Uint8Array}) | (PairingBaseData & {kind: 'assertion', request: AssertRequest, result: FirstResult, releaseNonce: Uint8Array})} PairingHeldData
+ * @typedef {{session: DataSession, kind: 'registration', credential: PublicKeyCredential, releaseNonce: Uint8Array} | {session: DataSession, kind: 'assertion', result: FirstResult, releaseNonce: Uint8Array}} PairingHeldData
  * @typedef {{verifyPairingRelease: (fields: object) => Promise<void>}} CliOfferVerifier
- * @typedef {{kind: 'bootstrap-sas', digest: Uint8Array} | {kind: 'pinned-session', digest: Uint8Array}} ProofBinding
- * @typedef {
- *   RegisterRequest |
- *   AssertRequest
- * } NearbyRequest
  * @typedef {{kind: 'register', challenge: Uint8Array, prfSalt: Uint8Array, userId: Uint8Array, userName: string}} RegisterRequest
  * @typedef {{kind: 'assert', challenge: Uint8Array, prfSalt: Uint8Array, identitySalt: Uint8Array, identity: IdentityMode, keyName: string, remember: RememberMode}} AssertRequest
  * @typedef {{kind: 'pairing-any'} | {kind: 'pairing-credential', credentialId: Uint8Array} | {kind: 'pinned', credentialId: Uint8Array}} IdentityMode
  * @typedef {{kind: 'disabled'} | {kind: 'available', windowSecs: number}} RememberMode
- * @typedef {{send: (message: object) => void, next: (timeoutMs?: number) => Promise<object>, close: () => void, isOpen: () => boolean}} DataSession
+ * @typedef {{send: (message: object) => void, next: (timeoutMs?: number) => Promise<object>, close: () => void}} DataSession
  */
 
 /** @type {Phase} */
@@ -328,7 +322,7 @@ async function waitForOffer(signal) {
 }
 
 async function fetchIceServers(rendezvousId, cancellation) {
-  const url = `${RELAY_ORIGIN}/v2/signal/${encodeURIComponent(rendezvousId)}/turn/phone`;
+  const url = `${RELAY_ORIGIN}/v2/signal/${encodeURIComponent(rendezvousId)}/turn`;
   let response;
   try {
     response = await fetch(url, {
@@ -348,10 +342,7 @@ async function fetchIceServers(rendezvousId, cancellation) {
   } catch {
     throw new ProtocolError('invalid TURN response');
   }
-  const rawServers = Array.isArray(payload?.iceServers)
-    ? payload.iceServers
-    : payload?.result?.iceServers;
-  return filterCloudflareIceServers(rawServers);
+  return filterCloudflareIceServers(payload?.iceServers);
 }
 
 async function readBoundedJson(response, maximumBytes) {
@@ -451,7 +442,6 @@ function expectDataChannel(peer) {
         reject(new ProtocolError('the CLI opened an invalid data channel'));
         return;
       }
-      channel.binaryType = 'arraybuffer';
       waitForDataChannelOpen(channel).then(() => {
         clearTimeout(timer);
         peer.removeEventListener('connectionstatechange', rejectOnFailure);
@@ -477,20 +467,10 @@ function makeDataSession(peer, channel) {
   const incoming = new AsyncQueue();
   let decodeChain = Promise.resolve();
   channel.addEventListener('message', event => {
-    decodeChain = decodeChain.then(async () => {
-      let text;
-      if (typeof event.data === 'string') {
-        if (encoder.encode(event.data).length > MAX_DATA_BYTES) throw new ProtocolError('data message is too large');
-        text = event.data;
-      } else if (event.data instanceof ArrayBuffer) {
-        if (event.data.byteLength > MAX_DATA_BYTES) throw new ProtocolError('data message is too large');
-        text = decoder.decode(event.data);
-      } else if (event.data instanceof Blob) {
-        if (event.data.size > MAX_DATA_BYTES) throw new ProtocolError('data message is too large');
-        text = decoder.decode(await event.data.arrayBuffer());
-      } else {
-        throw new ProtocolError('invalid data message');
-      }
+    decodeChain = decodeChain.then(() => {
+      if (typeof event.data !== 'string') throw new ProtocolError('invalid data message');
+      if (encoder.encode(event.data).length > MAX_DATA_BYTES) throw new ProtocolError('data message is too large');
+      const text = event.data;
       const message = JSON.parse(text);
       if (!message || typeof message !== 'object' || Array.isArray(message)) {
         throw new ProtocolError('invalid data message');
@@ -519,9 +499,6 @@ function makeDataSession(peer, channel) {
     close() {
       try { channel.close(); } catch { /* already closed */ }
       try { peer.close(); } catch { /* already closed */ }
-    },
-    isOpen() {
-      return channel.readyState === 'open';
     },
   };
 }
@@ -574,7 +551,13 @@ async function establishPrivateChannel(verifier, cancellation) {
       if (typeof answerSdp !== 'string' || answerSdp.length === 0) {
         throw new ProtocolError('could not create a complete WebRTC answer');
       }
-      signaling.send(createPhoneAnswer(answerSdp));
+      signaling.send({
+        v: 3,
+        from: 'phone',
+        seq: 0,
+        kind: 'answer',
+        body: encodeBase64URL(encoder.encode(answerSdp)),
+      });
       const channel = await abortable(channelPromise, cancellation);
       if (channel.kind === 'failed') throw channel.error;
       const sessionBinding = await abortable(createNearbySessionBinding(
@@ -616,8 +599,8 @@ function expectBytes(value, label, minimum, maximum) {
 
 function parseRequest(message) {
   expectObject(message, 'request message');
-  if (message.v !== 3 || (message.type !== 'request' && message.type !== 'pairing-request')) {
-    throw new ProtocolError('expected a v3 request');
+  if (message.type !== 'request' && message.type !== 'pairing-request') {
+    throw new ProtocolError('expected a nearby request');
   }
   const request = expectObject(message.request, 'request');
   const challenge = expectBytes(request.challenge, 'challenge', 16, 128);
@@ -703,7 +686,7 @@ function parseInitialRequest(message) {
 
 async function nextSasCliReveal(session) {
   const message = expectObject(await session.next(), 'CLI SAS reveal');
-  if (message.v !== 3 || message.type !== 'sas-cli-reveal') {
+  if (message.type !== 'sas-cli-reveal') {
     throw new ProtocolError('expected CLI SAS reveal');
   }
   return expectBytes(message.nonce, 'CLI pairing nonce', 32, 32);
@@ -711,30 +694,28 @@ async function nextSasCliReveal(session) {
 
 async function startPairing(session, request, sessionBinding, cliCommitment, verifier) {
   const context = await createSasContext(sessionBinding, request);
-  if (!isAwaitingRequest(session)) return;
+  if (phase.kind !== 'awaiting-request' || phase.session !== session) return;
   const phoneNonce = crypto.getRandomValues(new Uint8Array(32));
   const phoneCommitment = await createSasCommitment('phone', context, phoneNonce);
-  if (!isAwaitingRequest(session)) {
+  if (phase.kind !== 'awaiting-request' || phase.session !== session) {
     phoneNonce.fill(0);
     return;
   }
   session.send({
-    v: 3,
     type: 'sas-phone-commit',
     commitment: encodeBase64URL(phoneCommitment),
   });
   const cliNonce = await nextSasCliReveal(session);
-  if (!isAwaitingRequest(session)) {
+  if (phase.kind !== 'awaiting-request' || phase.session !== session) {
     phoneNonce.fill(0);
     cliNonce.fill(0);
     return;
   }
   if (!await verifySasCommitment('cli', context, cliNonce, cliCommitment)) {
-    session.send({ v: 3, type: 'sas-phone-rejected' });
+    session.send({ type: 'sas-phone-rejected' });
     throw new ProtocolError('the CLI did not open its pairing commitment');
   }
   session.send({
-    v: 3,
     type: 'sas-phone-reveal',
     nonce: encodeBase64URL(phoneNonce),
   });
@@ -748,13 +729,11 @@ async function startPairing(session, request, sessionBinding, cliCommitment, ver
   cliNonce.fill(0);
   phoneNonce.fill(0);
   const words = await loadSasWords();
-  if (!isAwaitingRequest(session)) {
+  if (phase.kind !== 'awaiting-request' || phase.session !== session) {
     digest.fill(0);
     return;
   }
-  const phrase = sasPhrase(digest, words);
-
-  $('pairing-words').textContent = phrase;
+  $('pairing-words').textContent = sasPhrase(digest, words);
   $('pairing').hidden = false;
   $('start').hidden = true;
   $('title').textContent = request.kind === 'register'
@@ -768,17 +747,12 @@ async function startPairing(session, request, sessionBinding, cliCommitment, ver
     verifier,
     sessionBinding,
     binding: { kind: 'bootstrap-sas', digest },
-    phrase,
   };
   const data = request.kind === 'register'
     ? { ...base, kind: 'registration', request, controller: new AbortController() }
     : { ...base, kind: 'assertion', request, controller: new AbortController() };
   phase = { kind: 'pairing-ceremony', data };
   await runPairingCeremony(data);
-}
-
-function isAwaitingRequest(session) {
-  return phase.kind === 'awaiting-request' && phase.session === session;
 }
 
 function discardHeld(data) {
@@ -805,7 +779,7 @@ async function runPairingCeremony(data) {
     }
   } catch (error) {
     if (phase.kind !== 'pairing-ceremony' || phase.data !== data) return;
-    try { data.session.send({ v: 3, type: 'sas-phone-rejected' }); } catch { /* closed */ }
+    try { data.session.send({ type: 'sas-phone-rejected' }); } catch { /* closed */ }
     failSession(data.session, error);
     return;
   }
@@ -815,18 +789,19 @@ async function runPairingCeremony(data) {
     return;
   }
   const releaseNonce = crypto.getRandomValues(new Uint8Array(32));
-  const heldBase = {
-    session: data.session,
-    verifier: data.verifier,
-    sessionBinding: data.sessionBinding,
-    binding: data.binding,
-    phrase: data.phrase,
-    kind: data.kind,
-    request: data.request,
-  };
   const heldData = completed.kind === 'registration'
-    ? { ...heldBase, credential: completed.credential, releaseNonce }
-    : { ...heldBase, result: completed.result, releaseNonce };
+    ? {
+      session: data.session,
+      kind: 'registration',
+      credential: completed.credential,
+      releaseNonce,
+    }
+    : {
+      session: data.session,
+      kind: 'assertion',
+      result: completed.result,
+      releaseNonce,
+    };
   phase = { kind: 'pairing-held', data: heldData };
   say('Phone complete. Within two minutes, confirm the same words once in your terminal; you do not need to return here.');
   $('pairing-words').focus();
@@ -862,7 +837,6 @@ async function runPairingCeremony(data) {
     $('pairing').hidden = true;
     if (heldData.kind === 'registration') {
       data.session.send({
-        v: 3,
         type: 'paired-registration-result',
         credentialId: encodeBase64URL(heldData.credential.rawId),
         releaseSignature: encodeBase64URL(decision.signature),
@@ -896,9 +870,9 @@ async function runPairingCeremony(data) {
 
 async function nextCliMessage(session, expectedType) {
   const message = expectObject(await session.next(), 'CLI message');
-  if (message.v !== 3 || typeof message.type !== 'string') throw new ProtocolError('invalid CLI message');
+  if (typeof message.type !== 'string') throw new ProtocolError('invalid CLI message');
   if (message.type === 'protocol-error') {
-    const codes = new Set(['invalid-message', 'unexpected-message', 'remember-mismatch']);
+    const codes = new Set(['invalid-message', 'unexpected-message']);
     if (!codes.has(message.code)) throw new ProtocolError('invalid CLI protocol error');
     throw new ProtocolError(`the CLI rejected the request (${message.code})`);
   }
@@ -965,7 +939,7 @@ export function sessionFailureMessage(error, phaseKind) {
 
 async function nextRememberOutcome(session) {
   const message = expectObject(await session.next(), 'CLI message');
-  if (message.v !== 3 || typeof message.type !== 'string') throw new ProtocolError('invalid CLI message');
+  if (typeof message.type !== 'string') throw new ProtocolError('invalid CLI message');
   if (message.type === 'remember-accepted') return { kind: 'accepted' };
   if (message.type === 'remember-rejected' && message.reason === 'mismatch') {
     return { kind: 'rejected', reason: 'mismatch' };
@@ -974,7 +948,7 @@ async function nextRememberOutcome(session) {
     return { kind: 'rejected', reason: 'unavailable' };
   }
   if (message.type === 'protocol-error') {
-    const codes = new Set(['invalid-message', 'unexpected-message', 'remember-mismatch']);
+    const codes = new Set(['invalid-message', 'unexpected-message']);
     if (!codes.has(message.code)) throw new ProtocolError('invalid CLI protocol error');
     throw new ProtocolError(`the CLI rejected the request (${message.code})`);
   }
@@ -1073,7 +1047,6 @@ async function runRememberAssertion(request, allowCredentialId, signal) {
 function sendAssertionResult(session, result) {
   try {
     session.send({
-      v: 3,
       type: 'assertion-result',
       credentialId: encodeBase64URL(result.credentialId),
       prfFirst: encodeBase64URL(result.prfFirst),
@@ -1087,7 +1060,6 @@ function sendAssertionResult(session, result) {
 function sendPairedAssertionResult(session, result, releaseSignature) {
   try {
     session.send({
-      v: 3,
       type: 'paired-assertion-result',
       credentialId: encodeBase64URL(result.credentialId),
       prfFirst: encodeBase64URL(result.prfFirst),
@@ -1116,11 +1088,6 @@ function configurePinnedRequest(session, request, sessionBinding) {
   say('Ready.');
   phase = { kind: 'ready', data: { session, request, sessionBinding } };
   runFirst();
-}
-
-function renderSecurityModel() {
-  const paragraph = $('details').querySelector('p');
-  paragraph.textContent = 'The QR contains a fresh CLI public key, not a secret. The phone verifies the signed WebRTC offer before using it, and WebRTC encrypts the data channel even through TURN. On first use, this phone completes WebAuthn and holds the result; you compare the two commit–reveal words and confirm only in the terminal. The CLI then signs a release bound to this exact session, request, full word digest, and a fresh post-WebAuthn nonce. The words authenticate the phone to the CLI with a one-in-4,194,304 collision chance per fresh approved pairing; later requests use the pinned passkey-derived identity. A QR reader or signaling service can race the phone side or deny service, and the webpage itself must remain trusted. Remembering requires a second approval.';
 }
 
 async function runFirst() {
@@ -1262,7 +1229,7 @@ function scheduleExpiry() {
 function expireOffer() {
   if (phase.kind !== 'offer') return;
   const { session, request } = phase.data;
-  try { session.send({ v: 3, type: 'done' }); } catch { /* the CLI already left */ }
+  try { session.send({ type: 'done' }); } catch { /* the CLI already left */ }
   phase = { kind: 'finished' };
   $('offer').hidden = true;
   document.title = 'keytap: finished';
@@ -1282,7 +1249,7 @@ async function onRemember() {
   phase = { kind: 'remember-begin', data: beginData };
   say('Checking that your CLI is still waiting…');
   try {
-    beginData.session.send({ v: 3, type: 'remember-begin' });
+    beginData.session.send({ type: 'remember-begin' });
     await nextCliMessage(beginData.session, 'remember-ready');
     if (phase.kind !== 'remember-begin' || phase.data !== beginData) return;
     const ceremonyData = {
@@ -1304,7 +1271,6 @@ async function onRemember() {
     }
     try {
       ceremonyData.session.send({
-        v: 3,
         type: 'remember-result',
         credentialId: encodeBase64URL(result.credentialId),
         prfFirst: encodeBase64URL(result.prfFirst),
@@ -1354,7 +1320,7 @@ async function onRemember() {
     if (phase.kind === 'finished' || phase.kind === 'failed') return;
     if (isCancel(error) && phase.kind === 'remember-ceremony') {
       const { session } = phase.data;
-      try { session.send({ v: 3, type: 'done' }); } catch { /* already closed */ }
+      try { session.send({ type: 'done' }); } catch { /* already closed */ }
       phase = { kind: 'finished' };
       $('offer').hidden = true;
       document.title = 'keytap: sent';
@@ -1373,7 +1339,7 @@ function onDone() {
   clearTimeout(expiryTimer);
   phase = { kind: 'finished' };
   setOfferButtonsDisabled(true);
-  try { session.send({ v: 3, type: 'done' }); } catch { /* the CLI already left */ }
+  try { session.send({ type: 'done' }); } catch { /* the CLI already left */ }
   $('offer').hidden = true;
   document.title = 'keytap: finished';
   say('Done. You can close this page.');
@@ -1412,7 +1378,6 @@ function failBeforeSession(error) {
 }
 
 export async function main() {
-  renderSecurityModel();
   $('title').textContent = 'Connecting to your CLI';
   $('summary').textContent = 'The public key in the QR authenticates your CLI while keytap establishes a WebRTC connection.';
   $('explainer').textContent = 'Cloudflare may route the connection with TURN when a direct path is unavailable.';
@@ -1436,7 +1401,7 @@ export async function main() {
     phase = { kind: 'awaiting-request', session };
     say('Private connection established. Waiting for the request…');
     const initial = parseInitialRequest(await session.next(SIGNAL_TIMEOUT_MS));
-    if (!isAwaitingRequest(session)) return;
+    if (phase.kind !== 'awaiting-request' || phase.session !== session) return;
     switch (initial.kind) {
       case 'pinned':
         configurePinnedRequest(session, initial.request, established.sessionBinding);
@@ -1480,17 +1445,13 @@ export function terminatePhaseForPagehide(currentPhase) {
     case 'pairing-ceremony':
       currentPhase.data.controller.abort();
       session = currentPhase.data.session;
-      if (session.isOpen()) {
-        try { session.send({ v: 3, type: 'sas-phone-rejected' }); } catch { /* leaving */ }
-      }
+      try { session.send({ type: 'sas-phone-rejected' }); } catch { /* leaving */ }
       session.close();
       return;
     case 'pairing-held':
       session = currentPhase.data.session;
       discardHeld(currentPhase.data);
-      if (session.isOpen()) {
-        try { session.send({ v: 3, type: 'sas-phone-rejected' }); } catch { /* leaving */ }
-      }
+      try { session.send({ type: 'sas-phone-rejected' }); } catch { /* leaving */ }
       session.close();
       return;
     case 'remember-ceremony':
@@ -1513,9 +1474,7 @@ export function terminatePhaseForPagehide(currentPhase) {
     case 'failed':
       return;
   }
-  if (session.isOpen()) {
-    try { session.send({ v: 3, type: 'done' }); } catch { /* page is leaving */ }
-  }
+  try { session.send({ type: 'done' }); } catch { /* page is leaving */ }
   session.close();
 }
 

@@ -17,30 +17,15 @@ use std::path::{Path, PathBuf};
 use crate::nearby_sas::ConfirmedComparison;
 
 const FORMAT: &str = "keytap-nearby-identity-v2";
-const LEGACY_TOFU_FORMAT: &str = "keytap-nearby-identity-v1";
+const PRF_SALT_CONTEXT: &[u8] = b"keytap:nearby-identity-prf:v1";
 const PROOF_DOMAIN: &[u8] = b"keytap:nearby-identity-proof:v2\0";
-const FINGERPRINT_DOMAIN: &[u8] = b"keytap:nearby-identity-fingerprint:v1\0";
 
-#[derive(Debug)]
 enum PairingState {
     FirstUse,
-    Credential(PinnedCredential),
-}
-
-enum PinWrite {
-    Created,
-    Existing(PinnedIdentity),
-}
-
-#[derive(Debug)]
-struct PinnedIdentity {
-    credential_id: Vec<u8>,
-    public_key: [u8; 32],
-}
-
-#[derive(Debug)]
-struct PinnedCredential {
-    credential_id: Vec<u8>,
+    Credential {
+        credential_id: Vec<u8>,
+        expected: Vec<u8>,
+    },
 }
 
 pub enum Anchor {
@@ -55,8 +40,9 @@ pub struct PairingAnchor {
 
 pub struct PinnedAnchor {
     path: PathBuf,
-    expected: Revision,
-    identity: PinnedIdentity,
+    expected: Vec<u8>,
+    credential_id: Vec<u8>,
+    public_key: [u8; 32],
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -66,22 +52,11 @@ enum Revision {
 }
 
 /// An exact identity-file snapshot used to make the identity generation the
-/// authority for remembered-key lookup. The inner sum type keeps a legacy
-/// machine with no identity file distinct from one whose current credential
-/// must scope every remembered lookup.
+/// authority for remembered-key lookup.
 pub struct RememberAuthority {
-    state: RememberAuthorityState,
-}
-
-enum RememberAuthorityState {
-    Legacy {
-        path: PathBuf,
-    },
-    Credential {
-        path: PathBuf,
-        expected: Revision,
-        credential_id: Vec<u8>,
-    },
+    path: PathBuf,
+    expected: Vec<u8>,
+    credential_id: Vec<u8>,
 }
 
 /// A snapshot taken before an init ceremony. Consuming it is the only way to
@@ -99,15 +74,7 @@ pub enum InitMode {
 }
 
 /// Proof that the credential anchor was committed before init is acknowledged.
-pub struct PersistedInit {
-    credential_id: Vec<u8>,
-}
-
-impl PersistedInit {
-    pub fn credential_id(&self) -> &[u8] {
-        &self.credential_id
-    }
-}
+pub struct PersistedInit;
 
 pub enum PairingConstraint<'a> {
     AnyPasskey,
@@ -120,13 +87,11 @@ pub struct Proof {
     pub signature: [u8; 64],
 }
 
-pub struct ProofFields<'a> {
+pub struct ProofContext<'a> {
     pub binding: ProofBinding<'a>,
     pub challenge: &'a [u8],
-    pub credential_id: &'a [u8],
     pub prf_output: &'a [u8; 32],
     pub key_name: &'a str,
-    pub public_key: &'a [u8; 32],
 }
 
 #[derive(Clone, Copy)]
@@ -137,14 +102,6 @@ pub enum ProofBinding<'a> {
     PinnedSession {
         digest: &'a [u8; 32],
     },
-}
-
-#[derive(Debug, Eq, PartialEq)]
-pub enum Verification {
-    Paired { fingerprint: String },
-    InitPinCompleted { fingerprint: String },
-    ConcurrentPairingMatched,
-    MatchedPin,
 }
 
 #[derive(Debug)]
@@ -181,18 +138,6 @@ impl std::fmt::Display for VerificationError {
 pub enum InitCommitError {
     NotPublished(String),
     PublishedButNotDurable(String),
-}
-
-impl std::fmt::Display for InitCommitError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::NotPublished(message) => write!(f, "{message}"),
-            Self::PublishedButNotDurable(message) => write!(
-                f,
-                "the identity file is visible, but its durability could not be confirmed: {message}"
-            ),
-        }
-    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -234,14 +179,16 @@ impl Anchor {
             Err(error) => return Err(format!("reading {}: {error}", path.display())),
         };
         let stored = parse_stored_file(&path, &bytes)?;
-        let legacy_tofu = stored.format == LEGACY_TOFU_FORMAT;
         match stored.identity {
             StoredIdentity::Credential { credential_id } => {
                 let credential_id = decode_bounded(&credential_id, "credential ID", 1, 1024)
                     .map_err(|error| format!("{}: {error}", path.display()))?;
                 Ok(Self::Pairing(PairingAnchor {
                     path,
-                    state: PairingState::Credential(PinnedCredential { credential_id }),
+                    state: PairingState::Credential {
+                        credential_id,
+                        expected: bytes,
+                    },
                 }))
             }
             StoredIdentity::Ed25519 {
@@ -250,12 +197,6 @@ impl Anchor {
             } => {
                 let credential_id = decode_bounded(&credential_id, "credential ID", 1, 1024)
                     .map_err(|error| format!("{}: {error}", path.display()))?;
-                if legacy_tofu {
-                    return Ok(Self::Pairing(PairingAnchor {
-                        path,
-                        state: PairingState::Credential(PinnedCredential { credential_id }),
-                    }));
-                }
                 let public_key = decode_fixed::<32>(&public_key, "public key")
                     .map_err(|error| format!("{}: {error}", path.display()))?;
                 VerifyingKey::from_bytes(&public_key).map_err(|_| {
@@ -263,11 +204,9 @@ impl Anchor {
                 })?;
                 Ok(Self::Pinned(PinnedAnchor {
                     path,
-                    expected: Revision::Present(bytes),
-                    identity: PinnedIdentity {
-                        credential_id,
-                        public_key,
-                    },
+                    expected: bytes,
+                    credential_id,
+                    public_key,
                 }))
             }
         }
@@ -277,7 +216,7 @@ impl Anchor {
 fn parse_stored_file(path: &Path, bytes: &[u8]) -> Result<StoredFile, String> {
     let stored: StoredFile = serde_json::from_slice(bytes)
         .map_err(|_| format!("{} is not a valid nearby identity file", path.display()))?;
-    if stored.format != FORMAT && stored.format != LEGACY_TOFU_FORMAT {
+    if stored.format != FORMAT {
         return Err(format!(
             "{} has an unknown nearby identity format",
             path.display()
@@ -290,9 +229,9 @@ impl PairingAnchor {
     pub fn constraint(&self) -> PairingConstraint<'_> {
         match &self.state {
             PairingState::FirstUse => PairingConstraint::AnyPasskey,
-            PairingState::Credential(identity) => PairingConstraint::Credential {
-                credential_id: &identity.credential_id,
-            },
+            PairingState::Credential { credential_id, .. } => {
+                PairingConstraint::Credential { credential_id }
+            }
         }
     }
 
@@ -302,73 +241,41 @@ impl PairingAnchor {
     pub fn verify_and_pin_after_sas(
         &self,
         proof: &Proof,
-        fields: &ProofFields<'_>,
-    ) -> Result<Verification, VerificationError> {
-        if !matches!(fields.binding, ProofBinding::BootstrapSas { .. }) {
+        context: &ProofContext<'_>,
+    ) -> Result<(), VerificationError> {
+        if !matches!(context.binding, ProofBinding::BootstrapSas { .. }) {
             return Err(VerificationError::InvalidProof);
         }
         match &self.state {
-            PairingState::Credential(pinned) if pinned.credential_id != proof.credential_id => {
+            PairingState::Credential { credential_id, .. }
+                if *credential_id != proof.credential_id =>
+            {
                 return Err(VerificationError::IdentityMismatch)
             }
-            PairingState::FirstUse | PairingState::Credential(_) => {}
+            PairingState::FirstUse | PairingState::Credential { .. } => {}
         }
-        verify_proof(proof, fields)?;
-        match &self.state {
-            PairingState::Credential(_) => self.upgrade_credential_pin(proof),
-            PairingState::FirstUse => match self.write_pin(proof)? {
-                PinWrite::Created => Ok(Verification::Paired {
-                    fingerprint: fingerprint(&proof.public_key),
-                }),
-                PinWrite::Existing(existing)
-                    if existing.credential_id == proof.credential_id
-                        && existing.public_key == proof.public_key =>
-                {
-                    Ok(Verification::ConcurrentPairingMatched)
-                }
-                PinWrite::Existing(_) => Err(VerificationError::IdentityMismatch),
-            },
-        }
-    }
-
-    fn write_pin(&self, proof: &Proof) -> Result<PinWrite, VerificationError> {
+        verify_proof(proof, context)?;
         let bytes = verified_pin_bytes(proof).map_err(VerificationError::Store)?;
         let _lock = IdentityLock::acquire(&self.path).map_err(VerificationError::Store)?;
-        match write_private_new(&self.path, &bytes).map_err(verification_publish_error)? {
-            NewFile::Created => Ok(PinWrite::Created),
-            NewFile::AlreadyExists => {
-                let existing =
-                    Anchor::load_from(self.path.clone()).map_err(VerificationError::Store)?;
-                match existing {
-                    Anchor::Pinned(anchor) => Ok(PinWrite::Existing(anchor.identity)),
-                    Anchor::Pairing(_) => Err(VerificationError::Store(
-                        "identity file disappeared during first-use pinning".to_string(),
-                    )),
+        let current = read_revision(&self.path).map_err(|error| {
+            VerificationError::Store(format!("reading {}: {error}", self.path.display()))
+        })?;
+        match (&self.state, current) {
+            (PairingState::FirstUse, Revision::Missing) => {
+                match write_private_new(&self.path, &bytes).map_err(verification_publish_error)? {
+                    NewFile::Created => Ok(()),
+                    NewFile::AlreadyExists => Err(VerificationError::IdentityMismatch),
                 }
             }
-        }
-    }
-
-    fn upgrade_credential_pin(&self, proof: &Proof) -> Result<Verification, VerificationError> {
-        let _lock = IdentityLock::acquire(&self.path).map_err(VerificationError::Store)?;
-        match Anchor::load_from(self.path.clone()).map_err(VerificationError::Store)? {
-            Anchor::Pairing(PairingAnchor {
-                state: PairingState::Credential(current),
-                ..
-            }) if current.credential_id == proof.credential_id => {
-                let bytes = verified_pin_bytes(proof).map_err(VerificationError::Store)?;
-                write_private_replace(&self.path, &bytes).map_err(verification_publish_error)?;
-                Ok(Verification::InitPinCompleted {
-                    fingerprint: fingerprint(&proof.public_key),
-                })
-            }
-            Anchor::Pinned(current)
-                if current.identity.credential_id == proof.credential_id
-                    && current.identity.public_key == proof.public_key =>
+            (PairingState::Credential { expected, .. }, Revision::Present(current))
+                if current == *expected =>
             {
-                Ok(Verification::ConcurrentPairingMatched)
+                write_private_replace(&self.path, &bytes).map_err(verification_publish_error)?;
+                Ok(())
             }
-            Anchor::Pairing(_) | Anchor::Pinned(_) => Err(VerificationError::IdentityMismatch),
+            (PairingState::FirstUse | PairingState::Credential { .. }, _) => {
+                Err(VerificationError::IdentityMismatch)
+            }
         }
     }
 }
@@ -384,19 +291,21 @@ fn verification_publish_error(error: PublishError) -> VerificationError {
 
 impl PinnedAnchor {
     pub fn credential_id(&self) -> &[u8] {
-        &self.identity.credential_id
+        &self.credential_id
     }
 
-    pub fn verify(&self, proof: &Proof, fields: &ProofFields<'_>) -> Result<(), VerificationError> {
-        if !matches!(fields.binding, ProofBinding::PinnedSession { .. }) {
+    pub fn verify(
+        &self,
+        proof: &Proof,
+        context: &ProofContext<'_>,
+    ) -> Result<(), VerificationError> {
+        if !matches!(context.binding, ProofBinding::PinnedSession { .. }) {
             return Err(VerificationError::InvalidProof);
         }
-        if self.identity.credential_id != proof.credential_id
-            || self.identity.public_key != proof.public_key
-        {
+        if self.credential_id != proof.credential_id || self.public_key != proof.public_key {
             return Err(VerificationError::IdentityMismatch);
         }
-        verify_proof(proof, fields)?;
+        verify_proof(proof, context)?;
 
         // Force-init and assertion may overlap. The proof authenticates the
         // snapshot sent in this ceremony, but only this final compare under
@@ -405,21 +314,18 @@ impl PinnedAnchor {
         let current = read_revision(&self.path).map_err(|error| {
             VerificationError::Store(format!("reading {}: {error}", self.path.display()))
         })?;
-        if current != self.expected {
-            return Err(VerificationError::IdentityMismatch);
+        match current {
+            Revision::Present(bytes) if bytes == self.expected => Ok(()),
+            Revision::Missing | Revision::Present(_) => Err(VerificationError::IdentityMismatch),
         }
-        Ok(())
     }
 }
 
-fn verify_proof(proof: &Proof, fields: &ProofFields<'_>) -> Result<(), VerificationError> {
-    if proof.credential_id != fields.credential_id || proof.public_key != *fields.public_key {
-        return Err(VerificationError::InvalidProof);
-    }
+fn verify_proof(proof: &Proof, context: &ProofContext<'_>) -> Result<(), VerificationError> {
     let key =
         VerifyingKey::from_bytes(&proof.public_key).map_err(|_| VerificationError::InvalidProof)?;
     let signature = Signature::from_bytes(&proof.signature);
-    key.verify_strict(&proof_message(fields), &signature)
+    key.verify_strict(&proof_message(proof, context), &signature)
         .map_err(|_| VerificationError::InvalidProof)
 }
 
@@ -434,8 +340,8 @@ fn verified_pin_bytes(proof: &Proof) -> Result<Vec<u8>, String> {
     serde_json::to_vec_pretty(&stored).map_err(|error| error.to_string())
 }
 
-pub fn proof_message(fields: &ProofFields<'_>) -> Vec<u8> {
-    let binding = match fields.binding {
+pub fn proof_message(proof: &Proof, context: &ProofContext<'_>) -> Vec<u8> {
+    let binding = match context.binding {
         ProofBinding::BootstrapSas { confirmation } => confirmation.binding_digest(),
         ProofBinding::PinnedSession { digest } => digest,
     };
@@ -443,24 +349,24 @@ pub fn proof_message(fields: &ProofFields<'_>) -> Vec<u8> {
         PROOF_DOMAIN.len()
             + 1
             + binding.len()
-            + fields.challenge.len()
-            + fields.credential_id.len()
-            + fields.prf_output.len()
-            + fields.key_name.len()
-            + fields.public_key.len()
+            + context.challenge.len()
+            + proof.credential_id.len()
+            + context.prf_output.len()
+            + context.key_name.len()
+            + proof.public_key.len()
             + 24,
     );
     message.extend_from_slice(PROOF_DOMAIN);
-    message.push(match fields.binding {
+    message.push(match context.binding {
         ProofBinding::BootstrapSas { .. } => 0,
         ProofBinding::PinnedSession { .. } => 1,
     });
     append_field(&mut message, binding);
-    append_field(&mut message, fields.challenge);
-    append_field(&mut message, fields.credential_id);
-    append_field(&mut message, fields.prf_output);
-    append_field(&mut message, fields.key_name.as_bytes());
-    append_field(&mut message, fields.public_key);
+    append_field(&mut message, context.challenge);
+    append_field(&mut message, &proof.credential_id);
+    append_field(&mut message, context.prf_output);
+    append_field(&mut message, context.key_name.as_bytes());
+    append_field(&mut message, &proof.public_key);
     message
 }
 
@@ -468,13 +374,6 @@ fn append_field(message: &mut Vec<u8>, value: &[u8]) {
     let length = u32::try_from(value.len()).expect("nearby proof fields fit in u32");
     message.extend_from_slice(&length.to_be_bytes());
     message.extend_from_slice(value);
-}
-
-fn fingerprint(public_key: &[u8; 32]) -> String {
-    let digest = Sha256::new_with_prefix(FINGERPRINT_DOMAIN)
-        .chain_update(public_key)
-        .finalize();
-    URL_SAFE_NO_PAD.encode(&digest[..9])
 }
 
 fn decode_bounded(
@@ -513,76 +412,65 @@ fn default_path() -> Result<PathBuf, String> {
     Ok(state_home.join("keytap").join("nearby-identity.json"))
 }
 
-pub fn previously_pinned() -> bool {
-    default_path().is_ok_and(|path| path.is_file())
+/// The second PRF input used by nearby flows to derive a stable signing
+/// identity from the same passkey approval as the requested named key.
+pub fn prf_salt() -> [u8; 32] {
+    Sha256::digest(PRF_SALT_CONTEXT).into()
 }
 
 /// Snapshot the identity generation that remembered-key lookup must obey.
-/// Existing installations without an identity file retain their legacy root
-/// marker; once any identity exists, its credential is authoritative.
+/// Without an identity file, remembered entries are deliberately unavailable.
 pub fn remember_authority() -> Result<RememberAuthority, String> {
     let path = default_path()?;
     remember_authority_at(path)
 }
 
 pub(crate) fn remember_authority_at(path: PathBuf) -> Result<RememberAuthority, String> {
-    let revision = read_revision(&path)
+    let expected = read_revision(&path)
         .map_err(|error| format!("reading nearby identity at {}: {error}", path.display()))?;
-    let state = match revision {
-        Revision::Missing => RememberAuthorityState::Legacy { path },
-        expected @ Revision::Present(_) => {
-            let Revision::Present(bytes) = &expected else {
-                unreachable!("matched present identity revision")
-            };
-            let stored = parse_stored_file(&path, bytes)?;
-            let encoded = match stored.identity {
-                StoredIdentity::Credential { credential_id } => credential_id,
-                StoredIdentity::Ed25519 {
-                    credential_id,
-                    public_key,
-                } => {
-                    let public_key = decode_fixed::<32>(&public_key, "public key")
-                        .map_err(|error| format!("{}: {error}", path.display()))?;
-                    VerifyingKey::from_bytes(&public_key).map_err(|_| {
-                        format!("{} contains an invalid Ed25519 public key", path.display())
-                    })?;
-                    credential_id
-                }
-            };
-            let credential_id = decode_bounded(&encoded, "credential ID", 1, 1024)
+    let Revision::Present(bytes) = expected else {
+        return Err(format!(
+            "no nearby identity is stored at {}",
+            path.display()
+        ));
+    };
+    let stored = parse_stored_file(&path, &bytes)?;
+    let encoded = match stored.identity {
+        StoredIdentity::Credential { credential_id } => credential_id,
+        StoredIdentity::Ed25519 {
+            credential_id,
+            public_key,
+        } => {
+            let public_key = decode_fixed::<32>(&public_key, "public key")
                 .map_err(|error| format!("{}: {error}", path.display()))?;
-            RememberAuthorityState::Credential {
-                path,
-                expected,
-                credential_id,
-            }
+            VerifyingKey::from_bytes(&public_key).map_err(|_| {
+                format!("{} contains an invalid Ed25519 public key", path.display())
+            })?;
+            credential_id
         }
     };
-    Ok(RememberAuthority { state })
+    let credential_id = decode_bounded(&encoded, "credential ID", 1, 1024)
+        .map_err(|error| format!("{}: {error}", path.display()))?;
+    Ok(RememberAuthority {
+        path,
+        expected: bytes,
+        credential_id,
+    })
 }
 
 impl RememberAuthority {
-    /// The credential whose root namespace is authoritative, or `None` only
-    /// for a legacy installation that has never published an identity file.
-    pub fn credential_id(&self) -> Option<&[u8]> {
-        match &self.state {
-            RememberAuthorityState::Legacy { .. } => None,
-            RememberAuthorityState::Credential { credential_id, .. } => Some(credential_id),
-        }
+    /// The credential whose root namespace is authoritative.
+    pub fn credential_id(&self) -> &[u8] {
+        &self.credential_id
     }
 
     /// Re-read the exact identity revision after a candidate lookup/store.
     /// A concurrent init therefore turns the operation into a fail-closed
     /// miss/rejection instead of serving or acknowledging the old root.
     pub fn revalidate(&self) -> Result<bool, String> {
-        match &self.state {
-            RememberAuthorityState::Legacy { path } => read_revision(path)
-                .map(|revision| revision == Revision::Missing)
-                .map_err(|error| format!("reading {}: {error}", path.display())),
-            RememberAuthorityState::Credential { path, expected, .. } => read_revision(path)
-                .map(|revision| revision == *expected)
-                .map_err(|error| format!("reading {}: {error}", path.display())),
-        }
+        read_revision(&self.path)
+            .map(|revision| matches!(revision, Revision::Present(bytes) if bytes == self.expected))
+            .map_err(|error| format!("reading {}: {error}", self.path.display()))
     }
 }
 
@@ -615,13 +503,9 @@ impl PendingInit {
         }
         let bytes = init_credential_bytes(credential_id).map_err(InitCommitError::NotPublished)?;
         let _lock = IdentityLock::acquire(&self.path).map_err(InitCommitError::NotPublished)?;
-        let current = read_revision(&self.path)
-            .map_err(|error| {
-                InitCommitError::NotPublished(format!(
-                    "reading {}: {error}",
-                    self.path.display()
-                ))
-            })?;
+        let current = read_revision(&self.path).map_err(|error| {
+            InitCommitError::NotPublished(format!("reading {}: {error}", self.path.display()))
+        })?;
         if current != self.expected {
             return Err(InitCommitError::NotPublished(format!(
                 "{} changed while the passkey ceremony was in progress; refusing to overwrite it",
@@ -644,9 +528,7 @@ impl PendingInit {
                 write_private_replace(&self.path, &bytes).map_err(InitCommitError::from)?
             }
         }
-        Ok(PersistedInit {
-            credential_id: credential_id.to_vec(),
-        })
+        Ok(PersistedInit)
     }
 }
 
@@ -654,9 +536,7 @@ impl From<PublishError> for InitCommitError {
     fn from(error: PublishError) -> Self {
         match error {
             PublishError::BeforePublication(message) => Self::NotPublished(message),
-            PublishError::PublishedButNotDurable(message) => {
-                Self::PublishedButNotDurable(message)
-            }
+            PublishError::PublishedButNotDurable(message) => Self::PublishedButNotDurable(message),
         }
     }
 }
@@ -948,14 +828,13 @@ mod tests {
         confirmation: &'a ConfirmedComparison,
         challenge: &'a [u8; 32],
         prf: &'a [u8; 32],
-    ) -> ProofFields<'a> {
-        ProofFields {
+    ) -> ProofContext<'a> {
+        let _ = proof;
+        ProofContext {
             binding: ProofBinding::BootstrapSas { confirmation },
             challenge,
-            credential_id: &proof.credential_id,
             prf_output: prf,
             key_name: "deploy",
-            public_key: &proof.public_key,
         }
     }
 
@@ -964,14 +843,13 @@ mod tests {
         digest: &'a [u8; 32],
         challenge: &'a [u8; 32],
         prf: &'a [u8; 32],
-    ) -> ProofFields<'a> {
-        ProofFields {
+    ) -> ProofContext<'a> {
+        let _ = proof;
+        ProofContext {
             binding: ProofBinding::PinnedSession { digest },
             challenge,
-            credential_id: &proof.credential_id,
             prf_output: prf,
             key_name: "deploy",
-            public_key: &proof.public_key,
         }
     }
 
@@ -989,16 +867,15 @@ mod tests {
         let message = match binding {
             TestBinding::Bootstrap => {
                 let confirmation = ConfirmedComparison::from_digest_for_test(digest);
-                proof_message(&bootstrap_fields_for(
+                proof_message(
                     &proof,
-                    &confirmation,
-                    &challenge,
-                    &prf,
-                ))
+                    &bootstrap_fields_for(&proof, &confirmation, &challenge, &prf),
+                )
             }
-            TestBinding::Pinned => {
-                proof_message(&pinned_fields_for(&proof, &digest, &challenge, &prf))
-            }
+            TestBinding::Pinned => proof_message(
+                &proof,
+                &pinned_fields_for(&proof, &digest, &challenge, &prf),
+            ),
         };
         proof.signature = signing.sign(&message).to_bytes();
         proof
@@ -1026,14 +903,32 @@ mod tests {
     }
 
     #[test]
+    fn identity_prf_salt_is_stable_and_separate_from_named_keys() {
+        assert_eq!(
+            hex::encode(prf_salt()),
+            "0e77b3886c1dfd2ce68782dc0fa4b6872e75a18dfe28799aab9414b5fd8e249e"
+        );
+        assert_ne!(
+            prf_salt().as_slice(),
+            keytap_core::prf_salt_for_name("nearby-identity-prf:v1").unwrap()
+        );
+    }
+
+    #[test]
+    fn missing_identity_cannot_authorize_remembered_keys() {
+        let path = temp_path("missing-remember-authority");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+        assert!(remember_authority_at(path).is_err());
+    }
+
+    #[test]
     fn init_commit_is_a_revision_compare_and_swap() {
         let path = temp_path("init-cas");
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
         let first = pending_init_at(path.clone());
         let racing = pending_init_at(path.clone());
 
-        let persisted = first.commit(b"credential-one").unwrap();
-        assert_eq!(persisted.credential_id(), b"credential-one");
+        first.commit(b"credential-one").unwrap();
         assert!(racing.commit(b"credential-two").is_err());
         assert!(matches!(
             pairing(Anchor::load_from(path.clone()).unwrap()).constraint(),
@@ -1118,7 +1013,11 @@ mod tests {
         let path = temp_path("permanent-lock");
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
         make_private_dir(path.parent().unwrap()).unwrap();
-        std::fs::write(path.with_extension("json.lock"), b"left by an earlier process").unwrap();
+        std::fs::write(
+            path.with_extension("json.lock"),
+            b"left by an earlier process",
+        )
+        .unwrap();
 
         pending_init_at(path.clone())
             .commit(b"credential-one")
@@ -1139,15 +1038,12 @@ mod tests {
         let confirmation = ConfirmedComparison::from_digest_for_test(digest);
         let challenge = [0x24; 32];
         let prf = [0x11; 32];
-        assert!(matches!(
-            anchor
-                .verify_and_pin_after_sas(
-                    &proof,
-                    &bootstrap_fields_for(&proof, &confirmation, &challenge, &prf),
-                )
-                .unwrap(),
-            Verification::Paired { .. }
-        ));
+        anchor
+            .verify_and_pin_after_sas(
+                &proof,
+                &bootstrap_fields_for(&proof, &confirmation, &challenge, &prf),
+            )
+            .unwrap();
 
         let anchor = pinned(Anchor::load_from(path.clone()).unwrap());
         assert_eq!(anchor.credential_id(), b"credential-one");
@@ -1254,59 +1150,16 @@ mod tests {
         ));
 
         let matching = signed_proof([7; 32], b"credential-one", TestBinding::Bootstrap);
-        assert!(matches!(
-            anchor
-                .verify_and_pin_after_sas(
-                    &matching,
-                    &bootstrap_fields_for(&matching, &confirmation, &challenge, &prf),
-                )
-                .unwrap(),
-            Verification::InitPinCompleted { .. }
-        ));
+        anchor
+            .verify_and_pin_after_sas(
+                &matching,
+                &bootstrap_fields_for(&matching, &confirmation, &challenge, &prf),
+            )
+            .unwrap();
         assert!(matches!(
             Anchor::load_from(path.clone()).unwrap(),
             Anchor::Pinned(_)
         ));
-        let _ = std::fs::remove_dir_all(path.parent().unwrap());
-    }
-
-    #[test]
-    fn legacy_tofu_identity_is_demoted_to_credential_pairing() {
-        let path = temp_path("legacy-tofu");
-        let _ = std::fs::remove_dir_all(path.parent().unwrap());
-        let legacy = StoredFile {
-            format: LEGACY_TOFU_FORMAT.to_string(),
-            identity: StoredIdentity::Ed25519 {
-                credential_id: URL_SAFE_NO_PAD.encode(b"credential-one"),
-                public_key: URL_SAFE_NO_PAD.encode([9u8; 32]),
-            },
-        };
-        write_private_replace(&path, &serde_json::to_vec(&legacy).unwrap()).unwrap();
-
-        let anchor = pairing(Anchor::load_from(path.clone()).unwrap());
-        assert!(matches!(
-            anchor.constraint(),
-            PairingConstraint::Credential { credential_id } if credential_id == b"credential-one"
-        ));
-
-        let digest = [0x42; 32];
-        let confirmation = ConfirmedComparison::from_digest_for_test(digest);
-        let challenge = [0x24; 32];
-        let prf = [0x11; 32];
-        let proof = signed_proof([7; 32], b"credential-one", TestBinding::Bootstrap);
-        assert!(matches!(
-            anchor
-                .verify_and_pin_after_sas(
-                    &proof,
-                    &bootstrap_fields_for(&proof, &confirmation, &challenge, &prf),
-                )
-                .unwrap(),
-            Verification::InitPinCompleted { .. }
-        ));
-
-        let upgraded = pinned(Anchor::load_from(path.clone()).unwrap());
-        assert_eq!(upgraded.credential_id(), b"credential-one");
-        assert_eq!(upgraded.identity.public_key, proof.public_key);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 

@@ -6,12 +6,11 @@
 //! the data-channel peer before it releases any WebAuthn result.
 
 use crate::nearby_identity::{
-    Anchor as IdentityAnchor, PairingAnchor as IdentityPairingAnchor,
-    InitCommitError as IdentityInitCommitError, PairingConstraint as IdentityPairingConstraint,
+    Anchor as IdentityAnchor, InitCommitError as IdentityInitCommitError,
+    PairingAnchor as IdentityPairingAnchor, PairingConstraint as IdentityPairingConstraint,
     PendingInit as PendingIdentityInit, PersistedInit as PersistedIdentityInit,
-    PinnedAnchor as PinnedIdentityAnchor,
-    Proof as NearbyIdentityProof, ProofBinding as NearbyIdentityProofBinding,
-    ProofFields as NearbyIdentityProofFields, Verification as IdentityVerification,
+    PinnedAnchor as PinnedIdentityAnchor, Proof as NearbyIdentityProof,
+    ProofBinding as NearbyIdentityProofBinding, ProofContext as NearbyIdentityProofContext,
     VerificationError as IdentityVerificationError,
 };
 use crate::nearby_protocol::{CliSessionKey, PhoneAnswer};
@@ -40,8 +39,6 @@ use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::interceptor::registry::Registry;
 use webrtc::peer_connection::configuration::RTCConfiguration;
 use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
-#[cfg(test)]
-use webrtc::peer_connection::policy::ice_transport_policy::RTCIceTransportPolicy;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use webrtc::peer_connection::RTCPeerConnection;
 use zeroize::Zeroizing;
@@ -50,7 +47,6 @@ const DEFAULT_SIGNAL_URL: &str = "wss://keytap-relay.julsh.workers.dev";
 const PAGE_URL: &str = "https://keytap.jul.sh/nearby";
 const DATA_CHANNEL_LABEL: &str = "keytap/3";
 const DATA_CHANNEL_PROTOCOL: &str = "keytap.v3";
-const PROTOCOL_VERSION: u8 = 3;
 
 const PEER_JOIN_TIMEOUT: Duration = Duration::from_secs(300);
 const CONNECTION_SETUP_TIMEOUT: Duration = Duration::from_secs(120);
@@ -69,27 +65,11 @@ const CLOUDFLARE_TURN_UDP_URL: &str = "turn:turn.cloudflare.com:3478?transport=u
 
 const DEFAULT_REMEMBER_WINDOW_SECS: u64 = 60;
 const REMEMBER_PENDING_EXTENSION_SECS: u64 = 150;
-const MAX_LINGER_SECS: u64 = 600;
-
-/// How long the CLI offers the phone's post-auth remember action.
-fn remember_window_secs() -> u64 {
-    match std::env::var("KEYTAP_REMEMBER_WINDOW") {
-        Ok(value) => value
-            .trim()
-            .parse::<u64>()
-            .map(|secs| secs.min(MAX_LINGER_SECS))
-            .unwrap_or(DEFAULT_REMEMBER_WINDOW_SECS),
-        Err(_) => DEFAULT_REMEMBER_WINDOW_SECS,
-    }
-}
 
 /// A completed nearby assertion ceremony.
 pub struct NearbyAssertion {
     pub prf_output: Vec<u8>,
     pub credential_id: Vec<u8>,
-    /// Retained for the caller's established API. Protocol v3 performs remember
-    /// only as an acknowledged follow-up, so this is always false.
-    pub remember_requested: bool,
     pub followup: Option<RememberWindow>,
 }
 
@@ -110,8 +90,7 @@ pub fn authenticate_nearby(name: &str, offer_remember: bool) -> NearbyAssertion 
         } => NearbyAssertion {
             credential_id,
             prf_output,
-            remember_requested: false,
-            followup: followup.map(|window| *window),
+            followup,
         },
         FlowResult::Registration { .. } => {
             crate::die("nearby protocol returned a registration for an assertion request")
@@ -207,7 +186,7 @@ enum FlowResult {
     Assertion {
         credential_id: Vec<u8>,
         prf_output: Vec<u8>,
-        followup: Option<Box<RememberWindow>>,
+        followup: Option<RememberWindow>,
     },
 }
 
@@ -235,12 +214,10 @@ impl RememberWindow {
         ));
         exit_zero_on_sigint();
         self.run_window(raw_key);
-        self.session.close();
     }
 
     fn run_window(&mut self, raw_key: &[u8]) {
         let start = Instant::now();
-        let hard_stop = start + Duration::from_secs(MAX_LINGER_SECS);
         let mut state = RememberState::AwaitingChoice {
             deadline: start + Duration::from_secs(self.window_secs),
         };
@@ -250,7 +227,7 @@ impl RememberWindow {
         loop {
             let deadline = match state {
                 RememberState::AwaitingChoice { deadline }
-                | RememberState::AwaitingResult { deadline } => deadline.min(hard_stop),
+                | RememberState::AwaitingResult { deadline } => deadline,
             };
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
@@ -263,19 +240,13 @@ impl RememberWindow {
             };
 
             state = match (state, message) {
-                (_, PhoneMessage::Done { .. }) => return,
-                (RememberState::AwaitingChoice { .. }, PhoneMessage::RememberBegin { .. }) => {
+                (_, PhoneMessage::Done) => return,
+                (RememberState::AwaitingChoice { .. }, PhoneMessage::RememberBegin) => {
                     if !announced_pending {
                         announced_pending = true;
                         note("Remember chosen on the phone; waiting for the passkey approval…");
                     }
-                    if self
-                        .session
-                        .send(&CliMessage::RememberReady {
-                            version: PROTOCOL_VERSION,
-                        })
-                        .is_err()
-                    {
+                    if self.session.send(&CliMessage::RememberReady).is_err() {
                         return;
                     }
                     RememberState::AwaitingResult {
@@ -283,18 +254,9 @@ impl RememberWindow {
                             + Duration::from_secs(REMEMBER_PENDING_EXTENSION_SECS),
                     }
                 }
-                (
-                    RememberState::AwaitingResult { deadline },
-                    PhoneMessage::RememberBegin { .. },
-                ) => {
+                (RememberState::AwaitingResult { deadline }, PhoneMessage::RememberBegin) => {
                     // Idempotent retry if the phone did not observe the first ACK.
-                    if self
-                        .session
-                        .send(&CliMessage::RememberReady {
-                            version: PROTOCOL_VERSION,
-                        })
-                        .is_err()
-                    {
+                    if self.session.send(&CliMessage::RememberReady).is_err() {
                         return;
                     }
                     RememberState::AwaitingResult { deadline }
@@ -322,16 +284,11 @@ impl RememberWindow {
                             raw_key,
                         ) {
                             crate::remember::NearbyRememberOutcome::Stored => {
-                                self.session
-                                    .send(&CliMessage::RememberAccepted {
-                                        version: PROTOCOL_VERSION,
-                                    })
-                                    .ok();
+                                self.session.send(&CliMessage::RememberAccepted).ok();
                             }
                             crate::remember::NearbyRememberOutcome::Unavailable => {
                                 self.session
                                     .send(&CliMessage::RememberRejected {
-                                        version: PROTOCOL_VERSION,
                                         reason: RememberRejectedReason::Unavailable,
                                     })
                                     .ok();
@@ -342,7 +299,6 @@ impl RememberWindow {
                     Ok(_) => {
                         self.session
                             .send(&CliMessage::RememberRejected {
-                                version: PROTOCOL_VERSION,
                                 reason: RememberRejectedReason::Mismatch,
                             })
                             .ok();
@@ -371,7 +327,7 @@ impl RememberWindow {
                 (state, PhoneMessage::SasPhoneCommit { .. })
                 | (state, PhoneMessage::SasPhoneReveal { .. })
                 | (state, PhoneMessage::SasPhoneComplete { .. })
-                | (state, PhoneMessage::SasPhoneRejected { .. })
+                | (state, PhoneMessage::SasPhoneRejected)
                 | (state, PhoneMessage::PairedRegistrationResult { .. })
                 | (state, PhoneMessage::PairedAssertionResult { .. })
                 | (state, PhoneMessage::AssertionResult { .. }) => {
@@ -424,7 +380,7 @@ fn run_nearby_flow(operation: Operation<'_>) -> Result<FlowResult, String> {
     let setup_deadline = Instant::now() + CONNECTION_SETUP_TIMEOUT;
 
     let turn_url = format!(
-        "{}/v2/signal/{rendezvous_id}/turn/cli",
+        "{}/v2/signal/{rendezvous_id}/turn",
         http_base_url(&signal_base)?
     );
     let ice_servers = match fetch_turn_ice_servers(&turn_url, setup_deadline) {
@@ -473,14 +429,14 @@ fn run_nearby_flow(operation: Operation<'_>) -> Result<FlowResult, String> {
             return Err("timed out establishing the encrypted WebRTC data channel".to_string())
         }
     }
+    signaling.close(None).ok();
+    drop(signaling);
 
-    let mut session = RtcSession {
+    let session = RtcSession {
         runtime,
         peer_connection,
         data_channel,
         incoming,
-        signaling,
-        closed: false,
     };
 
     let plan = authenticate_plan(plan, &session, identity_binding, &cli_session_key)?;
@@ -504,11 +460,9 @@ fn run_nearby_flow(operation: Operation<'_>) -> Result<FlowResult, String> {
                 Err(IdentityInitCommitError::NotPublished(error)) => {
                     session
                         .send(&CliMessage::InitialRejected {
-                            version: PROTOCOL_VERSION,
                             reason: InitialRejectedReason::IdentityStoreUnavailable,
                         })
                         .ok();
-                    session.close();
                     return Err(format!(
                         "passkey was created, but its paired identity could not be stored: {error}"
                     ));
@@ -518,27 +472,22 @@ fn run_nearby_flow(operation: Operation<'_>) -> Result<FlowResult, String> {
                     // rotating every reachable remembered root further
                     // reduces the chance of stale-key resurrection. It is
                     // still indeterminate and must never receive a success ACK.
-                    crate::remember::after_init(&credential_id);
+                    crate::remember::after_init();
                     session
                         .send(&CliMessage::InitialIndeterminate {
-                            version: PROTOCOL_VERSION,
                             reason: InitialIndeterminateReason::IdentityDurabilityUnknown,
                         })
                         .ok();
-                    session.close();
                     return Err(format!(
                         "passkey was created and its paired identity is visible, but durable storage could not be confirmed: {error}. No success was acknowledged; rerun `keytap init --force` before relying on it"
                     ));
                 }
             };
-            if let Err(error) = session.send(&CliMessage::InitialAccepted {
-                version: PROTOCOL_VERSION,
-            }) {
+            if let Err(error) = session.send(&CliMessage::InitialAccepted) {
                 note(&format!(
                     "Passkey identity was stored, but the phone acknowledgement could not be delivered: {error}"
                 ));
             }
-            session.close();
             FlowResult::Registration { registration }
         }
         (
@@ -609,13 +558,11 @@ fn run_nearby_flow(operation: Operation<'_>) -> Result<FlowResult, String> {
                 proof,
             },
         )?,
-        (_, PhoneMessage::Done { .. }) => {
-            session.close();
+        (_, PhoneMessage::Done) => {
             return Err("the page on your phone was closed before approving".into());
         }
         _ => {
             session.send_protocol_error(ProtocolErrorCode::UnexpectedMessage);
-            session.close();
             return Err("phone returned an unexpected nearby protocol message".into());
         }
     };
@@ -624,7 +571,7 @@ fn run_nearby_flow(operation: Operation<'_>) -> Result<FlowResult, String> {
 }
 
 fn complete_assertion(
-    mut session: RtcSession,
+    session: RtcSession,
     completion: AssertionCompletion,
 ) -> Result<FlowResult, String> {
     let AssertionCompletion {
@@ -643,70 +590,53 @@ fn complete_assertion(
             anchor,
             authorization,
         } => {
-            let fields = NearbyIdentityProofFields {
+            let context = NearbyIdentityProofContext {
                 binding: NearbyIdentityProofBinding::BootstrapSas {
                     confirmation: &authorization.confirmation,
                 },
                 challenge: &challenge,
-                credential_id: &payload.credential_id,
                 prf_output: &payload.prf_output,
                 key_name: &key_name,
-                public_key: &proof.public_key,
             };
-            anchor.verify_and_pin_after_sas(&proof, &fields)
+            anchor.verify_and_pin_after_sas(&proof, &context).map(|()| {
+                note("Pairing confirmed; pinned this passkey identity for future nearby requests.")
+            })
         }
         AuthenticatedIdentity::Pinned {
             anchor,
             session_digest,
         } => {
-            let fields = NearbyIdentityProofFields {
+            let context = NearbyIdentityProofContext {
                 binding: NearbyIdentityProofBinding::PinnedSession {
                     digest: &session_digest,
                 },
                 challenge: &challenge,
-                credential_id: &payload.credential_id,
                 prf_output: &payload.prf_output,
                 key_name: &key_name,
-                public_key: &proof.public_key,
             };
-            anchor
-                .verify(&proof, &fields)
-                .map(|()| IdentityVerification::MatchedPin)
+            anchor.verify(&proof, &context)
         }
     };
     match verification {
-        Ok(IdentityVerification::ConcurrentPairingMatched) => {}
-        Ok(IdentityVerification::MatchedPin) => {}
-        Ok(IdentityVerification::Paired { fingerprint }) => note(&format!(
-            "Pairing confirmed; pinned this passkey identity for future nearby requests ({fingerprint})."
-        )),
-        Ok(IdentityVerification::InitPinCompleted { fingerprint }) => note(&format!(
-            "Pairing confirmed; completed the passkey identity pin created by init ({fingerprint})."
-        )),
+        Ok(()) => {}
         Err(error @ IdentityVerificationError::DurabilityUnknown(_)) => {
             session
                 .send(&CliMessage::InitialIndeterminate {
-                    version: PROTOCOL_VERSION,
                     reason: InitialIndeterminateReason::IdentityDurabilityUnknown,
                 })
                 .ok();
-            session.close();
             return Err(identity_error_message(error));
         }
         Err(error) => {
             session
                 .send(&CliMessage::InitialRejected {
-                    version: PROTOCOL_VERSION,
                     reason: initial_rejection_reason(&error),
                 })
                 .ok();
-            session.close();
             return Err(identity_error_message(error));
         }
     }
-    let acknowledgement_delivered = match session.send(&CliMessage::InitialAccepted {
-        version: PROTOCOL_VERSION,
-    }) {
+    let acknowledgement_delivered = match session.send(&CliMessage::InitialAccepted) {
         Ok(()) => true,
         Err(error) => {
             note(&format!(
@@ -717,17 +647,14 @@ fn complete_assertion(
     };
 
     let followup = match (remember, acknowledgement_delivered) {
-        (RememberOffer::Disabled, _) | (_, false) => {
-            session.close();
-            None
-        }
-        (RememberOffer::Available { window_secs }, true) => Some(Box::new(RememberWindow {
+        (RememberOffer::Disabled, _) | (_, false) => None,
+        (RememberOffer::Available { window_secs }, true) => Some(RememberWindow {
             session,
             name: key_name,
             window_secs,
             credential_id: payload.credential_id.clone(),
             prf_output: Zeroizing::new(payload.prf_output.to_vec()),
-        })),
+        }),
     };
 
     Ok(FlowResult::Assertion {
@@ -789,10 +716,7 @@ fn authenticate_plan(
             remember,
             anchor,
         } => {
-            session.send(&CliMessage::Request {
-                version: PROTOCOL_VERSION,
-                request,
-            })?;
+            session.send(&CliMessage::Request { request })?;
             Ok(AuthenticatedPlan::Assertion {
                 key_name,
                 challenge,
@@ -815,7 +739,6 @@ fn run_pairing(
     let canonical_request = request.sas_bytes()?;
     let pending = SasCommitment::generate(SasContext::bind(session_binding, &canonical_request))?;
     session.send(&CliMessage::PairingRequest {
-        version: PROTOCOL_VERSION,
         request,
         cli_commitment: URL_SAFE_NO_PAD.encode(pending.commitment()),
     })?;
@@ -824,14 +747,13 @@ fn run_pairing(
         PhoneMessage::SasPhoneCommit { commitment, .. } => {
             decode_fixed_base64url::<32>(&commitment, "phone pairing commitment")?
         }
-        PhoneMessage::SasPhoneRejected { .. } | PhoneMessage::Done { .. } => {
+        PhoneMessage::SasPhoneRejected | PhoneMessage::Done => {
             return Err("pairing was cancelled on the phone; no key was accepted".into())
         }
         _ => return reject_unexpected_pairing(session),
     };
     let awaiting_reveal = pending.accept_phone_commitment(phone_commitment);
     session.send(&CliMessage::SasCliReveal {
-        version: PROTOCOL_VERSION,
         nonce: URL_SAFE_NO_PAD.encode(awaiting_reveal.cli_nonce()),
     })?;
 
@@ -839,7 +761,7 @@ fn run_pairing(
         PhoneMessage::SasPhoneReveal { nonce, .. } => {
             decode_fixed_base64url::<32>(&nonce, "phone pairing nonce")?
         }
-        PhoneMessage::SasPhoneRejected { .. } | PhoneMessage::Done { .. } => {
+        PhoneMessage::SasPhoneRejected | PhoneMessage::Done => {
             return Err("pairing was cancelled on the phone; no key was accepted".into())
         }
         _ => return reject_unexpected_pairing(session),
@@ -857,7 +779,7 @@ fn run_pairing(
         PhoneMessage::SasPhoneComplete { release_nonce, .. } => {
             decode_fixed_base64url::<32>(&release_nonce, "phone release nonce")?
         }
-        PhoneMessage::SasPhoneRejected { .. } | PhoneMessage::Done { .. } => {
+        PhoneMessage::SasPhoneRejected | PhoneMessage::Done => {
             return Err(
                 "pairing was rejected or cancelled on the phone; no key was accepted".into(),
             )
@@ -870,7 +792,6 @@ fn run_pairing(
         Err(error) => {
             session
                 .send(&CliMessage::SasCliRejected {
-                    version: PROTOCOL_VERSION,
                     release_nonce: URL_SAFE_NO_PAD.encode(release_nonce),
                 })
                 .ok();
@@ -884,7 +805,6 @@ fn run_pairing(
         &release_nonce,
     );
     session.send(&CliMessage::SasCliAccepted {
-        version: PROTOCOL_VERSION,
         release_nonce: URL_SAFE_NO_PAD.encode(release_nonce),
         signature: URL_SAFE_NO_PAD.encode(release_signature),
     })?;
@@ -901,7 +821,6 @@ fn reject_unexpected_pairing<T>(session: &RtcSession) -> Result<T, String> {
 
 fn signal_base_url() -> String {
     std::env::var("KEYTAP_SIGNAL_URL")
-        .or_else(|_| std::env::var("KEYTAP_RELAY_URL"))
         .unwrap_or_else(|_| DEFAULT_SIGNAL_URL.to_string())
         .trim_end_matches('/')
         .to_string()
@@ -953,9 +872,6 @@ fn wait_for_peer(
         let message = read_signal(signaling, deadline)?;
         match message {
             Message::Text(text) => {
-                if text.len() > SIGNAL_FRAME_LIMIT {
-                    continue;
-                }
                 let control: Result<SignalControl, _> = serde_json::from_str(text.as_str());
                 if matches!(control, Ok(SignalControl::PeerReady)) {
                     return Ok(());
@@ -982,9 +898,6 @@ fn wait_for_answer(
         let message = read_signal(signaling, deadline)?;
         match message {
             Message::Text(text) => {
-                if text.len() > SIGNAL_FRAME_LIMIT {
-                    continue;
-                }
                 let body = match PhoneAnswer::decode(text.as_str()) {
                     Ok(body) => body,
                     Err(_) => continue,
@@ -1103,24 +1016,10 @@ struct CloudflareTurnCredential {
 }
 
 fn fetch_turn_ice_servers(url: &str, deadline: Instant) -> Result<Vec<RTCIceServer>, String> {
-    let agent = turn_http_agent(deadline)?;
-    let mut response = match agent.get(url).call() {
-        Ok(response) => response,
-        Err(ureq::Error::StatusCode(409)) => {
-            // `peer-ready` and the DO's joined-state write can cross by one
-            // event-loop turn. One bounded retry avoids exposing that race.
-            let remaining = remaining_until(deadline)?;
-            if remaining <= Duration::from_millis(150) {
-                return Err("timed out fetching TURN credentials".into());
-            }
-            std::thread::sleep(Duration::from_millis(150));
-            turn_http_agent(deadline)?
-                .get(url)
-                .call()
-                .map_err(turn_fetch_error)?
-        }
-        Err(error) => return Err(turn_fetch_error(error)),
-    };
+    let mut response = turn_http_agent(deadline)?
+        .get(url)
+        .call()
+        .map_err(turn_fetch_error)?;
     let body = response
         .body_mut()
         .with_config()
@@ -1141,9 +1040,6 @@ fn turn_http_agent(deadline: Instant) -> Result<ureq::Agent, String> {
 
 fn turn_fetch_error(error: ureq::Error) -> String {
     match error {
-        ureq::Error::StatusCode(409) => {
-            "TURN credential was requested before both peers joined the session".into()
-        }
         ureq::Error::StatusCode(503) => {
             "nearby service has not been configured with Cloudflare TURN credentials".into()
         }
@@ -1203,24 +1099,10 @@ async fn create_offer_peer(
     ),
     webrtc::Error,
 > {
-    create_offer_peer_with_configuration(RTCConfiguration {
+    let configuration = RTCConfiguration {
         ice_servers,
         ..Default::default()
-    })
-    .await
-}
-
-async fn create_offer_peer_with_configuration(
-    configuration: RTCConfiguration,
-) -> Result<
-    (
-        Arc<RTCPeerConnection>,
-        Arc<RTCDataChannel>,
-        mpsc::Receiver<EstablishmentEvent>,
-        mpsc::Receiver<DataChannelEvent>,
-    ),
-    webrtc::Error,
-> {
+    };
     let mut media_engine = MediaEngine::default();
     media_engine.register_default_codecs()?;
     let registry = register_default_interceptors(Registry::new(), &mut media_engine)?;
@@ -1349,8 +1231,6 @@ struct RtcSession {
     peer_connection: Arc<RTCPeerConnection>,
     data_channel: Arc<RTCDataChannel>,
     incoming: mpsc::Receiver<DataChannelEvent>,
-    signaling: WebSocket<MaybeTlsStream<TcpStream>>,
-    closed: bool,
 }
 
 impl RtcSession {
@@ -1364,11 +1244,7 @@ impl RtcSession {
     }
 
     fn send_protocol_error(&self, code: ProtocolErrorCode) {
-        self.send(&CliMessage::ProtocolError {
-            version: PROTOCOL_VERSION,
-            code,
-        })
-        .ok();
+        self.send(&CliMessage::ProtocolError { code }).ok();
     }
 
     fn receive(&self, timeout: Duration) -> Result<PhoneMessage, String> {
@@ -1392,22 +1268,12 @@ impl RtcSession {
             }
         }
     }
-
-    fn close(&mut self) {
-        if self.closed {
-            return;
-        }
-        self.closed = true;
-        self.runtime.block_on(self.data_channel.close()).ok();
-        self.runtime.block_on(self.peer_connection.close()).ok();
-        self.signaling.close(None).ok();
-        self.signaling.flush().ok();
-    }
 }
 
 impl Drop for RtcSession {
     fn drop(&mut self) {
-        self.close();
+        self.runtime.block_on(self.data_channel.close()).ok();
+        self.runtime.block_on(self.peer_connection.close()).ok();
     }
 }
 
@@ -1415,65 +1281,38 @@ impl Drop for RtcSession {
 #[serde(tag = "type", rename_all = "kebab-case")]
 enum CliMessage {
     Request {
-        #[serde(rename = "v")]
-        version: u8,
         request: PinnedCeremonyRequest,
     },
     PairingRequest {
-        #[serde(rename = "v")]
-        version: u8,
         request: PairingCeremonyRequest,
         #[serde(rename = "cliCommitment")]
         cli_commitment: String,
     },
     SasCliReveal {
-        #[serde(rename = "v")]
-        version: u8,
         nonce: String,
     },
     SasCliAccepted {
-        #[serde(rename = "v")]
-        version: u8,
         #[serde(rename = "releaseNonce")]
         release_nonce: String,
         signature: String,
     },
     SasCliRejected {
-        #[serde(rename = "v")]
-        version: u8,
         #[serde(rename = "releaseNonce")]
         release_nonce: String,
     },
-    InitialAccepted {
-        #[serde(rename = "v")]
-        version: u8,
-    },
+    InitialAccepted,
     InitialRejected {
-        #[serde(rename = "v")]
-        version: u8,
         reason: InitialRejectedReason,
     },
     InitialIndeterminate {
-        #[serde(rename = "v")]
-        version: u8,
         reason: InitialIndeterminateReason,
     },
-    RememberReady {
-        #[serde(rename = "v")]
-        version: u8,
-    },
-    RememberAccepted {
-        #[serde(rename = "v")]
-        version: u8,
-    },
+    RememberReady,
+    RememberAccepted,
     RememberRejected {
-        #[serde(rename = "v")]
-        version: u8,
         reason: RememberRejectedReason,
     },
     ProtocolError {
-        #[serde(rename = "v")]
-        version: u8,
         code: ProtocolErrorCode,
     },
 }
@@ -1671,12 +1510,14 @@ fn build_plan(operation: Operation<'_>) -> Result<FlowPlan, String> {
         } => {
             let prf_salt = keytap_core::prf_salt_for_name(name)
                 .map_err(|error| format!("invalid key name: {error}"))?;
-            let identity_salt = keytap_core::nearby_identity_prf_salt();
+            let identity_salt = crate::nearby_identity::prf_salt();
             let anchor = IdentityAnchor::load()
                 .map_err(|error| format!("could not load the nearby passkey identity: {error}"))?;
-            let remember = match (offer_remember, remember_window_secs()) {
-                (true, window_secs) if window_secs > 0 => RememberOffer::Available { window_secs },
-                _ => RememberOffer::Disabled,
+            let remember = match offer_remember {
+                true => RememberOffer::Available {
+                    window_secs: DEFAULT_REMEMBER_WINDOW_SECS,
+                },
+                false => RememberOffer::Disabled,
             };
             let key_name = name.to_string();
             let prf_salt = URL_SAFE_NO_PAD.encode(prf_salt);
@@ -1731,36 +1572,23 @@ fn build_plan(operation: Operation<'_>) -> Result<FlowPlan, String> {
 #[serde(tag = "type", rename_all = "kebab-case", deny_unknown_fields)]
 enum PhoneMessage {
     SasPhoneCommit {
-        #[serde(rename = "v")]
-        version: u8,
         commitment: String,
     },
     SasPhoneReveal {
-        #[serde(rename = "v")]
-        version: u8,
         nonce: String,
     },
     SasPhoneComplete {
-        #[serde(rename = "v")]
-        version: u8,
         #[serde(rename = "releaseNonce")]
         release_nonce: String,
     },
-    SasPhoneRejected {
-        #[serde(rename = "v")]
-        version: u8,
-    },
+    SasPhoneRejected,
     PairedRegistrationResult {
-        #[serde(rename = "v")]
-        version: u8,
         #[serde(rename = "credentialId")]
         credential_id: String,
         #[serde(rename = "releaseSignature")]
         release_signature: String,
     },
     PairedAssertionResult {
-        #[serde(rename = "v")]
-        version: u8,
         #[serde(rename = "credentialId")]
         credential_id: String,
         #[serde(rename = "prfFirst")]
@@ -1770,30 +1598,20 @@ enum PhoneMessage {
         release_signature: String,
     },
     AssertionResult {
-        #[serde(rename = "v")]
-        version: u8,
         #[serde(rename = "credentialId")]
         credential_id: String,
         #[serde(rename = "prfFirst")]
         prf_first: String,
         identity: IdentityProofDto,
     },
-    RememberBegin {
-        #[serde(rename = "v")]
-        version: u8,
-    },
+    RememberBegin,
     RememberResult {
-        #[serde(rename = "v")]
-        version: u8,
         #[serde(rename = "credentialId")]
         credential_id: String,
         #[serde(rename = "prfFirst")]
         prf_first: String,
     },
-    Done {
-        #[serde(rename = "v")]
-        version: u8,
-    },
+    Done,
 }
 
 #[derive(Deserialize)]
@@ -1807,24 +1625,7 @@ enum IdentityProofDto {
 }
 
 fn decode_phone_message(text: &str) -> Result<PhoneMessage, String> {
-    let message: PhoneMessage = serde_json::from_str(text)
-        .map_err(|error| format!("invalid nearby protocol message: {error}"))?;
-    let version = match &message {
-        PhoneMessage::SasPhoneCommit { version, .. }
-        | PhoneMessage::SasPhoneReveal { version, .. }
-        | PhoneMessage::SasPhoneComplete { version, .. }
-        | PhoneMessage::SasPhoneRejected { version }
-        | PhoneMessage::PairedRegistrationResult { version, .. }
-        | PhoneMessage::PairedAssertionResult { version, .. }
-        | PhoneMessage::AssertionResult { version, .. }
-        | PhoneMessage::RememberBegin { version }
-        | PhoneMessage::RememberResult { version, .. }
-        | PhoneMessage::Done { version } => *version,
-    };
-    if version != PROTOCOL_VERSION {
-        return Err(format!("unsupported nearby protocol version {version}"));
-    }
-    Ok(message)
+    serde_json::from_str(text).map_err(|error| format!("invalid nearby protocol message: {error}"))
 }
 
 struct AssertionPayload {
@@ -1930,12 +1731,7 @@ mod tests {
             },
             remember: RememberOffer::Available { window_secs: 60 },
         };
-        let json = serde_json::to_value(CliMessage::Request {
-            version: PROTOCOL_VERSION,
-            request,
-        })
-        .unwrap();
-        assert_eq!(json["v"], 3);
+        let json = serde_json::to_value(CliMessage::Request { request }).unwrap();
         assert_eq!(json["type"], "request");
         assert_eq!(json["request"]["kind"], "assert");
         assert_eq!(json["request"]["remember"]["kind"], "available");
@@ -1970,7 +1766,6 @@ mod tests {
         );
 
         let json = serde_json::to_value(CliMessage::PairingRequest {
-            version: PROTOCOL_VERSION,
             request,
             cli_commitment: URL_SAFE_NO_PAD.encode([9; 32]),
         })
@@ -1988,7 +1783,6 @@ mod tests {
             user_name: "keytap".into(),
         };
         let json = serde_json::to_value(CliMessage::PairingRequest {
-            version: PROTOCOL_VERSION,
             request,
             cli_commitment: URL_SAFE_NO_PAD.encode([9; 32]),
         })
@@ -2006,7 +1800,6 @@ mod tests {
     #[test]
     fn error_and_rejection_messages_have_allowlisted_payloads() {
         let error = serde_json::to_value(CliMessage::ProtocolError {
-            version: PROTOCOL_VERSION,
             code: ProtocolErrorCode::UnexpectedMessage,
         })
         .unwrap();
@@ -2014,13 +1807,11 @@ mod tests {
             error,
             serde_json::json!({
                 "type": "protocol-error",
-                "v": 3,
                 "code": "unexpected-message"
             })
         );
 
         let rejected = serde_json::to_value(CliMessage::RememberRejected {
-            version: PROTOCOL_VERSION,
             reason: RememberRejectedReason::Mismatch,
         })
         .unwrap();
@@ -2028,13 +1819,11 @@ mod tests {
             rejected,
             serde_json::json!({
                 "type": "remember-rejected",
-                "v": 3,
                 "reason": "mismatch"
             })
         );
 
         let unavailable = serde_json::to_value(CliMessage::RememberRejected {
-            version: PROTOCOL_VERSION,
             reason: RememberRejectedReason::Unavailable,
         })
         .unwrap();
@@ -2042,13 +1831,11 @@ mod tests {
             unavailable,
             serde_json::json!({
                 "type": "remember-rejected",
-                "v": 3,
                 "reason": "unavailable"
             })
         );
 
         let identity_rejected = serde_json::to_value(CliMessage::InitialRejected {
-            version: PROTOCOL_VERSION,
             reason: InitialRejectedReason::IdentityMismatch,
         })
         .unwrap();
@@ -2056,13 +1843,11 @@ mod tests {
             identity_rejected,
             serde_json::json!({
                 "type": "initial-rejected",
-                "v": 3,
                 "reason": "identity-mismatch"
             })
         );
 
         let identity_indeterminate = serde_json::to_value(CliMessage::InitialIndeterminate {
-            version: PROTOCOL_VERSION,
             reason: InitialIndeterminateReason::IdentityDurabilityUnknown,
         })
         .unwrap();
@@ -2070,22 +1855,20 @@ mod tests {
             identity_indeterminate,
             serde_json::json!({
                 "type": "initial-indeterminate",
-                "v": 3,
                 "reason": "identity-durability-unknown"
             })
         );
     }
 
     #[test]
-    fn phone_messages_are_versioned_and_typed() {
+    fn phone_messages_are_strictly_typed() {
         assert!(matches!(
-            decode_phone_message(r#"{"v":3,"type":"remember-begin"}"#).unwrap(),
-            PhoneMessage::RememberBegin { .. }
+            decode_phone_message(r#"{"type":"remember-begin"}"#).unwrap(),
+            PhoneMessage::RememberBegin
         ));
-        assert!(decode_phone_message(r#"{"v":1,"type":"done"}"#).is_err());
+        assert!(decode_phone_message(r#"{"type":"unknown"}"#).is_err());
         assert!(
-            decode_phone_message(r#"{"v":3,"type":"assertion-result","credentialId":"YQ"}"#)
-                .is_err()
+            decode_phone_message(r#"{"type":"assertion-result","credentialId":"YQ"}"#).is_err()
         );
     }
 
@@ -2230,165 +2013,5 @@ mod tests {
         runtime.block_on(offer_dc.close()).ok();
         runtime.block_on(offer_pc.close()).ok();
         runtime.block_on(answer_pc.close()).ok();
-    }
-
-    /// End-to-end smoke test for the deployed signaling Durable Object and
-    /// Cloudflare's UDP TURN service. It is ignored by default because it
-    /// consumes live network service and intentionally forbids direct ICE.
-    #[test]
-    #[ignore = "requires the deployed keytap Worker and Cloudflare TURN"]
-    fn production_forced_turn_signaling_and_data_channel() {
-        rustls::crypto::ring::default_provider()
-            .install_default()
-            .ok();
-        let cli_session_key = CliSessionKey::generate();
-        let rendezvous_id = cli_session_key.rendezvous_id();
-        let signal_base = DEFAULT_SIGNAL_URL;
-        let mut cli_signaling =
-            connect_signaling(&format!("{signal_base}/v2/signal/{rendezvous_id}?role=cli"))
-                .unwrap();
-        let mut phone_signaling = connect_signaling(&format!(
-            "{signal_base}/v2/signal/{rendezvous_id}?role=phone"
-        ))
-        .unwrap();
-        let live_deadline = Instant::now() + Duration::from_secs(120);
-        wait_for_peer(&mut cli_signaling, live_deadline).unwrap();
-        wait_for_peer(&mut phone_signaling, live_deadline).unwrap();
-
-        let http_base = http_base_url(signal_base).unwrap();
-        let cli_ice = fetch_turn_ice_servers(
-            &format!("{http_base}/v2/signal/{rendezvous_id}/turn/cli"),
-            live_deadline,
-        )
-        .unwrap();
-        let phone_ice = fetch_turn_ice_servers(
-            &format!("{http_base}/v2/signal/{rendezvous_id}/turn/phone"),
-            live_deadline,
-        )
-        .unwrap();
-
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .worker_threads(2)
-            .build()
-            .unwrap();
-        let (offer_pc, offer_dc, open_rx, _offer_events) = runtime
-            .block_on(create_offer_peer_with_configuration(RTCConfiguration {
-                ice_servers: cli_ice,
-                ice_transport_policy: RTCIceTransportPolicy::Relay,
-                ..Default::default()
-            }))
-            .unwrap();
-
-        let (message_tx, message_rx) = mpsc::channel();
-        let answer_pc = runtime
-            .block_on(async {
-                let mut media_engine = MediaEngine::default();
-                media_engine.register_default_codecs()?;
-                let registry = register_default_interceptors(Registry::new(), &mut media_engine)?;
-                let api = APIBuilder::new()
-                    .with_media_engine(media_engine)
-                    .with_interceptor_registry(registry)
-                    .build();
-                let peer = Arc::new(
-                    api.new_peer_connection(RTCConfiguration {
-                        ice_servers: phone_ice,
-                        ice_transport_policy: RTCIceTransportPolicy::Relay,
-                        ..Default::default()
-                    })
-                    .await?,
-                );
-                peer.on_data_channel(Box::new(move |channel| {
-                    let message_tx = message_tx.clone();
-                    Box::pin(async move {
-                        assert_eq!(channel.label(), DATA_CHANNEL_LABEL);
-                        assert_eq!(channel.protocol(), DATA_CHANNEL_PROTOCOL);
-                        channel.on_message(Box::new(move |message| {
-                            let message_tx = message_tx.clone();
-                            Box::pin(async move {
-                                let _ = message_tx.send(message.data.to_vec());
-                            })
-                        }));
-                    })
-                }));
-                Ok::<_, webrtc::Error>(peer)
-            })
-            .unwrap();
-
-        let offer_sdp = runtime
-            .block_on(gather_offer(&offer_pc, ICE_GATHER_TIMEOUT))
-            .unwrap();
-        assert!(
-            offer_sdp.contains(" typ relay "),
-            "relay-only offer contained no TURN candidate:\n{offer_sdp}"
-        );
-        let signed_offer = cli_session_key.sign_offer(offer_sdp.as_bytes());
-        send_signal(&mut cli_signaling, &signed_offer).unwrap();
-        let received_offer = loop {
-            let Message::Text(text) = read_signal(&mut phone_signaling, live_deadline).unwrap()
-            else {
-                continue;
-            };
-            let Ok(envelope) = serde_json::from_str(text.as_str()) else {
-                continue;
-            };
-            if let Ok(body) = cli_session_key.verify_offer(&envelope) {
-                break String::from_utf8(body).unwrap();
-            }
-        };
-        runtime
-            .block_on(
-                answer_pc
-                    .set_remote_description(RTCSessionDescription::offer(received_offer).unwrap()),
-            )
-            .unwrap();
-
-        let answer_sdp = runtime
-            .block_on(async {
-                let answer = answer_pc.create_answer(None).await?;
-                let mut gathering_complete = answer_pc.gathering_complete_promise().await;
-                answer_pc.set_local_description(answer).await?;
-                tokio::time::timeout(ICE_GATHER_TIMEOUT, gathering_complete.recv())
-                    .await
-                    .map_err(|_| webrtc::Error::new("answer ICE gathering timed out".into()))?;
-                answer_pc
-                    .local_description()
-                    .await
-                    .map(|description| description.sdp)
-                    .ok_or_else(|| webrtc::Error::new("missing answer description".into()))
-            })
-            .unwrap();
-        assert!(
-            answer_sdp.contains(" typ relay "),
-            "relay-only answer contained no TURN candidate:\n{answer_sdp}"
-        );
-        let answer = PhoneAnswer::new(answer_sdp.as_bytes());
-        send_signal(&mut phone_signaling, &answer).unwrap();
-        let received_answer = wait_for_answer(&mut cli_signaling, live_deadline).unwrap();
-        runtime
-            .block_on(
-                offer_pc.set_remote_description(
-                    RTCSessionDescription::answer(received_answer).unwrap(),
-                ),
-            )
-            .unwrap();
-
-        assert!(matches!(
-            open_rx.recv_timeout(Duration::from_secs(30)).unwrap(),
-            EstablishmentEvent::Open
-        ));
-        runtime
-            .block_on(offer_dc.send_text("cloudflare-turn-ok"))
-            .unwrap();
-        assert_eq!(
-            message_rx.recv_timeout(Duration::from_secs(30)).unwrap(),
-            b"cloudflare-turn-ok"
-        );
-
-        runtime.block_on(offer_dc.close()).ok();
-        runtime.block_on(offer_pc.close()).ok();
-        runtime.block_on(answer_pc.close()).ok();
-        cli_signaling.close(None).ok();
-        phone_signaling.close(None).ok();
     }
 }

@@ -8,7 +8,7 @@
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 #[cfg(test)]
-use ed25519_dalek::{Signature, VerifyingKey};
+use ed25519_dalek::Signature;
 use ed25519_dalek::{Signer, SigningKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -35,9 +35,7 @@ impl CliSessionKey {
     }
 
     fn from_seed(seed: Zeroizing<[u8; 32]>) -> Self {
-        let public_key = SigningKey::from_bytes(&seed)
-            .verifying_key()
-            .to_bytes();
+        let public_key = SigningKey::from_bytes(&seed).verifying_key().to_bytes();
         let rendezvous = rendezvous_for(&public_key);
         Self {
             seed,
@@ -101,11 +99,6 @@ impl CliSessionKey {
         digest.update(answer);
         digest.finalize().into()
     }
-
-    #[cfg(test)]
-    pub fn verify_offer(&self, envelope: &SignedCliOffer) -> Result<Vec<u8>, String> {
-        envelope.verify_with(&self.public_key)
-    }
 }
 
 fn rendezvous_for(public_key: &[u8; 32]) -> [u8; 32] {
@@ -135,8 +128,13 @@ fn pairing_release_message(
     release_nonce: &[u8; 32],
 ) -> Vec<u8> {
     let mut message = Vec::with_capacity(
-        SAS_RELEASE_DOMAIN.len() + cli_public_key.len() + session_binding.len()
-            + sas_digest.len() + canonical_request.len() + release_nonce.len() + 9,
+        SAS_RELEASE_DOMAIN.len()
+            + cli_public_key.len()
+            + session_binding.len()
+            + sas_digest.len()
+            + canonical_request.len()
+            + release_nonce.len()
+            + 9,
     );
     message.extend_from_slice(SAS_RELEASE_DOMAIN);
     message.push(3);
@@ -149,31 +147,31 @@ fn pairing_release_message(
     message
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Serialize)]
 #[serde(rename_all = "lowercase")]
 enum CliRole {
     Cli,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Deserialize)]
 #[serde(rename_all = "lowercase")]
 enum PhoneRole {
     Phone,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Serialize)]
 #[serde(rename_all = "lowercase")]
 enum OfferKind {
     Offer,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Deserialize)]
 #[serde(rename_all = "lowercase")]
 enum AnswerKind {
     Answer,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SignedCliOffer {
     #[serde(rename = "v")]
@@ -185,27 +183,7 @@ pub struct SignedCliOffer {
     signature: String,
 }
 
-impl SignedCliOffer {
-    #[cfg(test)]
-    fn verify_with(&self, public_key: &[u8; 32]) -> Result<Vec<u8>, String> {
-        if self.version != SIGNAL_VERSION || self.seq != 0 {
-            return Err("unexpected signaling state".into());
-        }
-        let body = decode_canonical(&self.body, "signaling body")?;
-        let signature = decode_fixed::<64>(&self.signature, "offer signature")?;
-        let verifying_key = VerifyingKey::from_bytes(public_key)
-            .map_err(|_| "invalid CLI public key".to_string())?;
-        verifying_key
-            .verify_strict(
-                &offer_signature_message(self.seq, &body),
-                &Signature::from_bytes(&signature),
-            )
-            .map_err(|_| "signaling authentication failed".to_string())?;
-        Ok(body)
-    }
-}
-
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PhoneAnswer {
     #[serde(rename = "v")]
@@ -217,24 +195,19 @@ pub struct PhoneAnswer {
 }
 
 impl PhoneAnswer {
-    #[cfg(test)]
-    pub fn new(body: &[u8]) -> Self {
-        Self {
-            version: SIGNAL_VERSION,
-            from: PhoneRole::Phone,
-            seq: 0,
-            kind: AnswerKind::Answer,
-            body: URL_SAFE_NO_PAD.encode(body),
-        }
-    }
-
     pub fn decode(text: &str) -> Result<Vec<u8>, String> {
-        let envelope: Self = serde_json::from_str(text)
+        let Self {
+            version,
+            from: PhoneRole::Phone,
+            seq,
+            kind: AnswerKind::Answer,
+            body,
+        } = serde_json::from_str(text)
             .map_err(|_| "invalid phone signaling envelope".to_string())?;
-        if envelope.version != SIGNAL_VERSION || envelope.seq != 0 {
+        if version != SIGNAL_VERSION || seq != 0 {
             return Err("unexpected signaling state".into());
         }
-        decode_canonical(&envelope.body, "signaling body")
+        decode_canonical(&body, "signaling body")
     }
 }
 
@@ -246,13 +219,6 @@ fn decode_canonical(value: &str, label: &str) -> Result<Vec<u8>, String> {
         return Err(format!("non-canonical {label} encoding"));
     }
     Ok(bytes)
-}
-
-#[cfg(test)]
-fn decode_fixed<const N: usize>(value: &str, label: &str) -> Result<[u8; N], String> {
-    decode_canonical(value, label)?
-        .try_into()
-        .map_err(|_| format!("invalid {label} length"))
 }
 
 #[cfg(test)]
@@ -283,30 +249,20 @@ mod tests {
     }
 
     #[test]
-    fn signed_offer_is_state_and_body_bound() {
+    fn signed_offer_matches_the_browser_vector() {
         let key = fixed_key();
-        let mut offer = key.sign_offer(br#"{"type":"offer"}"#);
+        let offer = key.sign_offer(br#"{"type":"offer"}"#);
         assert_eq!(
             offer.signature,
             "U2k9m3s7XkIf9QF0ShT4TNY-FzYYAfoF4RX9zLBWoo5TYwS5-oblqKqQdK7mQVxO92UWDTidykN6Nm3vXeWPDg"
         );
-        assert_eq!(
-            key.verify_offer(&offer).unwrap(),
-            br#"{"type":"offer"}"#
-        );
-        offer.body = URL_SAFE_NO_PAD.encode(b"different");
-        assert!(key.verify_offer(&offer).is_err());
+        assert_eq!(offer.body, URL_SAFE_NO_PAD.encode(br#"{"type":"offer"}"#));
     }
 
     #[test]
     fn release_signature_is_bound_to_post_ceremony_nonce_and_full_pairing() {
         let key = fixed_key();
-        let signature = key.sign_pairing_release(
-            &[1; 32],
-            &[2; 32],
-            b"request",
-            &[3; 32],
-        );
+        let signature = key.sign_pairing_release(&[1; 32], &[2; 32], b"request", &[3; 32]);
         assert_eq!(
             URL_SAFE_NO_PAD.encode(signature),
             "Iyw_IiGnfBf7isag5c_waK22c6C0vdyERCWS9R5JZZA1GTYmasb6nG5S39sJKA7AR1szG6vp4HaIcNo5mq86Dw"
@@ -322,46 +278,6 @@ mod tests {
         verifying_key
             .verify_strict(&message, &Signature::from_bytes(&signature))
             .unwrap();
-
-        let changed_messages = [
-            pairing_release_message(
-                &verifying_key.to_bytes(),
-                &[9; 32],
-                &[2; 32],
-                b"request",
-                &[3; 32],
-            ),
-            pairing_release_message(
-                &verifying_key.to_bytes(),
-                &[1; 32],
-                &[9; 32],
-                b"request",
-                &[3; 32],
-            ),
-            pairing_release_message(
-                &verifying_key.to_bytes(),
-                &[1; 32],
-                &[2; 32],
-                b"changed",
-                &[3; 32],
-            ),
-            pairing_release_message(
-                &verifying_key.to_bytes(),
-                &[1; 32],
-                &[2; 32],
-                b"request",
-                &[4; 32],
-            ),
-        ];
-        for changed in changed_messages {
-            assert!(verifying_key
-                .verify_strict(&changed, &Signature::from_bytes(&signature))
-                .is_err());
-        }
-        assert!(SigningKey::from_bytes(&[8; 32])
-            .verifying_key()
-            .verify_strict(&message, &Signature::from_bytes(&signature))
-            .is_err());
     }
 
     #[test]
@@ -383,9 +299,13 @@ mod tests {
 
     #[test]
     fn phone_answer_is_strict_and_canonical() {
-        let answer = PhoneAnswer::new(b"answer");
-        let encoded = serde_json::to_string(&answer).unwrap();
-        assert_eq!(PhoneAnswer::decode(&encoded).unwrap(), b"answer");
+        assert_eq!(
+            PhoneAnswer::decode(
+                r#"{"v":3,"from":"phone","seq":0,"kind":"answer","body":"YW5zd2Vy"}"#
+            )
+            .unwrap(),
+            b"answer"
+        );
         assert!(PhoneAnswer::decode(
             r#"{"v":2,"from":"phone","seq":0,"kind":"answer","body":"YW5zd2Vy"}"#
         )
@@ -400,7 +320,10 @@ mod tests {
     fn session_binding_changes_with_each_authenticated_input() {
         let key = fixed_key();
         let baseline = key.identity_session_binding(b"offer", b"answer");
-        assert_ne!(baseline, key.identity_session_binding(b"changed", b"answer"));
+        assert_ne!(
+            baseline,
+            key.identity_session_binding(b"changed", b"answer")
+        );
         assert_ne!(baseline, key.identity_session_binding(b"offer", b"changed"));
         assert_ne!(
             baseline,

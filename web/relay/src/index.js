@@ -16,15 +16,6 @@ const SIGNAL_LIFECYCLE_KEY = "signal:lifecycle";
 
 /**
  * @typedef {
- *   | { kind: "empty" }
- *   | { kind: "waiting-for-cli", phone: WebSocket }
- *   | { kind: "waiting-for-phone", cli: WebSocket }
- *   | { kind: "ready", cli: WebSocket, phone: WebSocket }
- * } ConnectedPeers
- */
-
-/**
- * @typedef {
  *   | { kind: "missing" }
  *   | { kind: "configured", keyId: string, apiToken: string }
  * } TurnConfiguration
@@ -36,13 +27,6 @@ const SIGNAL_LIFECYCLE_KEY = "signal:lifecycle";
  *   | { kind: "invalid" }
  *   | { kind: "active", generation: string, expiresAt: number }
  * } SignalLifecycle
- */
-
-/**
- * @typedef {
- *   | { kind: "stored", serialized: string }
- *   | { kind: "expired" }
- * } TurnCredentialMint
  */
 
 /**
@@ -148,35 +132,10 @@ function v2Error(request, status, message, extraHeaders = {}) {
   });
 }
 
-/**
- * Rate-limit only the new public rendezvous surface. Legacy behavior remains
- * unchanged. Cloudflare supplies CF-Connecting-IP at the edge.
- * @param {Request} request
- * @param {any} env
- * @returns {Promise<Response | null>}
- */
-async function enforceV2RateLimit(request, env) {
-  if (!env.SIGNAL_RATE_LIMIT || typeof env.SIGNAL_RATE_LIMIT.limit !== "function") {
-    return v2Error(request, 503, "Rate limiter is not configured");
-  }
-
-  const source = request.headers.get("CF-Connecting-IP") || "missing-ip";
-  try {
-    const result = await env.SIGNAL_RATE_LIMIT.limit({ key: `signal:${source}` });
-    if (result.success) {
-      return null;
-    }
-  } catch {
-    return v2Error(request, 503, "Rate limiter unavailable");
-  }
-
-  return v2Error(request, 429, "Too many requests", { "Retry-After": "60" });
-}
-
 export default {
   /**
    * @param {Request} request
-   * @param {{ RELAY_SESSION: DurableObjectNamespace, SIGNAL_SESSION: DurableObjectNamespace, SIGNAL_RATE_LIMIT: { limit(input: { key: string }): Promise<{ success: boolean }> } }} env
+   * @param {{ RELAY_SESSION: DurableObjectNamespace, SIGNAL_SESSION: DurableObjectNamespace }} env
    * @returns {Promise<Response>}
    */
   async fetch(request, env) {
@@ -195,7 +154,7 @@ export default {
     }
 
     const turnMatch = url.pathname.match(
-      new RegExp(`^/v2/signal/(${RENDEZVOUS_ID_PATTERN})/turn/(cli|phone)$`),
+      new RegExp(`^/v2/signal/(${RENDEZVOUS_ID_PATTERN})/turn$`),
     );
     const signalMatch = url.pathname.match(
       new RegExp(`^/v2/signal/(${RENDEZVOUS_ID_PATTERN})$`),
@@ -207,11 +166,6 @@ export default {
 
     if (request.method === "OPTIONS") {
       return new Response(null, { status: 204, headers: corsHeaders(request) });
-    }
-
-    const rateLimitResponse = await enforceV2RateLimit(request, env);
-    if (rateLimitResponse) {
-      return rateLimitResponse;
     }
 
     const rendezvousId = (turnMatch || signalMatch)[1];
@@ -357,8 +311,6 @@ export class SignalSession {
   constructor(state, env) {
     this.state = state;
     this.env = env;
-    /** @type {Map<string, Promise<TurnCredentialMint>>} */
-    this.turnCredentialRequests = new Map();
   }
 
   /**
@@ -368,19 +320,14 @@ export class SignalSession {
   async fetch(request) {
     const url = new URL(request.url);
     const turnMatch = url.pathname.match(
-      new RegExp(`^/v2/signal/${RENDEZVOUS_ID_PATTERN}/turn/(cli|phone)$`),
+      new RegExp(`^/v2/signal/${RENDEZVOUS_ID_PATTERN}/turn$`),
     );
 
     if (turnMatch) {
-      const role = parseSignalRole(turnMatch[1]);
       if (request.method !== "GET") {
         return v2Error(request, 405, "Method not allowed", { Allow: "GET" });
       }
-      // The route regex and parser intentionally form a parse boundary.
-      if (role === null) {
-        return v2Error(request, 400, "Invalid role");
-      }
-      return this.fetchTurnCredential(request, role);
+      return this.fetchTurnCredential(request);
     }
 
     if (!url.pathname.match(new RegExp(`^/v2/signal/${RENDEZVOUS_ID_PATTERN}$`))) {
@@ -441,40 +388,14 @@ export class SignalSession {
     });
   }
 
-  /**
-   * @param {string} generation
-   * @returns {ConnectedPeers}
-   */
-  connectedPeers(generation) {
-    const cli = this.socketsForRole("cli", generation);
-    const phone = this.socketsForRole("phone", generation);
-
-    if (cli.length === 1 && phone.length === 1) {
-      return { kind: "ready", cli: cli[0], phone: phone[0] };
-    }
-    if (cli.length === 1) {
-      return { kind: "waiting-for-phone", cli: cli[0] };
-    }
-    if (phone.length === 1) {
-      return { kind: "waiting-for-cli", phone: phone[0] };
-    }
-    return { kind: "empty" };
-  }
-
   /** @param {string} generation */
   notifyPeerReady(generation) {
-    const peers = this.connectedPeers(generation);
-    switch (peers.kind) {
-      case "ready": {
-        const message = JSON.stringify({ type: "peer-ready" });
-        try { peers.cli.send(message); } catch {}
-        try { peers.phone.send(message); } catch {}
-        return;
-      }
-      case "empty":
-      case "waiting-for-cli":
-      case "waiting-for-phone":
-        return;
+    const cli = this.socketsForRole("cli", generation);
+    const phone = this.socketsForRole("phone", generation);
+    if (cli.length === 1 && phone.length === 1) {
+      const message = JSON.stringify({ type: "peer-ready" });
+      try { cli[0].send(message); } catch {}
+      try { phone[0].send(message); } catch {}
     }
   }
 
@@ -549,25 +470,14 @@ export class SignalSession {
 
   /**
    * @param {Request} request
-   * @param {SignalRole} role
    * @returns {Promise<Response>}
    */
-  async fetchTurnCredential(request, role) {
+  async fetchTurnCredential(request) {
     const lifecycle = await this.requireActiveSignalSession();
     switch (lifecycle.kind) {
       case "expired":
         return v2Error(request, 410, "Signal session expired");
       case "active":
-        break;
-    }
-
-    const peers = this.connectedPeers(lifecycle.generation);
-    switch (peers.kind) {
-      case "empty":
-      case "waiting-for-cli":
-      case "waiting-for-phone":
-        return v2Error(request, 409, "Both peers must be connected");
-      case "ready":
         break;
     }
 
@@ -579,47 +489,26 @@ export class SignalSession {
         break;
     }
 
-    const storageKey = `turn:${lifecycle.generation}:${role}`;
-    const cached = await this.state.storage.get(storageKey);
-    if (typeof cached === "string") {
-      return this.turnCredentialResponse(request, cached);
-    }
-
-    const requestKey = `${lifecycle.generation}:${role}`;
-    let pending = this.turnCredentialRequests.get(requestKey);
-    if (!pending) {
-      pending = this.mintAndStoreTurnCredential(
-        storageKey,
-        lifecycle.generation,
-        config,
-      );
-      this.turnCredentialRequests.set(requestKey, pending);
-    }
-
     try {
-      const result = await pending;
-      switch (result.kind) {
-        case "stored":
-          return this.turnCredentialResponse(request, result.serialized);
-        case "expired":
-          return v2Error(request, 410, "Signal session expired");
+      const serialized = await this.mintTurnCredential(config);
+      const current = await this.requireActiveSignalSession();
+      if (
+        current.kind === "expired" ||
+        current.generation !== lifecycle.generation
+      ) {
+        return v2Error(request, 410, "Signal session expired");
       }
+      return this.turnCredentialResponse(request, serialized);
     } catch {
       return v2Error(request, 502, "TURN credential provider failed");
-    } finally {
-      if (this.turnCredentialRequests.get(requestKey) === pending) {
-        this.turnCredentialRequests.delete(requestKey);
-      }
     }
   }
 
   /**
-   * @param {string} storageKey
-   * @param {string} generation
    * @param {{ kind: "configured", keyId: string, apiToken: string }} config
-   * @returns {Promise<TurnCredentialMint>}
+   * @returns {Promise<string>}
    */
-  async mintAndStoreTurnCredential(storageKey, generation, config) {
+  async mintTurnCredential(config) {
     const endpoint =
       `https://rtc.live.cloudflare.com/v1/turn/keys/${encodeURIComponent(config.keyId)}` +
       "/credentials/generate-ice-servers";
@@ -641,42 +530,7 @@ export class SignalSession {
       throw new Error("TURN provider response is too large");
     }
 
-    let parsed;
-    try {
-      parsed = JSON.parse(body);
-    } catch {
-      throw new Error("TURN provider returned invalid JSON");
-    }
-    if (!isTurnCredentialResponse(parsed)) {
-      throw new Error("TURN provider returned an invalid credential set");
-    }
-
-    const serialized = JSON.stringify(parsed);
-    if (this.connectedPeers(generation).kind !== "ready") {
-      return { kind: "expired" };
-    }
-
-    /** @type {TurnCredentialMint} */
-    const result = await this.state.storage.transaction(async (transaction) => {
-      const lifecycle = parseSignalLifecycle(
-        await transaction.get(SIGNAL_LIFECYCLE_KEY),
-      );
-      switch (lifecycle.kind) {
-        case "missing":
-        case "invalid":
-          return { kind: "expired" };
-        case "active":
-          if (
-            lifecycle.generation !== generation ||
-            lifecycle.expiresAt <= Date.now()
-          ) {
-            return { kind: "expired" };
-          }
-          await transaction.put(storageKey, serialized);
-          return { kind: "stored", serialized };
-      }
-    });
-    return result;
+    return body;
   }
 
   /**
@@ -820,39 +674,4 @@ export class SignalSession {
       try { peer.send(JSON.stringify({ type: "peer-left" })); } catch {}
     }
   }
-}
-
-/**
- * Validate only the provider boundary. The returned JSON is otherwise passed
- * through unchanged so browser and native clients receive Cloudflare's normal
- * RTCIceServer shape.
- * @param {unknown} value
- * @returns {boolean}
- */
-function isTurnCredentialResponse(value) {
-  if (!value || typeof value !== "object" || !("iceServers" in value)) {
-    return false;
-  }
-  if (!Array.isArray(value.iceServers) || value.iceServers.length === 0) {
-    return false;
-  }
-
-  let foundAuthenticatedTurnServer = false;
-  for (const server of value.iceServers) {
-    if (!server || typeof server !== "object" || !("urls" in server)) {
-      return false;
-    }
-    const urls = typeof server.urls === "string" ? [server.urls] : server.urls;
-    if (!Array.isArray(urls) || urls.length === 0 || urls.some((url) => typeof url !== "string")) {
-      return false;
-    }
-
-    if (urls.some((url) => url.startsWith("turn:") || url.startsWith("turns:"))) {
-      if (typeof server.username !== "string" || typeof server.credential !== "string") {
-        return false;
-      }
-      foundAuthenticatedTurnServer = true;
-    }
-  }
-  return foundAuthenticatedTurnServer;
 }

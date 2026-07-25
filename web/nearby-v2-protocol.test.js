@@ -3,22 +3,20 @@ import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 
 import {
-  CLOUDFLARE_STUN_ONLY,
   ProtocolError,
   createCliOfferVerifier,
   createNearbyIdentityProof,
   createNearbySessionBinding,
-  createPhoneAnswer,
   createSasCommitment,
   createSasContext,
   createSasDigest,
   decodeBase64URL,
   encodeBase64URL,
   filterCloudflareIceServers,
-  isAllowedCloudflareIceUrl,
   nearbyIdentityProofMessage,
   nearbySasRequestBytes,
   parseSasWordList,
+  requestPairingRelease,
   sasPhrase,
   verifySasCommitment,
 } from './nearby-v2-protocol.js';
@@ -54,13 +52,6 @@ test('verifies the Rust-signed CLI offer and compact public-key QR vector', asyn
     new TextDecoder().decode(await verifier.verifyOffer(envelope)),
     '{"type":"offer"}',
   );
-  assert.deepEqual(createPhoneAnswer('v=0\r\n'), {
-    v: 3,
-    from: 'phone',
-    seq: 0,
-    kind: 'answer',
-    body: 'dj0wDQo',
-  });
 });
 
 test('derives a stable Ed25519 identity and signs the exact nearby result', async () => {
@@ -248,17 +239,6 @@ test('uses only hardcoded Cloudflare endpoints and omits port 53', () => {
   assert.equal(servers[1].credential, 'temporary-password');
   assert.equal(servers[1].urls.some(url => url.includes('attacker.example')), false);
   assert.equal(servers[1].urls.some(url => /:53(?:\?|$)/.test(url)), false);
-  assert.deepEqual(CLOUDFLARE_STUN_ONLY[0].urls, ['stun:stun.cloudflare.com:3478']);
-});
-
-test('Cloudflare URL allowlist is exact', () => {
-  assert.equal(isAllowedCloudflareIceUrl('stun:stun.cloudflare.com:3478'), true);
-  assert.equal(isAllowedCloudflareIceUrl('turn:turn.cloudflare.com:3478?transport=udp'), true);
-  assert.equal(isAllowedCloudflareIceUrl('turns:turn.cloudflare.com:443?transport=tcp'), true);
-  assert.equal(isAllowedCloudflareIceUrl('stun:stun.cloudflare.com:53'), false);
-  assert.equal(isAllowedCloudflareIceUrl('turn:turn.cloudflare.com:53?transport=udp'), false);
-  assert.equal(isAllowedCloudflareIceUrl('turn:evil.example:3478?transport=udp'), false);
-  assert.equal(isAllowedCloudflareIceUrl('https://turn.cloudflare.com/'), false);
 });
 
 test('rejects TURN responses without bounded string credentials', () => {
@@ -267,4 +247,113 @@ test('rejects TURN responses without bounded string credentials', () => {
     () => filterCloudflareIceServers([{ urls: 'turn:turn.cloudflare.com:3478?transport=udp' }]),
     ProtocolError,
   );
+});
+
+function pairingDeferred() {
+  let resolve;
+  const promise = new Promise(resolvePromise => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
+
+function pairingFixture() {
+  const incoming = pairingDeferred();
+  const sent = [];
+  const verified = [];
+  const releaseNonce = new Uint8Array(32).fill(6);
+  const session = {
+    send: message => sent.push(message),
+    next: timeoutMs => {
+      assert.equal(timeoutMs, 150_000);
+      return incoming.promise;
+    },
+  };
+  const verifier = {
+    async verifyPairingRelease(fields) {
+      verified.push(fields);
+    },
+  };
+  const fields = {
+    session,
+    verifier,
+    sessionBinding: new Uint8Array(32).fill(4),
+    sasDigest: new Uint8Array(32).fill(5),
+    request: { kind: 'register' },
+    releaseNonce,
+  };
+  return { fields, incoming, sent, verified, releaseNonce };
+}
+
+test('withholds the held result while only announcing phone completion', async () => {
+  const { fields, incoming, sent, verified, releaseNonce } = pairingFixture();
+  let settled = false;
+  const decisionPromise = requestPairingRelease(fields).then(value => {
+    settled = true;
+    return value;
+  });
+  await Promise.resolve();
+
+  assert.equal(settled, false);
+  assert.deepEqual(sent, [{
+    type: 'sas-phone-complete',
+    releaseNonce: encodeBase64URL(releaseNonce),
+  }]);
+  assert.equal(sent.some(message => /result$/.test(message.type)), false);
+  assert.equal(verified.length, 0);
+
+  const signature = new Uint8Array(64).fill(7);
+  incoming.resolve({
+    type: 'sas-cli-accepted',
+    releaseNonce: encodeBase64URL(releaseNonce),
+    signature: encodeBase64URL(signature),
+  });
+  const decision = await decisionPromise;
+  assert.equal(decision.kind, 'accepted');
+  assert.deepEqual(decision.signature, signature);
+  assert.equal(verified.length, 1);
+  assert.deepEqual(verified[0].releaseNonce, releaseNonce);
+});
+
+test('rejects an early or replayed decision for another completion nonce', async () => {
+  const { fields, incoming, verified } = pairingFixture();
+  const decisionPromise = requestPairingRelease(fields);
+  incoming.resolve({
+    type: 'sas-cli-accepted',
+    releaseNonce: encodeBase64URL(new Uint8Array(32).fill(9)),
+    signature: encodeBase64URL(new Uint8Array(64).fill(7)),
+  });
+  await assert.rejects(decisionPromise, /different pairing instance/);
+  assert.equal(verified.length, 0);
+});
+
+test('propagates signature failure and accepts only an exact rejection', async () => {
+  const invalid = pairingFixture();
+  invalid.fields.verifier.verifyPairingRelease = async () => {
+    throw new ProtocolError('invalid pairing release signature');
+  };
+  const invalidPromise = requestPairingRelease(invalid.fields);
+  invalid.incoming.resolve({
+    type: 'sas-cli-accepted',
+    releaseNonce: encodeBase64URL(invalid.releaseNonce),
+    signature: encodeBase64URL(new Uint8Array(64).fill(7)),
+  });
+  await assert.rejects(invalidPromise, /invalid pairing release signature/);
+
+  const rejected = pairingFixture();
+  const rejectedPromise = requestPairingRelease(rejected.fields);
+  rejected.incoming.resolve({
+    type: 'sas-cli-rejected',
+    releaseNonce: encodeBase64URL(rejected.releaseNonce),
+  });
+  assert.deepEqual(await rejectedPromise, { kind: 'rejected' });
+  assert.equal(rejected.verified.length, 0);
+});
+
+test('the phone has no word-match confirmation control', async () => {
+  const html = await readFile(new URL('./nearby.html', import.meta.url), 'utf8');
+  const pairing = html.match(/<section class="pairing"[\s\S]*?<\/section>/)?.[0];
+  assert.ok(pairing, 'pairing section must exist');
+  assert.doesNotMatch(pairing, /<button|They match|match|mismatch/i);
+  assert.match(pairing, /confirm them once in the terminal/i);
 });

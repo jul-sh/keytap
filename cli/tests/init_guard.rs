@@ -1,7 +1,6 @@
-//! End-to-end tests of init's refusal to silently replace a passkey. A
-//! machine shows it was initialized through the active-root marker its
-//! stores carry; rerunning `keytap init` there must die with instructions
-//! before any ceremony, unless --force says the replacement is deliberate.
+//! End-to-end tests of init's refusal to silently replace a passkey. A stored
+//! nearby identity proves this machine was initialized; rerunning `keytap
+//! init` there must die before any ceremony unless --force is deliberate.
 
 use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
@@ -44,28 +43,20 @@ fn stderr(out: &Output) -> String {
     String::from_utf8_lossy(&out.stderr).into_owned()
 }
 
-/// A state directory whose file store carries an active-root marker: the
-/// exact trace a previous `keytap init` (or `remember`) leaves behind.
-#[cfg(target_os = "linux")]
+/// A state directory containing the credential anchor written by init.
 fn initialized_state_dir(tag: &str) -> std::path::PathBuf {
-    use base64::engine::general_purpose::STANDARD as BASE64;
-    use base64::Engine;
     let dir = std::env::temp_dir().join(format!("keytap-init-guard-{}-{tag}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(dir.join("keytap")).unwrap();
-    let marker = BASE64.encode(b"keytap-root-v1:00112233445566778899aabbccddeeff");
     std::fs::write(
-        dir.join("keytap/remembered.json"),
-        format!(r#"{{"format":"keytap-file-store-v1","entries":{{"active-root":"{marker}"}}}}"#),
+        dir.join("keytap/nearby-identity.json"),
+        r#"{"format":"keytap-nearby-identity-v2","identity":{"kind":"credential","credentialId":"ABEiM0RVZneImaq7zN3u_w"}}"#,
     )
     .unwrap();
     dir
 }
 
-/// The guard itself. Linux-only for the same reason as env_keys' store
-/// tests: on macOS the root check would also consult the developer's real
-/// keychain; here (cleared env, no D-Bus) only the file store answers.
-#[cfg(target_os = "linux")]
+/// The identity check is file-only and must run before any platform ceremony.
 #[test]
 fn reinit_is_refused_without_force() {
     let dir = initialized_state_dir("refuse");
@@ -76,12 +67,12 @@ fn reinit_is_refused_without_force() {
     let out = keytap(&[("XDG_STATE_HOME", state)], &["init", "--prompt"]);
     assert!(!out.status.success());
     let err = stderr(&out);
-    assert!(err.contains("already set up"), "stderr: {err}");
+    assert!(err.contains("already stored"), "stderr: {err}");
     assert!(err.contains("--force"), "stderr: {err}");
 
-    // The refusal must leave the store exactly as it found it.
-    let store = std::fs::read_to_string(dir.join("keytap/remembered.json")).unwrap();
-    assert!(store.contains("active-root"), "store was modified: {store}");
+    // The refusal must leave the identity exactly as it found it.
+    let identity = std::fs::read_to_string(dir.join("keytap/nearby-identity.json")).unwrap();
+    assert!(identity.contains("ABEiM0RVZneImaq7zN3u_w"));
 
     let _ = std::fs::remove_dir_all(&dir);
 }

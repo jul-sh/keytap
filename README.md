@@ -108,51 +108,34 @@ On platforms where the CLI cannot do the passkey ceremony natively, `keytap` fal
 The flow is:
 
 1. the CLI generates a one-time Ed25519 keypair and puts only its 32-byte
-   public key in a QR-code URL fragment
-2. you scan the QR code and your phone opens the `keytap` page
-3. the CLI signs its complete WebRTC offer; the phone verifies that signature
-   before giving the offer, including its DTLS fingerprint, to WebRTC
-4. WebRTC connects them directly when possible, with Cloudflare Realtime TURN as a fallback
-5. if this machine has not paired with the passkey identity yet, a
-   commit–reveal exchange produces the same two words independently on the CLI
-   and phone
-6. the phone shows those words, completes the passkey ceremony, and holds its
-   result locally; there is no confirmation step on the phone
-7. once the phone is finished, the CLI gives you two minutes to say whether
-   its words exactly match the phone; only an affirmative terminal answer
-   signs a one-time release that the phone verifies before sending the held
-   result
-8. for a derivation, that one passkey approval returns two independent PRF
-   outputs: the requested named key and a stable nearby-identity seed
-9. the page signs the pairing and exact derivation result with the Ed25519
-   identity derived from that seed, and the CLI pins it for later requests
-10. on an already-paired machine, the pinned signature authenticates the fresh
-    session, so the comparison steps are skipped
+   public key in the QR-code URL fragment
+2. the phone verifies the CLI's signature over the complete WebRTC offer,
+   including its DTLS fingerprint; peers connect directly when possible and
+   use Cloudflare Realtime TURN otherwise
+3. on first use, a commit–reveal exchange gives the phone and CLI the same two
+   words; the phone completes WebAuthn and holds the result until you confirm
+   those words once in the terminal
+4. that one passkey approval derives both the named key and a separate, stable
+   signing identity; the phone signs the exact result, and the CLI verifies it
+   and pins the identity
+5. later requests require a fresh signature from that pinned identity and skip
+   the word comparison
 
-The comparison is required for the first nearby derivation on a new machine,
-for nearby registration, and once after upgrading an older or `keytap init`
-credential-only record into a full identity pin. Registration can only store
-the new credential ID portably because WebAuthn permits
-[`create()` to omit PRF results](https://w3c.github.io/webauthn/#prf-extension);
-it still finishes on the phone before the terminal confirmation. Rejecting the
-words can leave an unused passkey on the phone, but its credential ID is not
-sent to or stored by the CLI. The next ordinary derivation uses that credential
-and establishes its Ed25519 identity with the same single passkey approval that
-derives the requested key. Every later nearby derivation must use the pinned
-credential and verify a fresh signature before the CLI accepts or prints the
-key. `keytap init --force` replaces the local identity record because it
-deliberately replaces the root passkey.
+`keytap init` also uses the comparison. WebAuthn may omit PRF output during
+registration, so init first stores only the credential ID; the first derivation
+pins its signing identity with the same approval that derives the requested
+key. Rejecting the words may leave an unused passkey on the phone, but sends no
+credential ID or key to the CLI. `keytap init --force` intentionally replaces
+the local identity and derived-key root.
 
-The public key is 43 base64url characters, exactly the same payload size as the
-old 32-byte capability, so the complete production URL remains only 74
-characters (`https://keytap.jul.sh/nearby#k=...`). The rendezvous ID is derived
-from it; it is not an additional QR payload.
+The public key is 43 base64url characters, so the complete production URL is
+only 74 characters (`https://keytap.jul.sh/nearby#k=...`). The rendezvous ID is
+derived from it; it is not an additional QR payload.
 
-After the command succeeds, the page can offer a **Remember on this machine**
-action. Choosing it performs a second passkey approval over the same data
-channel; the CLI stores the key only after that result matches the first
-ceremony. It does not require another QR scan
-(see [Skipping repeated prompts](#skipping-repeated-prompts)).
+After a nearby derivation delivers its key, the page can offer a **Remember on
+this machine** action. It performs a second passkey approval on the same
+connection; the CLI stores the key only if it matches the first result, with no
+second QR scan (see [Skipping repeated prompts](#skipping-repeated-prompts)).
 
 ## Install
 
@@ -191,9 +174,15 @@ keytap ties all derived keys to a single passkey registered under the `keytap.ju
 
 With that said, here is how keytap works within those constraints:
 
-- By default keytap does not sync or cache derived keys. It derives on demand, writes to stdout, and exits. The nearby-phone flow stores one public, human-paired identity in `~/.local/state/keytap/nearby-identity.json`; it never stores a PRF output or derived key there.
-- The one explicit exception is remembering — `keytap remember NAME`, or the opt-in remember action on the nearby-phone page: it stores that derived key on this machine, with no TTL, until `keytap forget`, `keytap forget --all`, or passkey replacement. The key lands in a plain file (not encrypted at rest), silently upgraded to the OS keychain when the machine has one (then encrypted at rest by it). Either way, any process running as your user may be able to invoke keytap and use the key without a ceremony.
-- Remembered keys are tied to a fingerprint of the registered passkey credential. `keytap init` is a root boundary: it wipes all remembered entries, and the exact persisted identity generation authorizes every lookup. Even if cleanup is interrupted, keys remembered under a replaced passkey are never used.
+- By default keytap derives on demand, writes to stdout, and exits. Nearby auth
+  stores only a public identity pin in
+  `~/.local/state/keytap/nearby-identity.json`, never a PRF output or derived key.
+- Remembering is the explicit exception. It stores the named key on this
+  machine until you forget it or replace the passkey; any process running as
+  your user may then be able to use it without a ceremony. See
+  [Skipping repeated prompts](#skipping-repeated-prompts).
+- `keytap init` replaces the root, wipes remembered entries, and makes the new
+  persisted identity generation authoritative for remembered-key lookup.
 - If you save the output, pipe it into another tool, or import it into an agent, that destination now holds the key and must be trusted accordingly.
 - The PRF inputs are public and derived from the key name. They provide stable derivation and domain separation, not secrecy.
 - Replacing the registered passkey changes every key derived from it. Treat the passkey as the root of your derived identities.
@@ -203,92 +192,56 @@ With that said, here is how keytap works within those constraints:
 When keytap authenticates via your phone, additional trust considerations apply:
 
 - **You trust the web page served to your phone.** The code served by
-  `keytap.jul.sh` sees the public key from the QR and both WebAuthn PRF outputs. A
-  compromised page can therefore steal the derived key and the stable nearby
-  identity seed, which would let it impersonate that passkey in later nearby
-  flows until you replace it with `keytap init --force`. The URL fragment is
-  not sent in the initial HTTP request or in a Referer header, but the loaded
-  JavaScript necessarily receives it.
+  `keytap.jul.sh` sees the QR public key and both WebAuthn PRF outputs. A
+  compromised page can steal the named key and identity seed, then impersonate
+  that passkey in nearby flows until `keytap init --force`. The URL fragment is
+  absent from the initial HTTP request and Referer, but loaded JavaScript sees it.
 - **The QR value is public, not a shared secret.** Keep the code in view only
-  long enough to connect because someone who reads it can derive the rendezvous
-  ID, race a fake phone, learn request metadata, or deny service. It does not
-  give them the CLI's private signing key: they cannot forge its authenticated
-  WebRTC offer or the post-WebAuthn release, so they cannot make the legitimate
-  phone send its held result. On an unpaired CLI, a fake phone is instead
-  detected by the two-word comparison. The commitments bind both parties
-  before either reveals its nonce, and the words are bound to the exact request
-  and WebRTC session. A fake phone is silently accepted only if its independent
-  words collide or the user approves a mismatch. Two BIP39 words carry 22 bits,
-  so a fresh adversarial attempt that the user compares and approves has
-  probability 1 in 4,194,304 of colliding; repeated approved attempts
-  accumulate risk. After a legitimate identity is pinned, substitution is
-  rejected because the attacker cannot produce its signature. The Worker
-  receives only a hash-derived rendezvous ID rather than the QR public key.
+  long enough to connect. Someone who reads it can derive the rendezvous ID,
+  race a fake phone, learn request metadata, or deny service, but cannot forge
+  the CLI's signed offer or release. Before an identity is pinned, the two-word
+  comparison detects a fake phone. The commitments fix both nonces before
+  reveal and bind the words to the exact request and WebRTC session. The 22-bit
+  phrase has a 1 in 4,194,304 collision chance per independently committed
+  attempt; approving a mismatch or repeated attempts increases risk. Once
+  pinned, the phone must instead prove the trusted private identity key. The
+  Worker receives only a hash-derived rendezvous ID, not the QR public key.
 - **The nearby identity pin is local public state, not a secret.** It is written
-  atomically with owner-only permissions to
-  `~/.local/state/keytap/nearby-identity.json` (and honors `$XDG_STATE_HOME`).
-  Init snapshots the exact pre-ceremony revision and refuses to overwrite a
-  concurrent init or pairing; an advisory process lock and synced atomic
-  publication protect the update itself.
-  Local software able to replace that file can reset the trust decision.
-  `keytap init --force` is the current intentional reset path; there is no
-  separate trust-management command yet. Identity files created by the older
-  TOFU protocol are treated as credential-only records and require one
-  two-word pairing before they become current identity pins.
+  atomically with owner-only permissions (and honors `$XDG_STATE_HOME`); init
+  refuses to overwrite a concurrently changed pin. Local software able to
+  replace the file can reset trust. The intentional reset is `keytap init --force`.
 - **The signaling Worker is not trusted with peer identity or key material.**
   It sees a derived rendezvous ID, the signed offer, the unsigned answer,
   SDP/ICE metadata, IP addresses, and timing. It can block, delay, replay, or
-  race/replace the phone-side answer. It cannot alter the CLI offer or forge a
-  release. Before an identity is pinned, the CLI authenticates the phone
-  through the two-word comparison; afterward it requires the pinned identity
-  signature.
+  race/replace the answer, but cannot alter the signed offer or forge the
+  release. The word comparison or pinned identity rejects substitution.
 - **Cloudflare TURN is not trusted with plaintext.** Direct peer-to-peer ICE is
   preferred; when TURN is necessary, Cloudflare relays DTLS-encrypted WebRTC
-  packets and can observe connection metadata and deny service. Cloudflare
-  documents the same distinction in its [TURN FAQ](https://developers.cloudflare.com/realtime/turn/faq/).
-  You still trust Cloudflare to operate the service, enforce credential expiry,
-  and report usage for billing; payload confidentiality does not depend on the
-  TURN operator being honest.
+  packets. It can observe metadata or deny service, but payload confidentiality
+  does not depend on the TURN operator being honest.
 - **TURN credential issuance is intentionally public.** Keytap has no account
-  or other entitlement check. Anyone can create an arbitrary rendezvous, have
-  two clients claim its public `cli` and `phone` roles, and obtain short-lived
-  TURN credentials charged to this deployment. Per-rendezvous caching and the
-  per-location IP limiter reduce repeated issuance but neither authorizes a
-  user nor imposes an account-wide cap. This quota and availability abuse risk
-  is currently accepted. It does not reveal Keytap key material or let a
-  credential holder decrypt another WebRTC session; someone who learns a real
-  QR value can still race or deny that rendezvous as described above.
+  check, rate limit, or cache. A caller can open an arbitrary signaling room
+  and repeatedly request fresh, short-lived credentials charged to this
+  deployment. This quota and availability risk is explicitly accepted. It
+  does not reveal Keytap key material or let the caller decrypt another WebRTC
+  session.
 - **Legacy `#s` relay links use the older X25519 protocol.** The CLI and page
   display a one-time host public key; compare the full values before approving.
   That comparison detects relay key substitution, but the legacy path does not
   provide the automatic passkey identity pinning described here and remains a
   transitional compatibility route.
 
-For an unpaired request, the CLI signature first authenticates its complete
-offer, including the DTLS fingerprint. The commit–reveal context then covers
-the fresh QR public key, both complete SDPs, and a canonical encoding of the
-exact ceremony request. The identity proof covers the full 256-bit pairing
-digest—not merely the two displayed words—plus the WebAuthn challenge,
-credential ID, named PRF result, key name, and identity public key. The phone
-completes WebAuthn first but holds that result until the sole terminal
-confirmation. It then generates a fresh nonce; the CLI signs that nonce, the
-session, the full pairing digest, and the exact request. The phone verifies the
-signature before release, and the returned result echoes it so the CLI cannot
-accept a result queued before confirmation. A rejection, disconnect, or
-invalid signature discards an assertion result. For registration it withholds
-the credential ID, although WebAuthn may already have created an unused local
-passkey. For a paired request, the identity proof is bound directly to the
-fresh public key and both SDPs under a distinct protocol tag, so the words are
-unnecessary.
-
-Fresh CLI signing keys, WebAuthn challenges, and independently generated
-pairing and release nonces make captured messages unusable in another command.
-The authenticated data-channel protocol is strictly ordered and one-shot: a
-malformed message, commitment mismatch, rejection, or timeout ends the
-session, and retrying requires a new QR code. The fixed identity seed comes
-from WebAuthn PRF's `second` output while
-the named key uses `first`, so both are obtained by the same
-`navigator.credentials.get()` approval and are domain-separated.
+The signed offer authenticates its DTLS fingerprint. Every initial pairing
+binds the QR key, both full SDPs, exact ceremony request, and full 256-bit
+comparison digest. For derivation, the phone also signs the credential, named
+PRF result, and identity key; those keys use WebAuthn PRF's domain-separated
+`first` and `second` outputs from the same approval. After WebAuthn, the phone
+releases its held result only for a CLI signature over a fresh nonce and that
+context. Fresh signing keys, challenges, and nonces make captured messages
+unusable in another command. The initial ceremony fails closed on a comparison
+mismatch, rejection, malformed message, disconnect, or timeout; the separately
+acknowledged remember follow-up may be retried after returning a different
+credential or result.
 
 ## Skipping repeated prompts
 
@@ -413,107 +366,26 @@ The contract is deliberately narrow:
 
 ## Cloudflare TURN deployment (maintainers)
 
-The production Worker runs in Cloudflare account
-`28fb983f1661b4931e2ceec7f9a0b8c2`. Wrangler deployments receive that
-non-secret account ID from both the manifest and relay workflow. TURN needs a
-separate, long-lived key that must never be shipped to either client. Cloudflare's
-[credential guide](https://developers.cloudflare.com/realtime/turn/generate-credentials/)
-describes this server-side model.
-
-The encrypted API token already used by CI can deploy the Worker, but it does
-**not** have Cloudflare `Calls Write` permission. Keep that least-privilege
-token as-is. Production TURN was provisioned on July 24, 2026 with a separate,
-account-authorized Cloudflare dashboard session; the long-lived values are
-installed only as required Worker secrets and are not present in this repository.
-
-The helper below calls Cloudflare's
-[create TURN key API](https://developers.cloudflare.com/api/resources/calls/subresources/turn/methods/create/),
-extracts `result.uid` and `result.key`, and writes them directly to the
-`TURN_KEY_ID` and `TURN_KEY_API_TOKEN` Worker secrets in one
-`wrangler secret bulk` request. It never prints the long-term token, and a
-failed upload cannot leave just one of the two values updated. The Wrangler
-manifest declares both bindings as required, so deployment fails clearly if
-either is missing; see Cloudflare's
-[Workers secrets documentation](https://developers.cloudflare.com/workers/configuration/secrets/).
-The production Worker is already configured; run this helper again only when
-intentionally replacing the TURN key.
+Create a Realtime TURN key in the Cloudflare dashboard, then install its **Turn
+Token ID** and **API Token** as Worker secrets. The API token is long-lived and
+must never be committed or sent to a client. See Cloudflare's
+[TURN credential guide](https://developers.cloudflare.com/realtime/turn/generate-credentials/).
 
 ```bash
 cd web/relay
-read -rsp 'Temporary Calls Write token: ' CLOUDFLARE_PROVISION_TOKEN; echo
-read -rsp 'Workers Scripts Write deploy token: ' CLOUDFLARE_API_TOKEN; echo
-export CLOUDFLARE_PROVISION_TOKEN CLOUDFLARE_API_TOKEN
-./scripts/provision-turn.sh
-unset CLOUDFLARE_PROVISION_TOKEN CLOUDFLARE_API_TOKEN
+nix run nixpkgs#wrangler -- secret put TURN_KEY_ID
+nix run nixpkgs#wrangler -- secret put TURN_KEY_API_TOKEN
+nix run nixpkgs#wrangler -- deploy
 ```
 
-For local `wrangler dev`, copy `web/relay/.dev.vars.example` to
-`web/relay/.dev.vars` and replace both placeholders. `.dev.vars*` and `.env*`
-are ignored except for their example files.
-
-The underlying creation request is:
-
-```http
-POST https://api.cloudflare.com/client/v4/accounts/28fb983f1661b4931e2ceec7f9a0b8c2/calls/turn_keys
-Authorization: Bearer <one-time Calls Write token>
-Content-Type: application/json
-
-{"name":"keytap-production"}
-```
-
-At runtime the Worker, never a client, exchanges those long-lived values for
-one short-lived credential per peer:
-
-```http
-POST https://rtc.live.cloudflare.com/v1/turn/keys/{TURN_KEY_ID}/credentials/generate-ice-servers
-Authorization: Bearer {TURN_KEY_API_TOKEN}
-Content-Type: application/json
-
-{"ttl":1200}
-```
-
-The 1,200-second TTL is fixed by the Worker, not supplied by clients. A
-credential can be minted only after two clients claim a rendezvous's public
-`cli` and `phone` roles, and it is cached once per claimed role for that
-rendezvous. The Worker binds sockets, pending requests, and cached credentials
-to a persisted session generation. After Cloudflare responds, one storage
-transaction rechecks that the exact generation is still live and within its
-deadline before storing or returning the credential, so an alarm or recreated
-room cannot resurrect expired state. Responses are `no-store`, and the
-rendezvous sockets and stored state are erased twenty minutes after the first
-peer joins.
-
-These are lifecycle and amplification controls, not user authorization.
-Rendezvous creation is public and there is no account-wide issuance cap.
-A Workers rate-limit binding allows 20 v2 requests per source address per 60
-seconds in each Cloudflare location, but Cloudflare documents that binding as
-local and eventually consistent in the
-[Workers Rate Limiting API](https://developers.cloudflare.com/workers/runtime-apis/bindings/rate-limit/).
-This deployment intentionally accepts the resulting TURN quota and availability
-abuse risk. Monitor usage and disable or rotate the TURN key if that becomes
-unacceptable.
-
-Clients use normal ICE so a direct connection wins. They accept Cloudflare's
-STUN service and TURN endpoints but omit port 53 for non-trickle ICE, because
-Cloudflare notes that browsers block that alternate port. The current Rust
-client uses `stun:stun.cloudflare.com:3478` and
-`turn:turn.cloudflare.com:3478?transport=udp`.
-
-Production verification on July 24, 2026 joined both roles to a live rendezvous
-and validated the two distinct short-lived ICE credentials returned for that
-room. A second live test used relay-only ICE for both native peers,
-authenticated both SDPs through the production Worker, verified
-relay candidates on both sides, and delivered a DataChannel marker through
-Cloudflare UDP TURN. The full forced-relay path completed in 18.91 seconds.
-Testing the browser and CLI from two physically separate networks remains a
-useful release check for platform-specific firewall behavior.
-
-As of July 2026, Cloudflare's [TURN pricing](https://developers.cloudflare.com/realtime/turn/faq/)
-is the first 1,000 GB per month free across Realtime SFU and TURN, then
-$0.05/GB sent from Cloudflare to TURN clients, including TURN overhead.
-Ingress is free, and `stun.cloudflare.com` is free and unlimited. Monitor
-usage and issued credentials before removing the legacy route; Cloudflare also
-documents [credential-abuse monitoring](https://developers.cloudflare.com/realtime/turn/replacing-existing/).
+Wrangler uses the account ID in `wrangler.toml`; authenticate it with a Worker
+deploy token via `CLOUDFLARE_API_TOKEN`. At runtime, public
+`GET /v2/signal/:rendezvous/turn` requests mint a fresh 1,200-second credential.
+There are no accounts, rate limits, or credential caches, and credentials are
+never persisted. After the provider responds, the Durable Object rechecks that
+the exact room generation is still active before returning it; this prevents a
+delayed request from succeeding after expiry or room recreation, but is not
+user authorization. The deployment explicitly accepts TURN quota abuse.
 
 ## Tips
 

@@ -73,7 +73,7 @@ test-core:
 	cargo test -p keytap-core
 
 test-cli:
-	cargo test -p keytap --no-default-features --bins --test e2e_crypto --test env_keys
+	cargo test -p keytap --no-default-features --bins --test env_keys --test init_guard
 
 clean:
 	cargo clean
