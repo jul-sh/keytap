@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; connect-src https://keytap-relay.julsh.workers.dev; form-action 'none'; frame-ancestors 'none'; base-uri 'none'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; connect-src https://keytap-relay.julsh.workers.dev wss://keytap-relay.julsh.workers.dev; webrtc 'allow'; form-action 'none'; frame-ancestors 'none'; base-uri 'none'">
   <meta name="theme-color" content="#000066">
   <title>keytap</title>
   <link rel="stylesheet" href="./theme.css">
@@ -18,7 +18,7 @@
     <p class="summary" id="explainer">Approve with this device to send the derived key back to your waiting CLI.</p>
     <details class="details" id="details">
       <summary>How is this request protected?</summary>
-      <p>Your CLI and this page use one-time X25519 keys to create an encrypted channel. The derived key is protected with AES-256-GCM, so the relay only sees ciphertext. Remembering a key requires a second approval.</p>
+      <p>The QR code carries a one-time capability that authenticates the complete WebRTC setup, then WebRTC DTLS encrypts the DataChannel. Cloudflare signaling and TURN can block the connection, but cannot silently substitute a peer or read accepted key material. This webpage remains trusted because its code receives the QR capability. Remembering a key requires a second approval.</p>
     </details>
     <section class="offer" id="offer" hidden>
       <h2 id="offer-heading" tabindex="-1">Remember on that machine?</h2>

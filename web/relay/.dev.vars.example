@@ -1,0 +1,4 @@
+# Copy to .dev.vars for local Worker development. Never commit real values.
+# TURN_KEY_ID is result.uid; TURN_KEY_API_TOKEN is the long-lived result.key.
+TURN_KEY_ID="00000000000000000000000000000000"
+TURN_KEY_API_TOKEN="0000000000000000000000000000000000000000000000000000000000000000"

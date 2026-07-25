@@ -17,6 +17,11 @@ jobs:
           cargo test -p keytap-core
           cargo test -p keytap --no-default-features --bins --test e2e_crypto --test env_keys --test init_guard
 
+      - name: Test nearby WebRTC protocol and relay Worker
+        run: |
+          npm --prefix web test
+          npm --prefix web/relay test
+
       # Remembered keys: exercise the real Secret Service backend against a
       # live GNOME Keyring inside an isolated D-Bus session.
       - name: Live Secret Service test

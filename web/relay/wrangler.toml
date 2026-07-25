@@ -1,11 +1,31 @@
 name = "keytap-relay"
 main = "src/index.js"
 compatibility_date = "2024-12-01"
+account_id = "28fb983f1661b4931e2ceec7f9a0b8c2"
+
+[secrets]
+required = ["TURN_KEY_ID", "TURN_KEY_API_TOKEN"]
 
 [[durable_objects.bindings]]
 name = "RELAY_SESSION"
 class_name = "RelaySession"
 
+[[durable_objects.bindings]]
+name = "SIGNAL_SESSION"
+class_name = "SignalSession"
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["RelaySession"]
+
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["SignalSession"]
+
+# Public v2 rendezvous requests are limited per source IP before they reach a
+# Durable Object or mint a TURN credential. Namespace IDs are arbitrary but
+# must be unique within this Worker.
+[[ratelimits]]
+name = "SIGNAL_RATE_LIMIT"
+namespace_id = "1001"
+simple = { limit = 20, period = 60 }

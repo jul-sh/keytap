@@ -2,6 +2,7 @@ mod encrypt;
 mod env_keys;
 mod keychain;
 mod nearby;
+mod nearby_protocol;
 mod remember;
 
 use keytap_cli_spec::{Command, Invocation};

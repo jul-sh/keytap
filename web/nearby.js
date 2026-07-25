@@ -694,4 +694,22 @@ async function main() {
   }
 }
 
-main();
+// A v2 QR carries only its one-time capability in `#q`. Keep the deployed
+// `#s` / `#cfg` paths intact during rollout so older CLIs still complete their
+// X25519 relay flow, while current CLIs load the authenticated WebRTC module.
+const entryParams = new URLSearchParams(location.hash.startsWith('#') ? location.hash.slice(1) : '');
+if (entryParams.has('q')) {
+  import('./nearby-v2.js').then(module => module.main()).catch(error => {
+    console.error(error);
+    history.replaceState(null, '', location.pathname + location.search);
+    phase = { kind: 'finished' };
+    $('start')?.remove();
+    $('title').textContent = 'keytap';
+    $('explainer').hidden = true;
+    $('details').hidden = true;
+    alertUser('Could not load the private connection. Reload this page, or run the command again and scan the fresh code.');
+  });
+} else {
+  $('details').querySelector('p').textContent = 'This older-client compatibility flow protects key material with one-time X25519 and AES-256-GCM, but its relay supplies the CLI public key and must therefore be trusted not to substitute that key. Upgrade keytap to use the QR-authenticated WebRTC flow. Remembering a key requires a second approval.';
+  main();
+}

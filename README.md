@@ -103,16 +103,21 @@ On platforms where the CLI cannot do the passkey ceremony natively, `keytap` fal
 
 The flow is:
 
-1. the CLI prints a QR code
-2. you scan it with your phone
-3. your phone opens the `keytap` page
-4. you approve with a passkey on the phone
-5. the PRF result is sent back to the CLI over an end-to-end encrypted relay channel
+1. the CLI generates a one-time 32-byte capability and prints it in a QR-code URL fragment
+2. you scan the QR code and your phone opens the `keytap` page
+3. the CLI and phone authenticate their WebRTC offer and answer with that capability
+4. WebRTC connects them directly when possible, with Cloudflare Realtime TURN as a fallback
+5. you approve with a passkey on the phone
+6. the WebAuthn result (including the PRF output when deriving) returns over the end-to-end encrypted WebRTC data channel
 
-Because each command costs a scan, the page also offers an opt-in
-"remember this key" checkbox: tick it before approving and the machine that
-printed the QR code stores the derived key exactly as if you had run
-`keytap remember` there — no second ceremony
+The capability is 43 base64url characters, so the complete production URL is
+only 74 characters (`https://keytap.jul.sh/nearby#q=...`). The rendezvous ID is
+derived from it; it is not an additional QR payload.
+
+After the command succeeds, the page can offer a **Remember on this machine**
+action. Choosing it performs a second passkey approval over the same data
+channel; the CLI stores the key only after that result matches the first
+ceremony. It does not require another QR scan
 (see [Skipping repeated prompts](#skipping-repeated-prompts)).
 
 ## Install
@@ -164,18 +169,35 @@ keytap ties all derived keys to a single passkey registered under the `keytap.ju
 With that said, here is how keytap works within those constraints:
 
 - By default keytap does not sync or cache derived keys. It derives on demand, writes to stdout, and exits. There are no local config files, and no state is stored implicitly.
-- The one explicit exception is remembering — `keytap remember NAME`, or the opt-in "remember this key" checkbox on the nearby-phone page: it stores that derived key on this machine, with no TTL, until `keytap forget`, `keytap forget --all`, or passkey replacement. The key lands in a plain file (not encrypted at rest), silently upgraded to the OS keychain when the machine has one (then encrypted at rest by it). Either way, any process running as your user may be able to invoke keytap and use the key without a ceremony.
+- The one explicit exception is remembering — `keytap remember NAME`, or the opt-in remember action on the nearby-phone page: it stores that derived key on this machine, with no TTL, until `keytap forget`, `keytap forget --all`, or passkey replacement. The key lands in a plain file (not encrypted at rest), silently upgraded to the OS keychain when the machine has one (then encrypted at rest by it). Either way, any process running as your user may be able to invoke keytap and use the key without a ceremony.
 - Remembered keys are tied to a fingerprint of the registered passkey credential. `keytap init` is a root boundary: it wipes all remembered entries, and lookups are scoped to the current root, so keys remembered under a replaced passkey are never used.
 - If you save the output, pipe it into another tool, or import it into an agent, that destination now holds the key and must be trusted accordingly.
 - The PRF inputs are public and derived from the key name. They provide stable derivation and domain separation, not secrecy.
 - Replacing the registered passkey changes every key derived from it. Treat the passkey as the root of your derived identities.
 
-### Auth via phone over relay (fallback)
+### Auth via nearby phone (fallback)
 
 When keytap authenticates via your phone, additional trust considerations apply:
 
-- **You trust the web page served to your phone.** The website served by `keytap.jul.sh` performs the WebAuthn ceremony, receives the PRF output, encrypts it, and posts back to the host, via the relay. You trust its functionality and integrity. The web page is served inspectable, but in practice you are unlikely to review it each time.
-- The Cloudflare relay (`keytap-relay.julsh.workers.dev`) forwards opaque encrypted blobs. It never sees plaintext key material. The channel is end-to-end encrypted with X25519 ECDH + HKDF-SHA256 + AES-256-GCM. An attacker who controls the relay can deny service but cannot decrypt the payload.
+- **You trust the web page served to your phone.** The code served by
+  `keytap.jul.sh` sees both the QR capability and the WebAuthn PRF output. A
+  compromised page can therefore steal the derived key. The URL fragment is
+  not sent in the initial HTTP request or in a Referer header, but the loaded
+  JavaScript necessarily receives it.
+- **Anyone who can read the QR code has its one-time capability.** Keep it in
+  view only long enough to connect. A fresh capability is generated for every
+  command and the rendezvous expires shortly afterward.
+- **The signaling Worker is not trusted with peer identity or key material.**
+  It sees a derived rendezvous ID, SDP/ICE metadata, IP addresses, and timing.
+  It can block, delay, replay, or replace messages, but replacement is rejected
+  as described below.
+- **Cloudflare TURN is not trusted with plaintext.** Direct peer-to-peer ICE is
+  preferred; when TURN is necessary, Cloudflare relays DTLS-encrypted WebRTC
+  packets and can observe connection metadata and deny service. Cloudflare
+  documents the same distinction in its [TURN FAQ](https://developers.cloudflare.com/realtime/turn/faq/).
+  You still trust Cloudflare to operate the service, enforce credential expiry,
+  and report usage for billing; payload confidentiality does not depend on the
+  TURN operator being honest.
 
 ## Skipping repeated prompts
 
@@ -200,9 +222,9 @@ replaces the root and wipes every remembered entry; keys remembered under an
 old passkey are never used. Remembering is per machine.
 
 When a command authenticates via the nearby-phone flow, the phone page offers
-the same opt-in as a checkbox: tick "remember this key" while approving any
-derive command and the machine remembers it — one ceremony instead of the two
-that a separate `keytap remember` would cost over QR.
+the same opt-in after the initial result is accepted. Tap it, approve the
+second ceremony, and the machine remembers the matching key. The live WebRTC
+session is reused, so this takes two approvals but only one QR scan.
 
 Where the key lives: a plain file, `~/.local/state/keytap/remembered.json`
 (0600, honors `$XDG_STATE_HOME`). On machines with an OS keychain (macOS
@@ -295,6 +317,102 @@ The contract is deliberately narrow:
 - **If a variable leaks, that name is burned.** The value is the derived key
   for that one name — never the passkey root — and derivation is
   deterministic, so there is no rotating it: retire the name.
+
+## Cloudflare TURN deployment (maintainers)
+
+The production Worker runs in Cloudflare account
+`28fb983f1661b4931e2ceec7f9a0b8c2`. Wrangler deployments receive that
+non-secret account ID from both the manifest and relay workflow. TURN needs a
+separate, long-lived key that must never be shipped to either client. Cloudflare's
+[credential guide](https://developers.cloudflare.com/realtime/turn/generate-credentials/)
+describes this server-side model.
+
+The encrypted API token already used by CI can deploy the Worker, but it does
+**not** have Cloudflare `Calls Write` permission. Keep that least-privilege
+token as-is. Production TURN was provisioned on July 24, 2026 with a separate,
+account-authorized Cloudflare dashboard session; the long-lived values are
+installed only as required Worker secrets and are not present in this repository.
+
+The helper below calls Cloudflare's
+[create TURN key API](https://developers.cloudflare.com/api/resources/calls/subresources/turn/methods/create/),
+extracts `result.uid` and `result.key`, and writes them directly to the
+`TURN_KEY_ID` and `TURN_KEY_API_TOKEN` Worker secrets in one
+`wrangler secret bulk` request. It never prints the long-term token, and a
+failed upload cannot leave just one of the two values updated. The Wrangler
+manifest declares both bindings as required, so deployment fails clearly if
+either is missing; see Cloudflare's
+[Workers secrets documentation](https://developers.cloudflare.com/workers/configuration/secrets/).
+The production Worker is already configured; run this helper again only when
+intentionally replacing the TURN key.
+
+```bash
+cd web/relay
+read -rsp 'Temporary Calls Write token: ' CLOUDFLARE_PROVISION_TOKEN; echo
+read -rsp 'Workers Scripts Write deploy token: ' CLOUDFLARE_API_TOKEN; echo
+export CLOUDFLARE_PROVISION_TOKEN CLOUDFLARE_API_TOKEN
+./scripts/provision-turn.sh
+unset CLOUDFLARE_PROVISION_TOKEN CLOUDFLARE_API_TOKEN
+```
+
+For local `wrangler dev`, copy `web/relay/.dev.vars.example` to
+`web/relay/.dev.vars` and replace both placeholders. `.dev.vars*` and `.env*`
+are ignored except for their example files.
+
+The underlying creation request is:
+
+```http
+POST https://api.cloudflare.com/client/v4/accounts/28fb983f1661b4931e2ceec7f9a0b8c2/calls/turn_keys
+Authorization: Bearer <one-time Calls Write token>
+Content-Type: application/json
+
+{"name":"keytap-production"}
+```
+
+At runtime the Worker, never a client, exchanges those long-lived values for
+one short-lived credential per peer:
+
+```http
+POST https://rtc.live.cloudflare.com/v1/turn/keys/{TURN_KEY_ID}/credentials/generate-ice-servers
+Authorization: Bearer {TURN_KEY_API_TOKEN}
+Content-Type: application/json
+
+{"ttl":1200}
+```
+
+The 1,200-second TTL is fixed by the Worker, not supplied by clients. The
+credential endpoint is available only after both roles join a live rendezvous,
+and each role can mint at most once; retries receive that role's cached value.
+Responses are `no-store`, and the rendezvous sockets and stored state are
+erased twenty minutes after the first peer joins. A Workers rate-limit binding
+allows 20 v2 requests per source address per 60 seconds in each Cloudflare
+location, in addition to the per-rendezvous limit. Cloudflare documents the
+binding's locality and eventual consistency in the
+[Workers Rate Limiting API](https://developers.cloudflare.com/workers/runtime-apis/bindings/rate-limit/),
+which is why the Durable Object cap remains authoritative. These controls
+matter because CORS is not authentication and an unrestricted credential
+endpoint would be a billing credential.
+
+Clients use normal ICE so a direct connection wins. They accept Cloudflare's
+STUN service and TURN endpoints but omit port 53 for non-trickle ICE, because
+Cloudflare notes that browsers block that alternate port. The current Rust
+client uses `stun:stun.cloudflare.com:3478` and
+`turn:turn.cloudflare.com:3478?transport=udp`.
+
+Production verification on July 24, 2026 joined both roles to a live rendezvous
+and validated the two distinct short-lived ICE credentials returned for that
+room. A second live test used relay-only ICE for both native peers,
+authenticated both SDPs through the production Worker, verified
+relay candidates on both sides, and delivered a DataChannel marker through
+Cloudflare UDP TURN. The full forced-relay path completed in 18.91 seconds.
+Testing the browser and CLI from two physically separate networks remains a
+useful release check for platform-specific firewall behavior.
+
+As of July 2026, Cloudflare's [TURN pricing](https://developers.cloudflare.com/realtime/turn/faq/)
+is the first 1,000 GB per month free across Realtime SFU and TURN, then
+$0.05/GB sent from Cloudflare to TURN clients, including TURN overhead.
+Ingress is free, and `stun.cloudflare.com` is free and unlimited. Monitor
+usage and issued credentials before removing the legacy route; Cloudflare also
+documents [credential-abuse monitoring](https://developers.cloudflare.com/realtime/turn/replacing-existing/).
 
 ## Tips
 

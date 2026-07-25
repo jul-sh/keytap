@@ -1,145 +1,106 @@
-/// End-to-end test for the nearby relay crypto protocol.
-/// Simulates both the CLI and phone sides to verify:
-/// - X25519 ECDH produces the same shared secret on both sides
-/// - HKDF-SHA256 derives the same AES key
-/// - AES-256-GCM encryption/decryption round-trips correctly
-use aes_gcm::aead::{Aead, KeyInit, OsRng};
-use aes_gcm::{Aes256Gcm, Nonce};
+//! Protocol-level tests for the nearby WebRTC security boundary.
+//!
+//! WebRTC DTLS protects data-channel payloads. These tests independently
+//! exercise the compact QR capability and the HMAC transcript that binds the
+//! complete SDP (including its DTLS certificate fingerprint) to that
+//! capability.
+
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use hkdf::Hkdf;
-use sha2::Sha256;
-use x25519_dalek::{EphemeralSecret, PublicKey};
+use hmac::{Hmac, Mac};
+use sha2::{Digest, Sha256};
 
-#[test]
-fn test_ecdh_shared_secret_matches() {
-    // CLI side
-    let cli_secret = EphemeralSecret::random_from_rng(OsRng);
-    let cli_public = PublicKey::from(&cli_secret);
+type HmacSha256 = Hmac<Sha256>;
 
-    // Phone side
-    let phone_secret = EphemeralSecret::random_from_rng(OsRng);
-    let phone_public = PublicKey::from(&phone_secret);
+const RID_DOMAIN: &[u8] = b"keytap:rendezvous:v2\0";
+const MAC_DOMAIN: &[u8] = b"keytap:signal:v2\0";
 
-    // Both sides compute ECDH
-    let cli_shared = cli_secret.diffie_hellman(&phone_public);
-    let phone_shared = phone_secret.diffie_hellman(&cli_public);
+fn rendezvous_id(capability: &[u8; 32]) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest.update(RID_DOMAIN);
+    digest.update(capability);
+    digest.finalize().into()
+}
 
-    assert_eq!(cli_shared.as_bytes(), phone_shared.as_bytes());
+fn cli_signal_key(capability: &[u8; 32], rid: &[u8; 32]) -> [u8; 32] {
+    let hkdf = Hkdf::<Sha256>::new(Some(rid), capability);
+    let mut key = [0u8; 32];
+    hkdf.expand(b"keytap:signal-key:v2:cli", &mut key).unwrap();
+    key
+}
+
+fn cli_offer_mac(capability: &[u8; 32], body: &[u8]) -> [u8; 32] {
+    let rid = rendezvous_id(capability);
+    let key = cli_signal_key(capability, &rid);
+    let mut mac = HmacSha256::new_from_slice(&key).unwrap();
+    mac.update(MAC_DOMAIN);
+    mac.update(b"cli\0");
+    mac.update(&0u64.to_be_bytes());
+    mac.update(b"offer\0");
+    mac.update(&(body.len() as u64).to_be_bytes());
+    mac.update(body);
+    mac.finalize().into_bytes().into()
 }
 
 #[test]
-fn test_full_e2e_encrypt_decrypt() {
-    let session_id = "test-session-id-12345";
+fn qr_is_a_compact_fragment_only_capability() {
+    let capability = [0x42u8; 32];
+    let encoded = URL_SAFE_NO_PAD.encode(capability);
+    let url = format!("https://keytap.jul.sh/nearby#q={encoded}");
 
-    // CLI generates keypair
-    let cli_secret = EphemeralSecret::random_from_rng(OsRng);
-    let cli_public = PublicKey::from(&cli_secret);
-
-    // Phone generates keypair
-    let phone_secret = EphemeralSecret::random_from_rng(OsRng);
-    let phone_public = PublicKey::from(&phone_secret);
-
-    // --- Phone side encryption (simulates Web Crypto) ---
-
-    // Phone does ECDH with CLI's public key
-    let phone_shared = phone_secret.diffie_hellman(&cli_public);
-
-    // HKDF
-    let phone_hk = Hkdf::<Sha256>::new(Some(session_id.as_bytes()), phone_shared.as_bytes());
-    let mut phone_aes_key = [0u8; 32];
-    phone_hk
-        .expand(b"keytap:e2e:v1", &mut phone_aes_key)
-        .unwrap();
-
-    // Encrypt payload
-    let payload = serde_json::json!({
-        "credentialId": "dGVzdC1jcmVkLWlk",
-        "prfFirst": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
-    });
-    let plaintext = serde_json::to_vec(&payload).unwrap();
-
-    let phone_cipher = Aes256Gcm::new_from_slice(&phone_aes_key).unwrap();
-    let nonce_bytes: [u8; 12] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]; // deterministic for test
-    let nonce = Nonce::from_slice(&nonce_bytes);
-    let ciphertext = phone_cipher.encrypt(nonce, plaintext.as_ref()).unwrap();
-
-    // --- CLI side decryption ---
-
-    // CLI does ECDH with phone's public key
-    let cli_shared = cli_secret.diffie_hellman(&phone_public);
-
-    // HKDF
-    let cli_hk = Hkdf::<Sha256>::new(Some(session_id.as_bytes()), cli_shared.as_bytes());
-    let mut cli_aes_key = [0u8; 32];
-    cli_hk
-        .expand(b"keytap:e2e:v1", &mut cli_aes_key)
-        .unwrap();
-
-    // Keys must match
-    assert_eq!(phone_aes_key, cli_aes_key);
-
-    // Decrypt
-    let cli_cipher = Aes256Gcm::new_from_slice(&cli_aes_key).unwrap();
-    let decrypted = cli_cipher.decrypt(nonce, ciphertext.as_ref()).unwrap();
-
-    let decrypted_payload: serde_json::Value = serde_json::from_slice(&decrypted).unwrap();
-    assert_eq!(decrypted_payload, payload);
+    assert_eq!(encoded.len(), 43);
+    assert_eq!(url.len(), 74);
+    assert!(!url.contains('?'));
+    assert_eq!(URL_SAFE_NO_PAD.decode(encoded).unwrap(), capability);
 }
 
 #[test]
-fn test_base64url_roundtrip() {
-    let original = [0u8, 1, 2, 255, 254, 253, 128, 64, 32];
-    let encoded = URL_SAFE_NO_PAD.encode(&original);
-    let decoded = URL_SAFE_NO_PAD.decode(&encoded).unwrap();
-    assert_eq!(original.to_vec(), decoded);
-}
+fn signaling_matches_the_cross_language_fixed_vector() {
+    let capability = [0x42u8; 32];
+    let rid = rendezvous_id(&capability);
+    let body = br#"{"type":"offer"}"#;
+    let mac = cli_offer_mac(&capability, body);
 
-#[test]
-fn test_qr_config_compact_format() {
-    // Verify the compact QR config format is valid JSON with expected fields
-    let session_id = URL_SAFE_NO_PAD.encode([0u8; 6]);
-    let cli_public_b64 = URL_SAFE_NO_PAD.encode([0u8; 32]);
-    let prf_salt_b64 = URL_SAFE_NO_PAD.encode([0u8; 32]);
-    let challenge_b64 = URL_SAFE_NO_PAD.encode([0u8; 32]);
-
-    let config = serde_json::json!({
-        "o": "a",
-        "s": session_id,
-        "k": cli_public_b64,
-        "n": "default",
-        "p": prf_salt_b64,
-        "c": challenge_b64,
-    });
-
-    let config_str = config.to_string();
-    let config_b64 = URL_SAFE_NO_PAD.encode(config_str.as_bytes());
-    let url = format!("https://keytap.jul.sh/n/{}#cfg={}", session_id, config_b64);
-
-    // Verify URL is reasonably short for QR
-    assert!(
-        url.len() < 400,
-        "URL too long for QR: {} chars",
-        url.len()
+    assert_eq!(
+        URL_SAFE_NO_PAD.encode(rid),
+        "6_2qUdwr2cvl5omCEB61Ys263Y1nu0TIjppVQPePcUA"
     );
+    assert_eq!(
+        URL_SAFE_NO_PAD.encode(cli_signal_key(&capability, &rid)),
+        "3WRsRm1tbJnFAp8FuyV6TUTOY5ouwjbG_Q26FHhnHTk"
+    );
+    assert_eq!(
+        URL_SAFE_NO_PAD.encode(mac),
+        "FoqM9kpeEx726l8vB0Whib5XjyzePgjWQwBiOFQtZ1E"
+    );
+}
 
-    // Verify we can decode it back
-    let decoded_bytes = URL_SAFE_NO_PAD.decode(&config_b64).unwrap();
-    let decoded_str = String::from_utf8(decoded_bytes).unwrap();
-    let decoded: serde_json::Value = serde_json::from_str(&decoded_str).unwrap();
-    assert_eq!(decoded["o"], "a");
-    assert_eq!(decoded["n"], "default");
-    assert_eq!(decoded["s"], session_id);
+#[test]
+fn changing_the_sdp_fingerprint_invalidates_the_signal() {
+    let capability = [0x42u8; 32];
+    let authentic = b"v=0\r\na=fingerprint:sha-256 AA:BB:CC\r\n";
+    let substituted = b"v=0\r\na=fingerprint:sha-256 DD:EE:FF\r\n";
+    let expected = cli_offer_mac(&capability, authentic);
+    let actual = cli_offer_mac(&capability, substituted);
+
+    assert_ne!(expected, actual);
+    let rid = rendezvous_id(&capability);
+    let key = cli_signal_key(&capability, &rid);
+    let mut verifier = HmacSha256::new_from_slice(&key).unwrap();
+    verifier.update(MAC_DOMAIN);
+    verifier.update(b"cli\0");
+    verifier.update(&0u64.to_be_bytes());
+    verifier.update(b"offer\0");
+    verifier.update(&(substituted.len() as u64).to_be_bytes());
+    verifier.update(substituted);
+    assert!(verifier.verify_slice(&expected).is_err());
 }
 
 #[test]
 fn test_derive_key_from_prf_output() {
-    // Verify that the key derivation path matches keytap-core
-    let fake_prf = [42u8; 32]; // simulated PRF output
+    let fake_prf = [42u8; 32];
     let raw_key = keytap_core::derive_raw_key(&fake_prf).unwrap();
     assert_eq!(raw_key.len(), 32);
-
-    // Determinism: same PRF input → same key
-    let raw_key2 = keytap_core::derive_raw_key(&fake_prf).unwrap();
-    assert_eq!(raw_key, raw_key2);
+    assert_eq!(raw_key, keytap_core::derive_raw_key(&fake_prf).unwrap());
 }
