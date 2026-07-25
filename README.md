@@ -4,6 +4,10 @@
 
 `keytap` is a CLI that turns one passkey into unique keys you can reproduce anywhere.
 
+> **Pre-release:** I use Keytap for my own projects, but it is not stable yet.
+> Expect breaking changes, and do not make it the only way to recover important
+> secrets.
+
 If your passkey already syncs across your devices, `keytap` lets you use that passkey as a stable root secret.
 From that root, it can deterministically derive:
 
