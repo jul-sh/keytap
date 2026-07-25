@@ -42,7 +42,8 @@ jobs:
           mkdir -p _site/.well-known
           cp .well-known/apple-app-site-association _site/.well-known/
           cp web/CNAME _site/
-          cp web/*.html web/*.js web/*.css web/*.png _site/ 2>/dev/null || true
+          cp web/*.html web/*.js web/*.css web/*.png web/*.txt _site/ 2>/dev/null || true
+          test -s _site/nearby-sas-words.txt
           cp -r web/fonts _site/fonts
           cp -r web/pkg _site/pkg
 

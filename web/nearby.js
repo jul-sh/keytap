@@ -113,9 +113,6 @@ function parseRawConfig(raw) {
     keyName: raw.n || 'default',
     userId: raw.u,
     userName: raw.un,
-    // Legacy capability: the CLI honors a remember request. Old CLIs set
-    // it but exit after one message, so it must never gate the offer.
-    legacyRemember: !!raw.m,
     // The CLI lingers this many seconds for post-auth follow-ups; the
     // whole opt-in flow is keyed on it.
     windowSecs: typeof raw.w === 'number' && raw.w > 0 ? raw.w : 0,
@@ -125,13 +122,6 @@ function parseRawConfig(raw) {
 async function fetchConfig() {
   const hash = location.hash.startsWith('#') ? location.hash.slice(1) : '';
   const params = new URLSearchParams(hash);
-
-  // Legacy: inline config
-  const token = params.get('cfg');
-  if (token) {
-    const raw = JSON.parse(new TextDecoder().decode(decodeBase64URL(token)));
-    return parseRawConfig(raw);
-  }
 
   const sid = params.get('s');
   if (!sid) throw { kind: 'no-session' };
@@ -475,15 +465,8 @@ function enterSent(firstResult) {
   }
   $('title').textContent = 'Key sent';
   setMarker('sent');
-  const name = config.keyName;
   if (config.windowSecs > 0) {
     enterOffer(firstResult);
-  } else if (config.legacyRemember) {
-    say(
-      'Sent. You can close this page. To remember ', { code: name },
-      ' on that machine, run ', { code: `keytap remember ${name}` }, ' there.'
-    );
-    phase = { kind: 'finished' };
   } else {
     say('Sent. You can close this page.');
     phase = { kind: 'finished' };
@@ -694,4 +677,23 @@ async function main() {
   btn.disabled = false;
 }
 
-main();
+// A current QR carries only its one-time CLI public key in `#k`. Keep the
+// deployed `#s` path intact so the previous CLI still completes its
+// X25519 relay flow. `#k` is a hard protocol discriminator: signature failure
+// never falls back to the legacy or symmetric-capability protocol.
+const entryParams = new URLSearchParams(location.hash.startsWith('#') ? location.hash.slice(1) : '');
+if (entryParams.has('k')) {
+  import('./nearby-v2.js').then(module => module.main()).catch(error => {
+    console.error(error);
+    history.replaceState(null, '', location.pathname + location.search);
+    phase = { kind: 'finished' };
+    $('start')?.remove();
+    $('title').textContent = 'keytap';
+    $('explainer').hidden = true;
+    $('details').hidden = true;
+    alertUser('Could not load the private connection. Reload this page, or run the command again and scan the fresh code.');
+  });
+} else {
+  $('details').querySelector('p').textContent = 'This older-client compatibility flow protects key material with one-time X25519 and AES-256-GCM, but its relay supplies the CLI public key and must therefore be trusted not to substitute that key. Upgrade keytap to use the QR-authenticated WebRTC flow. Remembering a key requires a second approval.';
+  main();
+}

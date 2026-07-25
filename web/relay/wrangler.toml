@@ -1,11 +1,23 @@
 name = "keytap-relay"
 main = "src/index.js"
 compatibility_date = "2024-12-01"
+account_id = "28fb983f1661b4931e2ceec7f9a0b8c2"
+
+[secrets]
+required = ["TURN_KEY_ID", "TURN_KEY_API_TOKEN"]
 
 [[durable_objects.bindings]]
 name = "RELAY_SESSION"
 class_name = "RelaySession"
 
+[[durable_objects.bindings]]
+name = "SIGNAL_SESSION"
+class_name = "SignalSession"
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["RelaySession"]
+
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["SignalSession"]
