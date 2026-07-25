@@ -26,13 +26,13 @@ is their choice.
 As one option, a developer who uses Keytap can get their recipient with:
 
 ```bash
-keytap public acme-web-dev --as age
+keytap public YOUR_KEY_NAME --as age
 ```
 
-All Keytap users must use the same project key name (`acme-web-dev` here), but
-they still get different identities because they have different passkeys. A
-developer using another age-compatible tool simply provides that identity's
-`age1...` recipient instead.
+`YOUR_KEY_NAME` is that developer's choice. It does not need to match anyone
+else's; they only need to reuse their chosen name when they decrypt. A developer
+using another age-compatible tool simply provides that identity's `age1...`
+recipient instead.
 
 Collect the printed public keys in `age-recipients.txt`:
 
@@ -58,7 +58,7 @@ Configure `.gitignore`:
 Encrypt the working `.env` for exactly the listed developers:
 
 ```bash
-keytap encrypt acme-web-dev --no-self -R age-recipients.txt < .env > .env.age
+keytap encrypt YOUR_KEY_NAME --no-self -R age-recipients.txt < .env > .env.age
 git add .gitignore age-recipients.txt .env.age
 git commit -m "Add encrypted development environment"
 ```
@@ -75,7 +75,7 @@ local plaintext file using whichever tool owns your identity.
 For a Keytap-managed identity:
 
 ```bash
-keytap decrypt acme-web-dev < .env.age > .env
+keytap decrypt YOUR_KEY_NAME < .env.age > .env
 ```
 
 For an identity file managed by the regular age CLI:
@@ -92,7 +92,7 @@ npm run dev
 
 When a secret changes, edit `.env`, encrypt it again with the same command,
 and commit only `.env.age`. Teammates pull and decrypt again. Keytap users can
-optionally run `keytap remember acme-web-dev` once to stop repeated prompts on
+optionally run `keytap remember YOUR_KEY_NAME` once to stop repeated prompts on
 that machine; read
 [Skipping repeated prompts](../README.md#skipping-repeated-prompts) first.
 
@@ -100,7 +100,7 @@ that machine; read
 
 - **Add:** get their `age1...` public recipient, add it to
   `age-recipients.txt`, re-encrypt `.env.age`, and commit both files. Keytap
-  users get it with `keytap public acme-web-dev --as age`.
+  users get it with `keytap public YOUR_KEY_NAME --as age`.
 - **Remove:** delete their public key, re-encrypt, and rotate the actual API
   keys/passwords inside `.env`. Removing a recipient cannot erase plaintext or
   old Git versions they already had.
