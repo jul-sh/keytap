@@ -11,7 +11,6 @@ import {
   encodeBase64URL,
   filterCloudflareIceServers,
   parseSasWordList,
-  requestPairingRelease,
   sasPhrase,
   verifySasCommitment,
 } from './nearby-v2-protocol.js';
@@ -70,7 +69,6 @@ function alertUser(...parts) {
  *   {kind: 'ready', data: ReadyData} |
  *   {kind: 'first-busy', data: FirstBusyData} |
  *   {kind: 'pairing-ceremony', data: PairingCeremonyData} |
- *   {kind: 'pairing-held', data: PairingHeldData} |
  *   {kind: 'registration-ack', session: DataSession} |
  *   {kind: 'assertion-ack', data: AssertionData} |
  *   {kind: 'offer', data: OfferData} |
@@ -87,10 +85,8 @@ function alertUser(...parts) {
  * @typedef {AssertionData & {expiryAt: number}} OfferData
  * @typedef {OfferData & {controller: AbortController}} RememberCeremonyData
  * @typedef {{credentialId: Uint8Array, prfFirst: Uint8Array, identity: object}} FirstResult
- * @typedef {{session: DataSession, verifier: CliOfferVerifier, sessionBinding: Uint8Array, binding: {kind: 'bootstrap-sas', digest: Uint8Array}}} PairingBaseData
+ * @typedef {{session: DataSession, binding: {kind: 'bootstrap-sas', digest: Uint8Array}}} PairingBaseData
  * @typedef {((PairingBaseData & {kind: 'registration', request: RegisterRequest}) | (PairingBaseData & {kind: 'assertion', request: AssertRequest})) & {controller: AbortController}} PairingCeremonyData
- * @typedef {{session: DataSession, kind: 'registration', credential: PublicKeyCredential, releaseNonce: Uint8Array} | {session: DataSession, kind: 'assertion', result: FirstResult, releaseNonce: Uint8Array}} PairingHeldData
- * @typedef {{verifyPairingRelease: (fields: object) => Promise<void>}} CliOfferVerifier
  * @typedef {{kind: 'register', challenge: Uint8Array, prfSalt: Uint8Array, userId: Uint8Array, userName: string}} RegisterRequest
  * @typedef {{kind: 'assert', challenge: Uint8Array, prfSalt: Uint8Array, identitySalt: Uint8Array, identity: IdentityMode, keyName: string, remember: RememberMode}} AssertRequest
  * @typedef {{kind: 'pairing-any'} | {kind: 'pairing-credential', credentialId: Uint8Array} | {kind: 'pinned', credentialId: Uint8Array}} IdentityMode
@@ -692,7 +688,7 @@ async function nextSasCliReveal(session) {
   return expectBytes(message.nonce, 'CLI pairing nonce', 32, 32);
 }
 
-async function startPairing(session, request, sessionBinding, cliCommitment, verifier) {
+async function startPairing(session, request, sessionBinding, cliCommitment) {
   const context = await createSasContext(sessionBinding, request);
   if (phase.kind !== 'awaiting-request' || phase.session !== session) return;
   const phoneNonce = crypto.getRandomValues(new Uint8Array(32));
@@ -740,12 +736,10 @@ async function startPairing(session, request, sessionBinding, cliCommitment, ver
     ? 'Create your passkey'
     : 'Approve this key request';
   $('summary').textContent = 'Keep these words visible so you can compare them in your terminal afterward.';
-  $('explainer').textContent = 'Finish the passkey step on this phone first. Its result stays here until the terminal confirms the words.';
+  $('explainer').textContent = 'Finish the passkey step on this phone first. The CLI will buffer its result and refuse to use it unless you confirm the words.';
   $('pairing-heading').focus();
   const base = {
     session,
-    verifier,
-    sessionBinding,
     binding: { kind: 'bootstrap-sas', digest },
   };
   const data = request.kind === 'register'
@@ -753,11 +747,6 @@ async function startPairing(session, request, sessionBinding, cliCommitment, ver
     : { ...base, kind: 'assertion', request, controller: new AbortController() };
   phase = { kind: 'pairing-ceremony', data };
   await runPairingCeremony(data);
-}
-
-function discardHeld(data) {
-  data.releaseNonce.fill(0);
-  if (data.kind === 'assertion') data.result.prfFirst.fill(0);
 }
 
 async function runPairingCeremony(data) {
@@ -788,73 +777,25 @@ async function runPairingCeremony(data) {
     if (completed.kind === 'assertion') completed.result.prfFirst.fill(0);
     return;
   }
-  const releaseNonce = crypto.getRandomValues(new Uint8Array(32));
-  const heldData = completed.kind === 'registration'
-    ? {
-      session: data.session,
-      kind: 'registration',
-      credential: completed.credential,
-      releaseNonce,
-    }
-    : {
-      session: data.session,
-      kind: 'assertion',
-      result: completed.result,
-      releaseNonce,
-    };
-  phase = { kind: 'pairing-held', data: heldData };
-  say('Phone complete. Within two minutes, confirm the same words once in your terminal; you do not need to return here.');
-  $('pairing-words').focus();
   try {
-    const decision = await requestPairingRelease({
-      session: data.session,
-      verifier: data.verifier,
-      sessionBinding: data.sessionBinding,
-      sasDigest: data.binding.digest,
-      request: data.request,
-      releaseNonce,
-    });
-    if (phase.kind !== 'pairing-held' || phase.data !== heldData) {
-      discardHeld(heldData);
-      return;
-    }
-    if (decision.kind === 'rejected') {
-      discardHeld(heldData);
-      phase = { kind: 'finished' };
-      $('pairing').hidden = true;
-      $('title').textContent = 'Pairing rejected';
-      $('summary').textContent = 'The terminal did not confirm the pairing words.';
-      $('explainer').textContent = 'Run the command again and scan its fresh QR code to retry.';
-      alertUser(heldData.kind === 'registration'
-        ? 'The terminal rejected the pairing words. A passkey may have been created on this phone, but it was not paired or sent. Run init again for a fresh QR code.'
-        : 'The terminal rejected the pairing words. No key or identity was sent or trusted. Run the command again for a fresh QR code.');
-      $('alert').focus();
-      data.session.close();
-      return;
-    }
-
-    releaseNonce.fill(0);
-    $('pairing').hidden = true;
-    if (heldData.kind === 'registration') {
-      data.session.send({
-        type: 'paired-registration-result',
-        credentialId: encodeBase64URL(heldData.credential.rawId),
-        releaseSignature: encodeBase64URL(decision.signature),
-      });
+    if (completed.kind === 'registration') {
+      sendPairedRegistrationResult(data.session, completed.credential);
       phase = { kind: 'registration-ack', session: data.session };
+      say('Result sent. Confirm the words in your terminal; the CLI will not save it unless they match.');
       await nextCliMessage(data.session, 'initial-accepted');
       if (phase.kind !== 'registration-ack' || phase.session !== data.session) return;
       finishRegistration(data.session);
       return;
     }
 
-    sendPairedAssertionResult(data.session, heldData.result, decision.signature);
+    sendPairedAssertionResult(data.session, completed.result);
     const assertionData = {
       session: data.session,
       request: data.request,
-      firstResult: heldData.result,
+      firstResult: completed.result,
     };
     phase = { kind: 'assertion-ack', data: assertionData };
+    say('Result sent. Confirm the words in your terminal; the CLI will not use or trust it unless they match.');
     await nextCliMessage(data.session, 'initial-accepted');
     if (phase.kind !== 'assertion-ack' || phase.data !== assertionData) return;
     if (data.request.remember.kind === 'available') {
@@ -863,7 +804,6 @@ async function runPairingCeremony(data) {
       finishAssertion(data.session);
     }
   } catch (error) {
-    discardHeld(heldData);
     failSession(data.session, error);
   }
 }
@@ -885,6 +825,9 @@ async function nextCliMessage(session, expectedType) {
       && message.reason === 'identity-durability-unknown') {
     throw new InitialIndeterminateError(message.reason);
   }
+  if (message.type === 'sas-cli-rejected' && Object.keys(message).length === 1) {
+    throw new PairingRejectedError();
+  }
   if (message.type !== expectedType) throw new ProtocolError(`expected ${expectedType}`);
   return message;
 }
@@ -905,10 +848,17 @@ class InitialIndeterminateError extends ProtocolError {
   }
 }
 
+class PairingRejectedError extends ProtocolError {
+  constructor() {
+    super('the CLI did not confirm the pairing words');
+    this.name = 'PairingRejectedError';
+  }
+}
+
 export function initialRejectionMessage(reason, registration) {
   if (reason === 'identity-store-unavailable') {
     return registration
-      ? 'The CLI could not save the trusted identity. A passkey may have been created on this phone, but it was not paired or sent. Run init again.'
+      ? 'The CLI received the passkey result but could not save the trusted identity. Run init again.'
       : 'The CLI could not access its trusted identity store, so no key was accepted. Check that machine and run the command again.';
   }
   return 'This passkey did not match the identity already trusted by the CLI, so no key was accepted.';
@@ -921,6 +871,11 @@ export function initialIndeterminateMessage(registration) {
 }
 
 export function sessionFailureMessage(error, phaseKind) {
+  if (error instanceof PairingRejectedError) {
+    return phaseKind === 'registration-ack'
+      ? 'The result was sent, but the CLI discarded it because the pairing words were not confirmed. The passkey may remain on this phone; run init again with a fresh QR code.'
+      : 'The result was sent, but the CLI discarded it and trusted nothing because the pairing words were not confirmed. Run the command again with a fresh QR code.';
+  }
   if (error instanceof InitialRejectionError) {
     return initialRejectionMessage(error.reason, phaseKind === 'registration-ack');
   }
@@ -1057,14 +1012,20 @@ function sendAssertionResult(session, result) {
   }
 }
 
-function sendPairedAssertionResult(session, result, releaseSignature) {
+export function sendPairedRegistrationResult(session, credential) {
+  session.send({
+    type: 'paired-registration-result',
+    credentialId: encodeBase64URL(credential.rawId),
+  });
+}
+
+export function sendPairedAssertionResult(session, result) {
   try {
     session.send({
       type: 'paired-assertion-result',
       credentialId: encodeBase64URL(result.credentialId),
       prfFirst: encodeBase64URL(result.prfFirst),
       identity: result.identity,
-      releaseSignature: encodeBase64URL(releaseSignature),
     });
   } finally {
     result.prfFirst.fill(0);
@@ -1202,6 +1163,7 @@ function enterOffer(assertionData, windowSecs) {
   $('explainer').hidden = true;
   $('details').hidden = true;
   $('start')?.remove();
+  $('pairing').hidden = true;
   render(
     $('offer-body'),
     'That machine can keep ', { code: assertionData.request.keyName },
@@ -1412,7 +1374,6 @@ export async function main() {
           initial.request,
           established.sessionBinding,
           initial.cliCommitment,
-          verifier,
         );
         break;
     }
@@ -1445,12 +1406,6 @@ export function terminatePhaseForPagehide(currentPhase) {
     case 'pairing-ceremony':
       currentPhase.data.controller.abort();
       session = currentPhase.data.session;
-      try { session.send({ type: 'sas-phone-rejected' }); } catch { /* leaving */ }
-      session.close();
-      return;
-    case 'pairing-held':
-      session = currentPhase.data.session;
-      discardHeld(currentPhase.data);
       try { session.send({ type: 'sas-phone-rejected' }); } catch { /* leaving */ }
       session.close();
       return;

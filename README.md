@@ -113,8 +113,8 @@ The flow is:
    including its DTLS fingerprint; peers connect directly when possible and
    use Cloudflare Realtime TURN otherwise
 3. on first use, a commit–reveal exchange gives the phone and CLI the same two
-   words; the phone completes WebAuthn and holds the result until you confirm
-   those words once in the terminal
+   words; the phone sends its WebAuthn result immediately, but the CLI buffers
+   it and refuses to use or pin it until you confirm those words in the terminal
 4. that one passkey approval derives both the named key and a separate, stable
    signing identity; the phone signs the exact result, and the CLI verifies it
    and pins the identity
@@ -199,7 +199,7 @@ When keytap authenticates via your phone, additional trust considerations apply:
 - **The QR value is public, not a shared secret.** Keep the code in view only
   long enough to connect. Someone who reads it can derive the rendezvous ID,
   race a fake phone, learn request metadata, or deny service, but cannot forge
-  the CLI's signed offer or release. Before an identity is pinned, the two-word
+  the CLI's signed offer. Before an identity is pinned, the two-word
   comparison detects a fake phone. The commitments fix both nonces before
   reveal and bind the words to the exact request and WebRTC session. The 22-bit
   phrase has a 1 in 4,194,304 collision chance per independently committed
@@ -213,8 +213,9 @@ When keytap authenticates via your phone, additional trust considerations apply:
 - **The signaling Worker is not trusted with peer identity or key material.**
   It sees a derived rendezvous ID, the signed offer, the unsigned answer,
   SDP/ICE metadata, IP addresses, and timing. It can block, delay, replay, or
-  race/replace the answer, but cannot alter the signed offer or forge the
-  release. The word comparison or pinned identity rejects substitution.
+  race/replace the answer, but cannot alter the signed offer. The CLI does not
+  use a first result until the words match; later, the pinned identity rejects
+  substitution.
 - **Cloudflare TURN is not trusted with plaintext.** Direct peer-to-peer ICE is
   preferred; when TURN is necessary, Cloudflare relays DTLS-encrypted WebRTC
   packets. It can observe metadata or deny service, but payload confidentiality
@@ -236,12 +237,13 @@ binds the QR key, both full SDPs, exact ceremony request, and full 256-bit
 comparison digest. For derivation, the phone also signs the credential, named
 PRF result, and identity key; those keys use WebAuthn PRF's domain-separated
 `first` and `second` outputs from the same approval. After WebAuthn, the phone
-releases its held result only for a CLI signature over a fresh nonce and that
-context. Fresh signing keys, challenges, and nonces make captured messages
-unusable in another command. The initial ceremony fails closed on a comparison
-mismatch, rejection, malformed message, disconnect, or timeout; the separately
-acknowledged remember follow-up may be retried after returning a different
-credential or result.
+sends the result over the authenticated WebRTC channel. The CLI buffers it and
+only makes it available to verification, use, or pinning after terminal
+confirmation. Fresh signing keys, challenges, commitments, and WebRTC sessions
+make captured results unusable in another command. The initial ceremony fails
+closed on a comparison mismatch, rejection, malformed message, disconnect, or
+timeout; the separately acknowledged remember follow-up may be retried after
+returning a different credential or result.
 
 ## Skipping repeated prompts
 

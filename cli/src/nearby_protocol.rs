@@ -7,8 +7,6 @@
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
-#[cfg(test)]
-use ed25519_dalek::Signature;
 use ed25519_dalek::{Signer, SigningKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -16,7 +14,6 @@ use zeroize::Zeroizing;
 
 const RID_DOMAIN: &[u8] = b"keytap:rendezvous:v3\0";
 const OFFER_SIGNATURE_DOMAIN: &[u8] = b"keytap:signal-offer:v3\0";
-const SAS_RELEASE_DOMAIN: &[u8] = b"keytap:nearby-sas-release:v1\0";
 const IDENTITY_SESSION_DOMAIN: &[u8] = b"keytap:nearby-identity-session:v2\0";
 const SIGNAL_VERSION: u8 = 3;
 
@@ -67,27 +64,6 @@ impl CliSessionKey {
         }
     }
 
-    /// Authorize release of a held WebAuthn result only after the local CLI
-    /// comparison. The phone nonce is generated after WebAuthn completes, so
-    /// a valid authorization cannot have been queued before the result existed.
-    pub fn sign_pairing_release(
-        &self,
-        session_binding: &[u8; 32],
-        sas_digest: &[u8; 32],
-        canonical_request: &[u8],
-        release_nonce: &[u8; 32],
-    ) -> [u8; 64] {
-        SigningKey::from_bytes(&self.seed)
-            .sign(&pairing_release_message(
-                &self.public_key,
-                session_binding,
-                sas_digest,
-                canonical_request,
-                release_nonce,
-            ))
-            .to_bytes()
-    }
-
     /// Bind identity proofs and SAS to the QR key plus both complete SDPs.
     pub fn identity_session_binding(&self, offer: &[u8], answer: &[u8]) -> [u8; 32] {
         let mut digest = Sha256::new();
@@ -117,33 +93,6 @@ fn offer_signature_message(seq: u64, body: &[u8]) -> Vec<u8> {
     message.extend_from_slice(b"offer\0");
     message.extend_from_slice(&(body.len() as u64).to_be_bytes());
     message.extend_from_slice(body);
-    message
-}
-
-fn pairing_release_message(
-    cli_public_key: &[u8; 32],
-    session_binding: &[u8; 32],
-    sas_digest: &[u8; 32],
-    canonical_request: &[u8],
-    release_nonce: &[u8; 32],
-) -> Vec<u8> {
-    let mut message = Vec::with_capacity(
-        SAS_RELEASE_DOMAIN.len()
-            + cli_public_key.len()
-            + session_binding.len()
-            + sas_digest.len()
-            + canonical_request.len()
-            + release_nonce.len()
-            + 9,
-    );
-    message.extend_from_slice(SAS_RELEASE_DOMAIN);
-    message.push(3);
-    message.extend_from_slice(cli_public_key);
-    message.extend_from_slice(session_binding);
-    message.extend_from_slice(sas_digest);
-    message.extend_from_slice(&(canonical_request.len() as u64).to_be_bytes());
-    message.extend_from_slice(canonical_request);
-    message.extend_from_slice(release_nonce);
     message
 }
 
@@ -257,44 +206,6 @@ mod tests {
             "U2k9m3s7XkIf9QF0ShT4TNY-FzYYAfoF4RX9zLBWoo5TYwS5-oblqKqQdK7mQVxO92UWDTidykN6Nm3vXeWPDg"
         );
         assert_eq!(offer.body, URL_SAFE_NO_PAD.encode(br#"{"type":"offer"}"#));
-    }
-
-    #[test]
-    fn release_signature_is_bound_to_post_ceremony_nonce_and_full_pairing() {
-        let key = fixed_key();
-        let signature = key.sign_pairing_release(&[1; 32], &[2; 32], b"request", &[3; 32]);
-        assert_eq!(
-            URL_SAFE_NO_PAD.encode(signature),
-            "Iyw_IiGnfBf7isag5c_waK22c6C0vdyERCWS9R5JZZA1GTYmasb6nG5S39sJKA7AR1szG6vp4HaIcNo5mq86Dw"
-        );
-        let verifying_key = SigningKey::from_bytes(&[7; 32]).verifying_key();
-        let message = pairing_release_message(
-            &verifying_key.to_bytes(),
-            &[1; 32],
-            &[2; 32],
-            b"request",
-            &[3; 32],
-        );
-        verifying_key
-            .verify_strict(&message, &Signature::from_bytes(&signature))
-            .unwrap();
-    }
-
-    #[test]
-    fn release_signature_matches_the_browser_canonical_request_vector() {
-        let key = fixed_key();
-        let canonical_request = URL_SAFE_NO_PAD.decode(
-            "AQAAACABAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQAAACACAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgAAACADAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwAAAAZkZXBsb3kBAAAABGNyZWQBAAAAAAAAADw",
-        ).unwrap();
-        assert_eq!(
-            URL_SAFE_NO_PAD.encode(key.sign_pairing_release(
-                &[4; 32],
-                &[5; 32],
-                &canonical_request,
-                &[6; 32],
-            )),
-            "Z1ZC9SnoBK3gYjh2AYlxTRx9HAfKUsOmRm7sAQhM63Yj3VXjZGHVsQIhFkmsQMJC-_Z0ZZ61zJny3_4EgbsgDQ"
-        );
     }
 
     #[test]

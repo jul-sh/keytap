@@ -3,7 +3,7 @@
 //! The QR fragment contains a one-time 32-byte CLI public key. The Worker sees
 //! only a hash-derived rendezvous id. The CLI signs the full, non-trickle
 //! WebRTC offer (including its DTLS fingerprint), so the phone authenticates
-//! the data-channel peer before it releases any WebAuthn result.
+//! the data-channel peer before it sends any WebAuthn result.
 
 use crate::nearby_identity::{
     Anchor as IdentityAnchor, InitCommitError as IdentityInitCommitError,
@@ -140,23 +140,10 @@ enum FlowPlan {
     },
 }
 
-enum AuthenticatedPlan {
-    Registration {
-        authorization: PairingAuthorization,
-        pending_init: PendingIdentityInit,
-    },
-    Assertion {
-        key_name: String,
-        challenge: [u8; 32],
-        remember: RememberOffer,
-        identity: AuthenticatedIdentity,
-    },
-}
-
 enum AuthenticatedIdentity {
     Pairing {
         anchor: IdentityPairingAnchor,
-        authorization: PairingAuthorization,
+        confirmation: SasConfirmation,
     },
     Pinned {
         anchor: PinnedIdentityAnchor,
@@ -164,9 +151,27 @@ enum AuthenticatedIdentity {
     },
 }
 
-struct PairingAuthorization {
-    confirmation: SasConfirmation,
-    release_signature: [u8; 64],
+enum BufferedPairingResult {
+    Registration {
+        credential_id: String,
+    },
+    Assertion {
+        credential_id: String,
+        prf_first: String,
+        proof: IdentityProofDto,
+    },
+}
+
+enum PairingAuthorization {
+    Registration {
+        credential_id: String,
+    },
+    Assertion {
+        confirmation: SasConfirmation,
+        credential_id: String,
+        prf_first: String,
+        proof: IdentityProofDto,
+    },
 }
 
 struct AssertionCompletion {
@@ -326,7 +331,6 @@ impl RememberWindow {
                 }
                 (state, PhoneMessage::SasPhoneCommit { .. })
                 | (state, PhoneMessage::SasPhoneReveal { .. })
-                | (state, PhoneMessage::SasPhoneComplete { .. })
                 | (state, PhoneMessage::SasPhoneRejected)
                 | (state, PhoneMessage::PairedRegistrationResult { .. })
                 | (state, PhoneMessage::PairedAssertionResult { .. })
@@ -439,21 +443,17 @@ fn run_nearby_flow(operation: Operation<'_>) -> Result<FlowResult, String> {
         incoming,
     };
 
-    let plan = authenticate_plan(plan, &session, identity_binding, &cli_session_key)?;
-    let first = session.receive(CEREMONY_RESPONSE_TIMEOUT)?;
-    let result = match (plan, first) {
-        (
-            AuthenticatedPlan::Registration {
-                authorization,
-                pending_init,
-            },
-            PhoneMessage::PairedRegistrationResult {
-                credential_id,
-                release_signature,
-                ..
-            },
-        ) => {
-            verify_release_echo(&release_signature, &authorization.release_signature)?;
+    let result = match plan {
+        FlowPlan::Registration {
+            request,
+            pending_init,
+        } => {
+            let credential_id = match run_pairing(&session, request, &identity_binding)? {
+                PairingAuthorization::Registration { credential_id } => credential_id,
+                PairingAuthorization::Assertion { .. } => {
+                    return reject_unexpected_pairing(&session)
+                }
+            };
             let credential_id = decode_credential_id(&credential_id)?;
             let registration = match pending_init.commit(&credential_id) {
                 Ok(registration) => registration,
@@ -490,26 +490,25 @@ fn run_nearby_flow(operation: Operation<'_>) -> Result<FlowResult, String> {
             }
             FlowResult::Registration { registration }
         }
-        (
-            AuthenticatedPlan::Assertion {
-                key_name,
-                challenge,
-                remember,
-                identity:
-                    AuthenticatedIdentity::Pairing {
-                        anchor,
-                        authorization,
-                    },
-            },
-            PhoneMessage::PairedAssertionResult {
-                credential_id,
-                prf_first,
-                identity: proof,
-                release_signature,
-                ..
-            },
-        ) => {
-            verify_release_echo(&release_signature, &authorization.release_signature)?;
+        FlowPlan::PairingAssertion {
+            request,
+            key_name,
+            challenge,
+            remember,
+            anchor,
+        } => {
+            let (confirmation, credential_id, prf_first, proof) =
+                match run_pairing(&session, request, &identity_binding)? {
+                    PairingAuthorization::Assertion {
+                        confirmation,
+                        credential_id,
+                        prf_first,
+                        proof,
+                    } => (confirmation, credential_id, prf_first, proof),
+                    PairingAuthorization::Registration { .. } => {
+                        return reject_unexpected_pairing(&session)
+                    }
+                };
             complete_assertion(
                 session,
                 AssertionCompletion {
@@ -518,7 +517,7 @@ fn run_nearby_flow(operation: Operation<'_>) -> Result<FlowResult, String> {
                     remember,
                     identity: AuthenticatedIdentity::Pairing {
                         anchor,
-                        authorization,
+                        confirmation,
                     },
                     credential_id,
                     prf_first,
@@ -526,44 +525,43 @@ fn run_nearby_flow(operation: Operation<'_>) -> Result<FlowResult, String> {
                 },
             )?
         }
-        (
-            AuthenticatedPlan::Assertion {
-                key_name,
-                challenge,
-                remember,
-                identity:
-                    AuthenticatedIdentity::Pinned {
-                        anchor,
-                        session_digest,
+        FlowPlan::PinnedAssertion {
+            request,
+            key_name,
+            challenge,
+            remember,
+            anchor,
+        } => {
+            session.send(&CliMessage::Request { request })?;
+            match session.receive(CEREMONY_RESPONSE_TIMEOUT)? {
+                PhoneMessage::AssertionResult {
+                    credential_id,
+                    prf_first,
+                    identity: proof,
+                    ..
+                } => complete_assertion(
+                    session,
+                    AssertionCompletion {
+                        key_name,
+                        challenge,
+                        remember,
+                        identity: AuthenticatedIdentity::Pinned {
+                            anchor,
+                            session_digest: identity_binding,
+                        },
+                        credential_id,
+                        prf_first,
+                        proof,
                     },
-            },
-            PhoneMessage::AssertionResult {
-                credential_id,
-                prf_first,
-                identity: proof,
-                ..
-            },
-        ) => complete_assertion(
-            session,
-            AssertionCompletion {
-                key_name,
-                challenge,
-                remember,
-                identity: AuthenticatedIdentity::Pinned {
-                    anchor,
-                    session_digest,
-                },
-                credential_id,
-                prf_first,
-                proof,
-            },
-        )?,
-        (_, PhoneMessage::Done) => {
-            return Err("the page on your phone was closed before approving".into());
-        }
-        _ => {
-            session.send_protocol_error(ProtocolErrorCode::UnexpectedMessage);
-            return Err("phone returned an unexpected nearby protocol message".into());
+                )?,
+                PhoneMessage::Done => {
+                    return Err("the page on your phone was closed before approving".into())
+                }
+                _ => {
+                    session.send_protocol_error(ProtocolErrorCode::UnexpectedMessage);
+                    return Err("phone returned an unexpected nearby protocol message".into());
+                }
+            }
         }
     };
 
@@ -588,11 +586,11 @@ fn complete_assertion(
     let verification = match identity {
         AuthenticatedIdentity::Pairing {
             anchor,
-            authorization,
+            confirmation,
         } => {
             let context = NearbyIdentityProofContext {
                 binding: NearbyIdentityProofBinding::BootstrapSas {
-                    confirmation: &authorization.confirmation,
+                    confirmation: &confirmation,
                 },
                 challenge: &challenge,
                 prf_output: &payload.prf_output,
@@ -664,79 +662,13 @@ fn complete_assertion(
     })
 }
 
-fn verify_release_echo(encoded: &str, expected: &[u8; 64]) -> Result<(), String> {
-    use subtle::ConstantTimeEq;
-    let actual = decode_fixed_base64url::<64>(encoded, "pairing release signature")?;
-    if bool::from(actual.ct_eq(expected)) {
-        Ok(())
-    } else {
-        Err("phone returned a result from before CLI pairing confirmation".to_string())
-    }
-}
-
-fn authenticate_plan(
-    plan: FlowPlan,
-    session: &RtcSession,
-    session_binding: [u8; 32],
-    cli_session_key: &CliSessionKey,
-) -> Result<AuthenticatedPlan, String> {
-    match plan {
-        FlowPlan::Registration {
-            request,
-            pending_init,
-        } => {
-            let authorization = run_pairing(session, request, &session_binding, cli_session_key)?;
-            Ok(AuthenticatedPlan::Registration {
-                authorization,
-                pending_init,
-            })
-        }
-        FlowPlan::PairingAssertion {
-            request,
-            key_name,
-            challenge,
-            remember,
-            anchor,
-        } => {
-            let authorization = run_pairing(session, request, &session_binding, cli_session_key)?;
-            Ok(AuthenticatedPlan::Assertion {
-                key_name,
-                challenge,
-                remember,
-                identity: AuthenticatedIdentity::Pairing {
-                    anchor,
-                    authorization,
-                },
-            })
-        }
-        FlowPlan::PinnedAssertion {
-            request,
-            key_name,
-            challenge,
-            remember,
-            anchor,
-        } => {
-            session.send(&CliMessage::Request { request })?;
-            Ok(AuthenticatedPlan::Assertion {
-                key_name,
-                challenge,
-                remember,
-                identity: AuthenticatedIdentity::Pinned {
-                    anchor,
-                    session_digest: session_binding,
-                },
-            })
-        }
-    }
-}
-
 fn run_pairing(
     session: &RtcSession,
     request: PairingCeremonyRequest,
     session_binding: &[u8; 32],
-    cli_session_key: &CliSessionKey,
 ) -> Result<PairingAuthorization, String> {
     let canonical_request = request.sas_bytes()?;
+    let expects_registration = matches!(&request, PairingCeremonyRequest::Register { .. });
     let pending = SasCommitment::generate(SasContext::bind(session_binding, &canonical_request))?;
     session.send(&CliMessage::PairingRequest {
         request,
@@ -773,13 +705,28 @@ fn run_pairing(
     eprintln!();
     eprintln!("    {}", comparison.phrase());
     eprintln!();
-    eprintln!("Finish the passkey prompt on your phone. The result stays there until you confirm these words here.");
+    eprintln!("Finish the passkey prompt on your phone. The CLI will buffer its result until you confirm these words here.");
 
-    let release_nonce = match session.receive(CEREMONY_RESPONSE_TIMEOUT)? {
-        PhoneMessage::SasPhoneComplete { release_nonce, .. } => {
-            decode_fixed_base64url::<32>(&release_nonce, "phone release nonce")?
+    let buffered = match (
+        expects_registration,
+        session.receive(CEREMONY_RESPONSE_TIMEOUT)?,
+    ) {
+        (true, PhoneMessage::PairedRegistrationResult { credential_id }) => {
+            BufferedPairingResult::Registration { credential_id }
         }
-        PhoneMessage::SasPhoneRejected | PhoneMessage::Done => {
+        (
+            false,
+            PhoneMessage::PairedAssertionResult {
+                credential_id,
+                prf_first,
+                identity: proof,
+            },
+        ) => BufferedPairingResult::Assertion {
+            credential_id,
+            prf_first,
+            proof,
+        },
+        (_, PhoneMessage::SasPhoneRejected | PhoneMessage::Done) => {
             return Err(
                 "pairing was rejected or cancelled on the phone; no key was accepted".into(),
             )
@@ -787,30 +734,27 @@ fn run_pairing(
         _ => return reject_unexpected_pairing(session),
     };
 
-    let confirmed = match comparison.phone_result_held().confirm_with_tty() {
+    let confirmed = match comparison.result_buffered().confirm_with_tty() {
         Ok(confirmed) => confirmed,
         Err(error) => {
-            session
-                .send(&CliMessage::SasCliRejected {
-                    release_nonce: URL_SAFE_NO_PAD.encode(release_nonce),
-                })
-                .ok();
+            session.send(&CliMessage::SasCliRejected).ok();
             return Err(error);
         }
     };
-    let release_signature = cli_session_key.sign_pairing_release(
-        session_binding,
-        confirmed.binding_digest(),
-        &canonical_request,
-        &release_nonce,
-    );
-    session.send(&CliMessage::SasCliAccepted {
-        release_nonce: URL_SAFE_NO_PAD.encode(release_nonce),
-        signature: URL_SAFE_NO_PAD.encode(release_signature),
-    })?;
-    Ok(PairingAuthorization {
-        confirmation: confirmed,
-        release_signature,
+    Ok(match buffered {
+        BufferedPairingResult::Registration { credential_id } => {
+            PairingAuthorization::Registration { credential_id }
+        }
+        BufferedPairingResult::Assertion {
+            credential_id,
+            prf_first,
+            proof,
+        } => PairingAuthorization::Assertion {
+            confirmation: confirmed,
+            credential_id,
+            prf_first,
+            proof,
+        },
     })
 }
 
@@ -1291,15 +1235,7 @@ enum CliMessage {
     SasCliReveal {
         nonce: String,
     },
-    SasCliAccepted {
-        #[serde(rename = "releaseNonce")]
-        release_nonce: String,
-        signature: String,
-    },
-    SasCliRejected {
-        #[serde(rename = "releaseNonce")]
-        release_nonce: String,
-    },
+    SasCliRejected,
     InitialAccepted,
     InitialRejected {
         reason: InitialRejectedReason,
@@ -1577,16 +1513,10 @@ enum PhoneMessage {
     SasPhoneReveal {
         nonce: String,
     },
-    SasPhoneComplete {
-        #[serde(rename = "releaseNonce")]
-        release_nonce: String,
-    },
     SasPhoneRejected,
     PairedRegistrationResult {
         #[serde(rename = "credentialId")]
         credential_id: String,
-        #[serde(rename = "releaseSignature")]
-        release_signature: String,
     },
     PairedAssertionResult {
         #[serde(rename = "credentialId")]
@@ -1594,8 +1524,6 @@ enum PhoneMessage {
         #[serde(rename = "prfFirst")]
         prf_first: String,
         identity: IdentityProofDto,
-        #[serde(rename = "releaseSignature")]
-        release_signature: String,
     },
     AssertionResult {
         #[serde(rename = "credentialId")]
@@ -1858,6 +1786,11 @@ mod tests {
                 "reason": "identity-durability-unknown"
             })
         );
+
+        assert_eq!(
+            serde_json::to_value(CliMessage::SasCliRejected).unwrap(),
+            serde_json::json!({ "type": "sas-cli-rejected" })
+        );
     }
 
     #[test]
@@ -1866,6 +1799,17 @@ mod tests {
             decode_phone_message(r#"{"type":"remember-begin"}"#).unwrap(),
             PhoneMessage::RememberBegin
         ));
+        assert!(matches!(
+            decode_phone_message(
+                r#"{"type":"paired-registration-result","credentialId":"Y3JlZA"}"#
+            )
+            .unwrap(),
+            PhoneMessage::PairedRegistrationResult { .. }
+        ));
+        assert!(decode_phone_message(
+            r#"{"type":"paired-registration-result","credentialId":"Y3JlZA","releaseSignature":"legacy"}"#
+        )
+        .is_err());
         assert!(decode_phone_message(r#"{"type":"unknown"}"#).is_err());
         assert!(
             decode_phone_message(r#"{"type":"assertion-result","credentialId":"YQ"}"#).is_err()
@@ -1880,14 +1824,6 @@ mod tests {
         assert_eq!(payload.prf_output, [7u8; 32]);
         assert!(decode_assertion_fields("Y3JlZA", "c2hvcnQ").is_err());
         assert!(decode_credential_id(&URL_SAFE_NO_PAD.encode(vec![0; 1025])).is_err());
-    }
-
-    #[test]
-    fn paired_results_must_echo_the_exact_post_confirmation_release() {
-        let expected = [7u8; 64];
-        assert!(verify_release_echo(&URL_SAFE_NO_PAD.encode(expected), &expected).is_ok());
-        assert!(verify_release_echo(&URL_SAFE_NO_PAD.encode([8u8; 64]), &expected).is_err());
-        assert!(verify_release_echo("not-base64url!", &expected).is_err());
     }
 
     #[test]

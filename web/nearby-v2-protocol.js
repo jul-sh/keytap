@@ -7,7 +7,6 @@ const IDENTITY_PROOF_DOMAIN = encoder.encode('keytap:nearby-identity-proof:v2\0'
 const SAS_CONTEXT_DOMAIN = encoder.encode('keytap:nearby-sas-context:v1\0');
 const SAS_COMMIT_DOMAIN = encoder.encode('keytap:nearby-sas-commit:v1\0');
 const SAS_DIGEST_DOMAIN = encoder.encode('keytap:nearby-sas-digest:v1\0');
-const SAS_RELEASE_DOMAIN = encoder.encode('keytap:nearby-sas-release:v1\0');
 const webCrypto = globalThis.crypto;
 const SAS_WORD_LIST_SHA256 = Uint8Array.from([
   0x2f, 0x5e, 0xed, 0x53, 0xa4, 0x72, 0x7b, 0x4b,
@@ -66,82 +65,6 @@ function expectBytes(value, label, length) {
   const bytes = decodeBase64URL(value);
   if (bytes.length !== length) throw new ProtocolError(`invalid ${label}`);
   return bytes;
-}
-
-function bytesEqual(left, right) {
-  if (!(left instanceof Uint8Array) || !(right instanceof Uint8Array)
-      || left.length !== right.length) return false;
-  let difference = 0;
-  for (let index = 0; index < left.length; index += 1) {
-    difference |= left[index] ^ right[index];
-  }
-  return difference === 0;
-}
-
-function hasExactKeys(message, expected) {
-  const actual = Object.keys(message).sort();
-  const sortedExpected = [...expected].sort();
-  return actual.length === sortedExpected.length
-    && actual.every((key, index) => key === sortedExpected[index]);
-}
-
-/**
- * Announce that WebAuthn is complete, then authenticate the sole terminal
- * decision. The caller still owns the held credential/PRF result and must not
- * release it unless this function returns `accepted`.
- */
-export async function requestPairingRelease({
-  session,
-  verifier,
-  sessionBinding,
-  sasDigest,
-  request,
-  releaseNonce,
-}) {
-  if (!(releaseNonce instanceof Uint8Array) || releaseNonce.length !== 32) {
-    throw new ProtocolError('invalid phone release nonce');
-  }
-  session.send({
-    type: 'sas-phone-complete',
-    releaseNonce: encodeBase64URL(releaseNonce),
-  });
-
-  const message = expectObject(await session.next(150_000), 'CLI SAS decision');
-  if (typeof message.type !== 'string') {
-    throw new ProtocolError('invalid CLI SAS decision');
-  }
-  if (message.type === 'sas-cli-rejected') {
-    if (!hasExactKeys(message, ['type', 'releaseNonce'])) {
-      throw new ProtocolError('invalid CLI SAS rejection');
-    }
-    const nonce = expectBytes(message.releaseNonce, 'CLI release nonce', 32);
-    if (!bytesEqual(nonce, releaseNonce)) {
-      throw new ProtocolError('CLI rejected a different pairing instance');
-    }
-    return { kind: 'rejected' };
-  }
-  if (message.type === 'sas-cli-accepted') {
-    if (!hasExactKeys(message, ['type', 'releaseNonce', 'signature'])) {
-      throw new ProtocolError('invalid CLI SAS acceptance');
-    }
-    const nonce = expectBytes(message.releaseNonce, 'CLI release nonce', 32);
-    if (!bytesEqual(nonce, releaseNonce)) {
-      throw new ProtocolError('CLI released a different pairing instance');
-    }
-    const signature = expectBytes(message.signature, 'CLI release signature', 64);
-    await verifier.verifyPairingRelease({
-      signature,
-      sessionBinding,
-      sasDigest,
-      request,
-      releaseNonce,
-    });
-    return { kind: 'accepted', signature };
-  }
-  if (message.type === 'protocol-error') {
-    throw new ProtocolError('the CLI rejected the pairing protocol');
-  }
-  throw new ProtocolError('expected CLI SAS decision');
 }
 
 /** @param {...Uint8Array} arrays */
@@ -441,30 +364,6 @@ function offerSignatureMessage(seq, body) {
   );
 }
 
-function pairingReleaseMessage(
-  cliPublicKey,
-  sessionBinding,
-  sasDigest,
-  canonicalRequest,
-  releaseNonce,
-) {
-  const fixed = [cliPublicKey, sessionBinding, sasDigest, releaseNonce];
-  if (fixed.some(value => !(value instanceof Uint8Array) || value.length !== 32)
-      || !(canonicalRequest instanceof Uint8Array)) {
-    throw new ProtocolError('invalid pairing release input');
-  }
-  return concatBytes(
-    SAS_RELEASE_DOMAIN,
-    new Uint8Array([3]),
-    cliPublicKey,
-    sessionBinding,
-    sasDigest,
-    u64(canonicalRequest.length),
-    canonicalRequest,
-    releaseNonce,
-  );
-}
-
 /**
  * Build a verifier for the one-time CLI public key carried in the QR fragment.
  * A valid offer signature authenticates the offer's DTLS fingerprint, which
@@ -525,33 +424,6 @@ export async function createCliOfferVerifier(cliPublicKeyBytes) {
       );
       if (!valid) throw new ProtocolError('signaling authentication failed');
       return body;
-    },
-
-    /** Verify the CLI's post-comparison authorization for a held result. */
-    async verifyPairingRelease({
-      signature,
-      sessionBinding,
-      sasDigest,
-      request,
-      releaseNonce,
-    }) {
-      if (!(signature instanceof Uint8Array) || signature.length !== 64) {
-        throw new ProtocolError('invalid pairing release signature');
-      }
-      const message = pairingReleaseMessage(
-        cliPublicKey,
-        sessionBinding,
-        sasDigest,
-        nearbySasRequestBytes(request),
-        releaseNonce,
-      );
-      const valid = await webCrypto.subtle.verify(
-        'Ed25519',
-        verificationKey,
-        signature,
-        message,
-      );
-      if (!valid) throw new ProtocolError('invalid pairing release signature');
     },
   });
 }

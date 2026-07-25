@@ -4,6 +4,8 @@ import test from 'node:test';
 import {
   initialIndeterminateMessage,
   initialRejectionMessage,
+  sendPairedAssertionResult,
+  sendPairedRegistrationResult,
   sessionFailureMessage,
   terminatePhaseForPagehide,
 } from './nearby-v2.js';
@@ -49,30 +51,37 @@ test('pagehide aborts pairing WebAuthn and rejects without a result', () => {
   assert.equal(session.closed, true);
 });
 
-test('pagehide destroys a held assertion before rejecting pairing', () => {
-  const session = fakeSession();
-  const releaseNonce = new Uint8Array(32).fill(7);
-  const prfFirst = new Uint8Array(32).fill(9);
-  terminatePhaseForPagehide({
-    kind: 'pairing-held',
-    data: {
-      kind: 'assertion',
-      session,
-      releaseNonce,
-      result: { prfFirst },
-    },
+test('pairing results are sent immediately without a release handshake', () => {
+  const registrationSession = fakeSession();
+  sendPairedRegistrationResult(registrationSession, {
+    rawId: new Uint8Array([1, 2, 3]),
   });
-  assert.deepEqual(releaseNonce, new Uint8Array(32));
-  assert.deepEqual(prfFirst, new Uint8Array(32));
-  assert.deepEqual(session.sent, [{ type: 'sas-phone-rejected' }]);
-  assert.equal(session.closed, true);
+  assert.deepEqual(registrationSession.sent, [{
+    type: 'paired-registration-result',
+    credentialId: 'AQID',
+  }]);
+
+  const assertionSession = fakeSession();
+  const prfFirst = new Uint8Array([4, 5, 6]);
+  sendPairedAssertionResult(assertionSession, {
+    credentialId: new Uint8Array([1, 2, 3]),
+    prfFirst,
+    identity: { publicKey: 'key', signature: 'signature' },
+  });
+  assert.deepEqual(assertionSession.sent, [{
+    type: 'paired-assertion-result',
+    credentialId: 'AQID',
+    prfFirst: 'BAUG',
+    identity: { publicKey: 'key', signature: 'signature' },
+  }]);
+  assert.deepEqual(prfFirst, new Uint8Array(3));
 });
 
 test('identity storage failure is not described as an identity mismatch', () => {
   const registration = initialRejectionMessage('identity-store-unavailable', true);
   const assertion = initialRejectionMessage('identity-store-unavailable', false);
   assert.match(registration, /could not save the trusted identity/i);
-  assert.match(registration, /passkey may have been created/i);
+  assert.match(registration, /received the passkey result/i);
   assert.match(assertion, /could not access its trusted identity store/i);
   assert.doesNotMatch(assertion, /did not match/i);
 });

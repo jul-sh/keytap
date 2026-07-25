@@ -16,7 +16,6 @@ import {
   nearbyIdentityProofMessage,
   nearbySasRequestBytes,
   parseSasWordList,
-  requestPairingRelease,
   sasPhrase,
   verifySasCommitment,
 } from './nearby-v2-protocol.js';
@@ -152,36 +151,6 @@ test('canonically binds the exact pairing request', async () => {
     encodeBase64URL(await createSasContext(new Uint8Array(32).fill(4), request)),
     'ov2kOyVpend0ognXvoqine2hW54dYUqDikvCzmw4xqE',
   );
-  const verifier = await createCliOfferVerifier(
-    decodeBase64URL('6kpsY-KcUgq-9VB7Ey7F-ZVHdq6-vnuSQh7qaRRG0iw'),
-  );
-  await verifier.verifyPairingRelease({
-    signature: decodeBase64URL('Z1ZC9SnoBK3gYjh2AYlxTRx9HAfKUsOmRm7sAQhM63Yj3VXjZGHVsQIhFkmsQMJC-_Z0ZZ61zJny3_4EgbsgDQ'),
-    sessionBinding: new Uint8Array(32).fill(4),
-    sasDigest: new Uint8Array(32).fill(5),
-    request,
-    releaseNonce: new Uint8Array(32).fill(6),
-  });
-  const signature = decodeBase64URL('Z1ZC9SnoBK3gYjh2AYlxTRx9HAfKUsOmRm7sAQhM63Yj3VXjZGHVsQIhFkmsQMJC-_Z0ZZ61zJny3_4EgbsgDQ');
-  const valid = {
-    signature,
-    sessionBinding: new Uint8Array(32).fill(4),
-    sasDigest: new Uint8Array(32).fill(5),
-    request,
-    releaseNonce: new Uint8Array(32).fill(6),
-  };
-  const mutations = [
-    { ...valid, sessionBinding: new Uint8Array(32).fill(9) },
-    { ...valid, sasDigest: new Uint8Array(32).fill(9) },
-    { ...valid, request: { ...request, keyName: 'production' } },
-    { ...valid, releaseNonce: new Uint8Array(32).fill(7) },
-  ];
-  for (const mutation of mutations) {
-    await assert.rejects(
-      verifier.verifyPairingRelease(mutation),
-      /invalid pairing release signature/,
-    );
-  }
 });
 
 test('binds CLI offer authentication to key, version, state, and body', async () => {
@@ -247,107 +216,6 @@ test('rejects TURN responses without bounded string credentials', () => {
     () => filterCloudflareIceServers([{ urls: 'turn:turn.cloudflare.com:3478?transport=udp' }]),
     ProtocolError,
   );
-});
-
-function pairingDeferred() {
-  let resolve;
-  const promise = new Promise(resolvePromise => {
-    resolve = resolvePromise;
-  });
-  return { promise, resolve };
-}
-
-function pairingFixture() {
-  const incoming = pairingDeferred();
-  const sent = [];
-  const verified = [];
-  const releaseNonce = new Uint8Array(32).fill(6);
-  const session = {
-    send: message => sent.push(message),
-    next: timeoutMs => {
-      assert.equal(timeoutMs, 150_000);
-      return incoming.promise;
-    },
-  };
-  const verifier = {
-    async verifyPairingRelease(fields) {
-      verified.push(fields);
-    },
-  };
-  const fields = {
-    session,
-    verifier,
-    sessionBinding: new Uint8Array(32).fill(4),
-    sasDigest: new Uint8Array(32).fill(5),
-    request: { kind: 'register' },
-    releaseNonce,
-  };
-  return { fields, incoming, sent, verified, releaseNonce };
-}
-
-test('withholds the held result while only announcing phone completion', async () => {
-  const { fields, incoming, sent, verified, releaseNonce } = pairingFixture();
-  let settled = false;
-  const decisionPromise = requestPairingRelease(fields).then(value => {
-    settled = true;
-    return value;
-  });
-  await Promise.resolve();
-
-  assert.equal(settled, false);
-  assert.deepEqual(sent, [{
-    type: 'sas-phone-complete',
-    releaseNonce: encodeBase64URL(releaseNonce),
-  }]);
-  assert.equal(sent.some(message => /result$/.test(message.type)), false);
-  assert.equal(verified.length, 0);
-
-  const signature = new Uint8Array(64).fill(7);
-  incoming.resolve({
-    type: 'sas-cli-accepted',
-    releaseNonce: encodeBase64URL(releaseNonce),
-    signature: encodeBase64URL(signature),
-  });
-  const decision = await decisionPromise;
-  assert.equal(decision.kind, 'accepted');
-  assert.deepEqual(decision.signature, signature);
-  assert.equal(verified.length, 1);
-  assert.deepEqual(verified[0].releaseNonce, releaseNonce);
-});
-
-test('rejects an early or replayed decision for another completion nonce', async () => {
-  const { fields, incoming, verified } = pairingFixture();
-  const decisionPromise = requestPairingRelease(fields);
-  incoming.resolve({
-    type: 'sas-cli-accepted',
-    releaseNonce: encodeBase64URL(new Uint8Array(32).fill(9)),
-    signature: encodeBase64URL(new Uint8Array(64).fill(7)),
-  });
-  await assert.rejects(decisionPromise, /different pairing instance/);
-  assert.equal(verified.length, 0);
-});
-
-test('propagates signature failure and accepts only an exact rejection', async () => {
-  const invalid = pairingFixture();
-  invalid.fields.verifier.verifyPairingRelease = async () => {
-    throw new ProtocolError('invalid pairing release signature');
-  };
-  const invalidPromise = requestPairingRelease(invalid.fields);
-  invalid.incoming.resolve({
-    type: 'sas-cli-accepted',
-    releaseNonce: encodeBase64URL(invalid.releaseNonce),
-    signature: encodeBase64URL(new Uint8Array(64).fill(7)),
-  });
-  await assert.rejects(invalidPromise, /invalid pairing release signature/);
-
-  const rejected = pairingFixture();
-  const rejectedPromise = requestPairingRelease(rejected.fields);
-  rejected.incoming.resolve({
-    type: 'sas-cli-rejected',
-    releaseNonce: encodeBase64URL(rejected.releaseNonce),
-  });
-  assert.deepEqual(await rejectedPromise, { kind: 'rejected' });
-  assert.equal(rejected.verified.length, 0);
 });
 
 test('the phone has no word-match confirmation control', async () => {

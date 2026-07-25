@@ -46,9 +46,9 @@ pub struct Comparison {
     phrase: Phrase,
 }
 
-/// The phone has completed WebAuthn and is holding the result locally.
+/// The CLI has received the WebAuthn result but has not accepted it.
 /// Only the terminal can turn this state into a confirmed comparison.
-pub struct HeldResultComparison(Comparison);
+pub struct BufferedResultComparison(Comparison);
 
 /// This state can only be produced by an affirmative terminal answer.
 pub struct ConfirmedComparison {
@@ -94,7 +94,7 @@ impl InitiatorCommitment {
 
 impl Context {
     /// Freeze both the WebRTC transcript and the exact request that the phone
-    /// will execute before holding its result for terminal confirmation.
+    /// will execute before the CLI buffers its result for terminal confirmation.
     pub fn bind(session_binding: &[u8; 32], canonical_request: &[u8]) -> Self {
         let mut digest = Sha256::new();
         digest.update(CONTEXT_DOMAIN);
@@ -139,12 +139,12 @@ impl Comparison {
         self.phrase
     }
 
-    pub fn phone_result_held(self) -> HeldResultComparison {
-        HeldResultComparison(self)
+    pub fn result_buffered(self) -> BufferedResultComparison {
+        BufferedResultComparison(self)
     }
 }
 
-impl HeldResultComparison {
+impl BufferedResultComparison {
     pub fn confirm_with_tty(self) -> Result<ConfirmedComparison, String> {
         #[cfg(unix)]
         {
@@ -183,7 +183,7 @@ impl HeldResultComparison {
     fn write_prompt(&self, writer: &mut impl Write) -> Result<(), String> {
         write!(
             writer,
-            "\nYour phone finished. Did it show exactly \"{}\"? [y/N, 2 minute timeout] ",
+            "\nResult received but not accepted. Did your phone show exactly \"{}\"? [y/N, 2 minute timeout] ",
             self.0.phrase
         )
         .map_err(|error| format!("could not write pairing confirmation: {error}"))?;
@@ -440,7 +440,7 @@ mod tests {
                 second: 1,
             },
         }
-        .phone_result_held();
+        .result_buffered();
         let mut output = Vec::new();
         assert!(comparison
             .confirm_with_io(&mut "no\n".as_bytes(), &mut output)
@@ -459,7 +459,7 @@ mod tests {
                 second: 1,
             },
         }
-        .phone_result_held();
+        .result_buffered();
         let confirmed = comparison
             .confirm_with_io(&mut "yes\n".as_bytes(), &mut Vec::new())
             .unwrap();
