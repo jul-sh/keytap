@@ -652,6 +652,8 @@ async function main() {
     return;
   }
   sessionId = config.sessionId;
+  $('host-public-key').textContent = config.cliPubKey;
+  $('host-key').hidden = false;
 
   const isRegister = config.operation === 'register';
   $('title').textContent = isRegister ? 'Create your keytap passkey' : 'Approve this key request';
@@ -685,13 +687,11 @@ async function main() {
 
   if (isRegister) {
     say('Ready.');
-    phase = { kind: 'ready', action: 'run' };
-    btn.disabled = false;
   } else {
-    // Opening the page from a QR scan provides transient user activation;
-    // the passkey prompt appears without another tap.
-    runFirst();
+    say('Compare the host public key with your terminal, then approve the request.');
   }
+  phase = { kind: 'ready', action: 'run' };
+  btn.disabled = false;
 }
 
 // A v2 QR carries only its one-time capability in `#q`. Keep the deployed

@@ -216,6 +216,11 @@ When keytap authenticates via your phone, additional trust considerations apply:
   You still trust Cloudflare to operate the service, enforce credential expiry,
   and report usage for billing; payload confidentiality does not depend on the
   TURN operator being honest.
+- **Legacy `#s` relay links use the older X25519 protocol.** The CLI and page
+  display a one-time host public key; compare the full values before approving.
+  That comparison detects relay key substitution, but the legacy path does not
+  provide the automatic passkey identity pinning described here and remains a
+  transitional compatibility route.
 
 The identity proof covers a hash of the fresh QR capability and both complete
 SDPs (including DTLS fingerprints and ICE candidates), plus the WebAuthn
