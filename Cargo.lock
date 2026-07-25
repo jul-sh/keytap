@@ -1037,7 +1037,7 @@ dependencies = [
 
 [[package]]
 name = "keytap"
-version = "6.4.0"
+version = "6.4.1"
 dependencies = [
  "aes-gcm",
  "age",
@@ -1065,7 +1065,7 @@ dependencies = [
 
 [[package]]
 name = "keytap-cli-spec"
-version = "6.4.0"
+version = "6.4.1"
 dependencies = [
  "clap",
  "keytap-core",
@@ -1101,7 +1101,7 @@ dependencies = [
 
 [[package]]
 name = "keytap-web"
-version = "6.4.0"
+version = "6.4.1"
 dependencies = [
  "getrandom",
  "js-sys",

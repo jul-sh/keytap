@@ -16,9 +16,14 @@
     <h1 id="title">Loading…</h1>
     <p class="summary" id="summary"></p>
     <p class="summary" id="explainer">Approve with this device to send the derived key back to your waiting CLI.</p>
+    <section class="host-key" id="host-key" hidden>
+      <h2>One-time host public key</h2>
+      <code id="host-public-key"></code>
+      <p>Before approving, compare this value with the one in the host terminal. If they differ, close this page.</p>
+    </section>
     <details class="details" id="details">
       <summary>How is this request protected?</summary>
-      <p>Your CLI and this page use one-time X25519 keys to create an encrypted channel. The derived key is protected with AES-256-GCM, so the relay only sees ciphertext. Remembering a key requires a second approval.</p>
+      <p>Your CLI and this page use one-time X25519 keys to create an encrypted channel. Comparing the host public key prevents the relay from silently substituting its own key. The derived key is protected with AES-256-GCM, so the relay only sees ciphertext. Remembering a key requires a second approval.</p>
     </details>
     <section class="offer" id="offer" hidden>
       <h2 id="offer-heading" tabindex="-1">Remember on that machine?</h2>

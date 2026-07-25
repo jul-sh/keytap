@@ -107,9 +107,9 @@ On platforms where the CLI cannot do the passkey ceremony natively, `keytap` fal
 
 The flow is:
 
-1. the CLI prints a QR code
+1. the CLI prints a QR code and a one-time host public key
 2. you scan it with your phone
-3. your phone opens the `keytap` page
+3. your phone opens the `keytap` page and you compare its host public key with the CLI
 4. you approve with a passkey on the phone
 5. the PRF result is sent back to the CLI over an end-to-end encrypted relay channel
 
@@ -168,7 +168,8 @@ With that said, here is how keytap works within those constraints:
 When keytap authenticates via your phone, additional trust considerations apply:
 
 - **You trust the web page served to your phone.** The website served by `keytap.jul.sh` performs the WebAuthn ceremony, receives the PRF output, encrypts it, and posts back to the host, via the relay. You trust its functionality and integrity. The web page is served inspectable, but in practice you are unlikely to review it each time.
-- The Cloudflare relay (`keytap-relay.julsh.workers.dev`) forwards opaque encrypted blobs. It never sees plaintext key material. The channel is end-to-end encrypted with X25519 ECDH + HKDF-SHA256 + AES-256-GCM. An attacker who controls the relay can deny service but cannot decrypt the payload.
+- The Cloudflare relay (`keytap-relay.julsh.workers.dev`) forwards opaque encrypted blobs. The channel is encrypted with X25519 ECDH + HKDF-SHA256 + AES-256-GCM. A malicious relay could replace the host's X25519 public key with its own and act as a man in the middle, decrypting the passkey-derived secret before forwarding it. To detect that substitution, the CLI and phone page both display the one-time host public key. Compare the full values **before approving**; if they differ, close the page and do not continue. When they match, the relay cannot decrypt the payload.
+- A malicious relay can still encrypt a fabricated response to the real host public key, causing the CLI to accept and derive from an attacker-controlled value. Comparing public keys does not prevent this. A later pairing or use attempt against the expected key will fail visibly because the injected key does not match. The genuine passkey-derived secret was not exposed in this case: the damage is secret injection, not secret exfiltration. The relay can also delay, drop, replay, or corrupt messages to deny service.
 
 ## Skipping repeated prompts
 

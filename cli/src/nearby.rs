@@ -326,6 +326,9 @@ fn run_nearby_flow(
     eprintln!();
     eprintln!("Or open: {url}");
     eprintln!();
+    eprintln!("One-time host public key (compare with phone):");
+    eprintln!("{}", URL_SAFE_NO_PAD.encode(cli_public.as_bytes()));
+    eprintln!();
     eprintln!("Waiting for response (timeout: 5 minutes)…");
 
     let mut session = WsSession { ws, secret: cli_secret, session_id };
