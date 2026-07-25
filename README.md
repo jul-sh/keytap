@@ -249,6 +249,15 @@ When keytap authenticates via your phone, additional trust considerations apply:
   You still trust Cloudflare to operate the service, enforce credential expiry,
   and report usage for billing; payload confidentiality does not depend on the
   TURN operator being honest.
+- **TURN credential issuance is intentionally public.** Keytap has no account
+  or other entitlement check. Anyone can create an arbitrary rendezvous, have
+  two clients claim its public `cli` and `phone` roles, and obtain short-lived
+  TURN credentials charged to this deployment. Per-rendezvous caching and the
+  per-location IP limiter reduce repeated issuance but neither authorizes a
+  user nor imposes an account-wide cap. This quota and availability abuse risk
+  is currently accepted. It does not reveal Keytap key material or let a
+  credential holder decrypt another WebRTC session; someone who learns a real
+  QR value can still race or deny that rendezvous as described above.
 - **Legacy `#s` relay links use the older X25519 protocol.** The CLI and page
   display a one-time host public key; compare the full values before approving.
   That comparison detects relay key substitution, but the legacy path does not
@@ -463,18 +472,26 @@ Content-Type: application/json
 {"ttl":1200}
 ```
 
-The 1,200-second TTL is fixed by the Worker, not supplied by clients. The
-credential endpoint is available only after both roles join a live rendezvous,
-and each role can mint at most once; retries receive that role's cached value.
-Responses are `no-store`, and the rendezvous sockets and stored state are
-erased twenty minutes after the first peer joins. A Workers rate-limit binding
-allows 20 v2 requests per source address per 60 seconds in each Cloudflare
-location, in addition to the per-rendezvous limit. Cloudflare documents the
-binding's locality and eventual consistency in the
-[Workers Rate Limiting API](https://developers.cloudflare.com/workers/runtime-apis/bindings/rate-limit/),
-which is why the Durable Object cap remains authoritative. These controls
-matter because CORS is not authentication and an unrestricted credential
-endpoint would be a billing credential.
+The 1,200-second TTL is fixed by the Worker, not supplied by clients. A
+credential can be minted only after two clients claim a rendezvous's public
+`cli` and `phone` roles, and it is cached once per claimed role for that
+rendezvous. The Worker binds sockets, pending requests, and cached credentials
+to a persisted session generation. After Cloudflare responds, one storage
+transaction rechecks that the exact generation is still live and within its
+deadline before storing or returning the credential, so an alarm or recreated
+room cannot resurrect expired state. Responses are `no-store`, and the
+rendezvous sockets and stored state are erased twenty minutes after the first
+peer joins.
+
+These are lifecycle and amplification controls, not user authorization.
+Rendezvous creation is public and there is no account-wide issuance cap.
+A Workers rate-limit binding allows 20 v2 requests per source address per 60
+seconds in each Cloudflare location, but Cloudflare documents that binding as
+local and eventually consistent in the
+[Workers Rate Limiting API](https://developers.cloudflare.com/workers/runtime-apis/bindings/rate-limit/).
+This deployment intentionally accepts the resulting TURN quota and availability
+abuse risk. Monitor usage and disable or rotate the TURN key if that becomes
+unacceptable.
 
 Clients use normal ICE so a direct connection wins. They accept Cloudflare's
 STUN service and TURN endpoints but omit port 53 for non-trickle ICE, because

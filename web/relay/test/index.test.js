@@ -5,6 +5,8 @@ import worker, { SignalSession } from "../src/index.js";
 
 const RID = "A".repeat(43);
 const ORIGIN = "https://keytap.jul.sh";
+const GENERATION = "test-generation";
+const LIFECYCLE_KEY = "signal:lifecycle";
 
 class MemoryStorage {
   constructor() {
@@ -15,14 +17,15 @@ class MemoryStorage {
   async get(key) { return this.values.get(key); }
   async put(key, value) { this.values.set(key, value); }
   async deleteAll() { this.values.clear(); }
+  async transaction(callback) { return callback(this); }
   async deleteAlarm() { this.alarm = null; }
   async getAlarm() { return this.alarm; }
   async setAlarm(value) { this.alarm = value; }
 }
 
 class FakeSocket {
-  constructor(role) {
-    this.attachment = { kind: "peer", role, forwardedMessages: 0 };
+  constructor(role, generation = GENERATION) {
+    this.attachment = { kind: "peer", role, generation, forwardedMessages: 0 };
     this.sent = [];
     this.closed = [];
   }
@@ -53,10 +56,24 @@ class FakeState {
   }
 }
 
-function readyState() {
+function activateState(
+  state,
+  generation = GENERATION,
+  expiresAt = Date.now() + 20 * 60 * 1000,
+) {
+  state.storage.values.set(LIFECYCLE_KEY, { kind: "active", generation, expiresAt });
+  state.storage.alarm = expiresAt;
+  return state;
+}
+
+function readyState(
+  generation = GENERATION,
+  expiresAt = Date.now() + 20 * 60 * 1000,
+) {
   const state = new FakeState();
-  state.sockets.cli.push(new FakeSocket("cli"));
-  state.sockets.phone.push(new FakeSocket("phone"));
+  activateState(state, generation, expiresAt);
+  state.sockets.cli.push(new FakeSocket("cli", generation));
+  state.sockets.phone.push(new FakeSocket("phone", generation));
   return state;
 }
 
@@ -161,7 +178,7 @@ test("v2 routes a valid rendezvous ID to its SignalSession object", async () => 
 });
 
 test("a signaling room caps each role at one connected socket", async () => {
-  const state = new FakeState();
+  const state = activateState(new FakeState());
   state.sockets.cli.push(new FakeSocket("cli"));
   const session = new SignalSession(state, turnEnvironment());
   const request = new Request(`https://relay.test/v2/signal/${RID}?role=cli`, {
@@ -173,14 +190,40 @@ test("a signaling room caps each role at one connected socket", async () => {
   assert.equal(await response.text(), "cli is already connected");
 });
 
-test("TURN credentials require both roles to be connected", async () => {
+test("WebSocket admission creates and reuses one persisted session generation", async () => {
   const state = new FakeState();
+  const session = new SignalSession(state, turnEnvironment());
+
+  const first = await session.beginOrJoinSignalSession();
+  const second = await session.beginOrJoinSignalSession();
+
+  assert.equal(first.kind, "active");
+  assert.deepEqual(second, first);
+  assert.deepEqual(state.storage.values.get(LIFECYCLE_KEY), first);
+  assert.equal(state.storage.alarm, first.expiresAt);
+});
+
+test("TURN credentials require both roles to be connected", async () => {
+  const state = activateState(new FakeState());
   state.sockets.cli.push(new FakeSocket("cli"));
   const session = new SignalSession(state, turnEnvironment());
 
   const response = await session.fetch(turnRequest());
   assert.equal(response.status, 409);
   assert.equal(await response.text(), "Both peers must be connected");
+});
+
+test("a TURN request cannot create a missing signal session", async () => {
+  const state = new FakeState();
+  state.sockets.cli.push(new FakeSocket("cli"));
+  state.sockets.phone.push(new FakeSocket("phone"));
+  const session = new SignalSession(state, turnEnvironment());
+
+  const response = await session.fetch(turnRequest());
+
+  assert.equal(response.status, 410);
+  assert.equal(await response.text(), "Signal session expired");
+  assert.equal(state.storage.values.has(LIFECYCLE_KEY), false);
 });
 
 test("TURN credentials use a fixed TTL and are minted once per role", async () => {
@@ -215,8 +258,8 @@ test("TURN credentials use a fixed TTL and are minted once per role", async () =
     );
     assert.equal(calls[0].init.headers.Authorization, "Bearer turn-api-token");
     assert.deepEqual(JSON.parse(calls[0].init.body), { ttl: 1200 });
-    assert.equal(typeof state.storage.values.get("turn:cli"), "string");
-    assert.equal(typeof state.storage.values.get("turn:phone"), "string");
+    assert.equal(typeof state.storage.values.get(`turn:${GENERATION}:cli`), "string");
+    assert.equal(typeof state.storage.values.get(`turn:${GENERATION}:phone`), "string");
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -248,6 +291,146 @@ test("concurrent retries share one TURN credential request", async () => {
   }
 });
 
+test("a delayed TURN response cannot resurrect an expired session", async () => {
+  const originalFetch = globalThis.fetch;
+  let markProviderStarted;
+  let releaseProvider;
+  const providerStarted = new Promise((resolve) => { markProviderStarted = resolve; });
+  const providerGate = new Promise((resolve) => { releaseProvider = resolve; });
+  globalThis.fetch = async () => {
+    markProviderStarted();
+    await providerGate;
+    return new Response(JSON.stringify(TURN_RESPONSE));
+  };
+
+  try {
+    const state = readyState();
+    const session = new SignalSession(state, turnEnvironment());
+    const pending = session.fetch(turnRequest());
+
+    await providerStarted;
+    activateState(state, GENERATION, Date.now() - 1);
+    await session.alarm();
+    releaseProvider();
+
+    const response = await pending;
+    assert.equal(response.status, 410);
+    assert.equal(await response.text(), "Signal session expired");
+    assert.equal(
+      [...state.storage.values.keys()].some((key) => key.startsWith("turn:")),
+      false,
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("a recreated room neither commits nor shares the prior generation's mint", async () => {
+  const originalFetch = globalThis.fetch;
+  let providerCalls = 0;
+  let markFirstProviderStarted;
+  let markBothProvidersStarted;
+  let releaseProviders;
+  const firstProviderStarted = new Promise((resolve) => {
+    markFirstProviderStarted = resolve;
+  });
+  const bothProvidersStarted = new Promise((resolve) => {
+    markBothProvidersStarted = resolve;
+  });
+  const providerGate = new Promise((resolve) => { releaseProviders = resolve; });
+  globalThis.fetch = async () => {
+    providerCalls += 1;
+    if (providerCalls === 1) markFirstProviderStarted();
+    if (providerCalls === 2) markBothProvidersStarted();
+    await providerGate;
+    return new Response(JSON.stringify(TURN_RESPONSE));
+  };
+
+  try {
+    const state = readyState("generation-a");
+    const session = new SignalSession(state, turnEnvironment());
+    const oldRequest = session.fetch(turnRequest());
+
+    await firstProviderStarted;
+    activateState(state, "generation-a", Date.now() - 1);
+    await session.alarm();
+    activateState(state, "generation-b");
+    state.sockets.cli.push(new FakeSocket("cli", "generation-b"));
+    state.sockets.phone.push(new FakeSocket("phone", "generation-b"));
+    const newRequest = session.fetch(turnRequest());
+
+    await bothProvidersStarted;
+    assert.equal(providerCalls, 2);
+    releaseProviders();
+
+    const [oldResponse, newResponse] = await Promise.all([oldRequest, newRequest]);
+    assert.equal(oldResponse.status, 410);
+    assert.equal(newResponse.status, 200);
+    assert.equal(state.storage.values.has("turn:generation-a:cli"), false);
+    assert.equal(typeof state.storage.values.get("turn:generation-b:cli"), "string");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("a transaction retry cannot return a rolled-back TURN credential", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(JSON.stringify(TURN_RESPONSE));
+
+  try {
+    const state = readyState();
+    let transactionAttempts = 0;
+    state.storage.transaction = async (callback) => {
+      transactionAttempts += 1;
+      const rolledBack = await callback(state.storage);
+      assert.equal(rolledBack.kind, "stored");
+      state.storage.values.delete(`turn:${GENERATION}:cli`);
+      state.storage.values.delete(LIFECYCLE_KEY);
+
+      transactionAttempts += 1;
+      return callback(state.storage);
+    };
+    const session = new SignalSession(state, turnEnvironment());
+
+    const response = await session.fetch(turnRequest());
+
+    assert.equal(response.status, 410);
+    assert.equal(await response.text(), "Signal session expired");
+    assert.equal(transactionAttempts, 2);
+    assert.equal(state.storage.values.has(`turn:${GENERATION}:cli`), false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("the persisted deadline rejects cached TURN data before a delayed alarm", async () => {
+  const originalFetch = globalThis.fetch;
+  let providerCalls = 0;
+  globalThis.fetch = async () => {
+    providerCalls += 1;
+    return new Response(JSON.stringify(TURN_RESPONSE));
+  };
+
+  try {
+    const state = readyState();
+    activateState(state, GENERATION, Date.now() - 1);
+    await state.storage.put(
+      `turn:${GENERATION}:cli`,
+      JSON.stringify(TURN_RESPONSE),
+    );
+    const session = new SignalSession(state, turnEnvironment());
+
+    const response = await session.fetch(turnRequest());
+
+    assert.equal(response.status, 410);
+    assert.equal(await response.text(), "Signal session expired");
+    assert.equal(providerCalls, 0);
+    assert.equal(state.storage.values.size, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("invalid provider data is not cached or reflected to callers", async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async () => new Response("provider secret detail", { status: 401 });
@@ -259,7 +442,7 @@ test("invalid provider data is not cached or reflected to callers", async () => 
 
     assert.equal(response.status, 502);
     assert.equal(await response.text(), "TURN credential provider failed");
-    assert.equal(state.storage.values.has("turn:cli"), false);
+    assert.equal(state.storage.values.has(`turn:${GENERATION}:cli`), false);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -298,8 +481,8 @@ test("signaling caps the number of frames forwarded by each socket", async () =>
 });
 
 test("session alarm closes peers and erases cached credentials", async () => {
-  const state = readyState();
-  await state.storage.put("turn:cli", "credential");
+  const state = readyState(GENERATION, Date.now() - 1);
+  await state.storage.put(`turn:${GENERATION}:cli`, "credential");
   const session = new SignalSession(state, turnEnvironment());
 
   await session.alarm();
@@ -307,4 +490,24 @@ test("session alarm closes peers and erases cached credentials", async () => {
   assert.equal(state.storage.values.size, 0);
   assert.deepEqual(state.sockets.cli[0].closed, [[1001, "session expired"]]);
   assert.deepEqual(state.sockets.phone[0].closed, [[1001, "session expired"]]);
+});
+
+test("a stale alarm cannot erase a newer live generation", async () => {
+  const expiresAt = Date.now() + 20 * 60 * 1000;
+  const state = readyState("generation-b", expiresAt);
+  await state.storage.put("turn:generation-b:cli", "credential");
+  state.storage.alarm = null;
+  const session = new SignalSession(state, turnEnvironment());
+
+  await session.alarm();
+
+  assert.deepEqual(state.storage.values.get(LIFECYCLE_KEY), {
+    kind: "active",
+    generation: "generation-b",
+    expiresAt,
+  });
+  assert.equal(state.storage.values.get("turn:generation-b:cli"), "credential");
+  assert.equal(state.storage.alarm, expiresAt);
+  assert.deepEqual(state.sockets.cli[0].closed, []);
+  assert.deepEqual(state.sockets.phone[0].closed, []);
 });

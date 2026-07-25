@@ -4,12 +4,13 @@ const CORS_ORIGINS = new Set([
 
 const RENDEZVOUS_ID_PATTERN = "[a-zA-Z0-9_-]{43}";
 // Covers the CLI's five-minute scan wait plus its optional ten-minute
-// remember window without outliving Cloudflare's 20-minute credential.
+// remember window. The room deadline is independent of credential expiry.
 const SIGNAL_SESSION_TTL_MS = 20 * 60 * 1000;
 const TURN_CREDENTIAL_TTL_SECONDS = 1200;
 const MAX_SIGNAL_BYTES = 128 * 1024;
 const MAX_SIGNAL_MESSAGES_PER_SOCKET = 8;
 const TURN_PROVIDER_RESPONSE_MAX_BYTES = 64 * 1024;
+const SIGNAL_LIFECYCLE_KEY = "signal:lifecycle";
 
 /** @typedef {"cli" | "phone"} SignalRole */
 
@@ -27,6 +28,21 @@ const TURN_PROVIDER_RESPONSE_MAX_BYTES = 64 * 1024;
  *   | { kind: "missing" }
  *   | { kind: "configured", keyId: string, apiToken: string }
  * } TurnConfiguration
+ */
+
+/**
+ * @typedef {
+ *   | { kind: "missing" }
+ *   | { kind: "invalid" }
+ *   | { kind: "active", generation: string, expiresAt: number }
+ * } SignalLifecycle
+ */
+
+/**
+ * @typedef {
+ *   | { kind: "stored", serialized: string }
+ *   | { kind: "expired" }
+ * } TurnCredentialMint
  */
 
 /**
@@ -56,6 +72,38 @@ function parseSignalRole(value) {
     default:
       return null;
   }
+}
+
+/**
+ * Parse lifecycle data read from Durable Object storage. Missing and corrupt
+ * state are distinct so callers can create only at WebSocket admission while
+ * all credential paths fail closed.
+ * @param {unknown} value
+ * @returns {SignalLifecycle}
+ */
+function parseSignalLifecycle(value) {
+  if (value === undefined) {
+    return { kind: "missing" };
+  }
+  if (
+    value &&
+    typeof value === "object" &&
+    "kind" in value &&
+    value.kind === "active" &&
+    "generation" in value &&
+    typeof value.generation === "string" &&
+    value.generation.length > 0 &&
+    "expiresAt" in value &&
+    Number.isSafeInteger(value.expiresAt) &&
+    value.expiresAt > 0
+  ) {
+    return {
+      kind: "active",
+      generation: value.generation,
+      expiresAt: value.expiresAt,
+    };
+  }
+  return { kind: "invalid" };
 }
 
 /**
@@ -309,7 +357,7 @@ export class SignalSession {
   constructor(state, env) {
     this.state = state;
     this.env = env;
-    /** @type {Map<SignalRole, Promise<string>>} */
+    /** @type {Map<string, Promise<TurnCredentialMint>>} */
     this.turnCredentialRequests = new Map();
   }
 
@@ -350,7 +398,15 @@ export class SignalSession {
       return v2Error(request, 400, "role must be cli or phone");
     }
 
-    if (this.state.getWebSockets(role).length !== 0) {
+    const lifecycle = await this.beginOrJoinSignalSession();
+    switch (lifecycle.kind) {
+      case "expired":
+        return v2Error(request, 410, "Signal session expired");
+      case "active":
+        break;
+    }
+
+    if (this.socketsForRole(role, lifecycle.generation).length !== 0) {
       return v2Error(request, 409, `${role} is already connected`);
     }
 
@@ -359,19 +415,39 @@ export class SignalSession {
     server.serializeAttachment({
       kind: "peer",
       role,
+      generation: lifecycle.generation,
       forwardedMessages: 0,
     });
     this.state.acceptWebSocket(server, [role]);
-    await this.ensureAlarm();
-    this.notifyPeerReady();
+    this.notifyPeerReady(lifecycle.generation);
 
     return new Response(null, { status: 101, webSocket: client });
   }
 
-  /** @returns {ConnectedPeers} */
-  connectedPeers() {
-    const cli = this.state.getWebSockets("cli");
-    const phone = this.state.getWebSockets("phone");
+  /**
+   * @param {SignalRole} role
+   * @param {string} generation
+   * @returns {WebSocket[]}
+   */
+  socketsForRole(role, generation) {
+    return this.state.getWebSockets(role).filter((socket) => {
+      const attachment = socket.deserializeAttachment();
+      return (
+        attachment &&
+        attachment.kind === "peer" &&
+        attachment.role === role &&
+        attachment.generation === generation
+      );
+    });
+  }
+
+  /**
+   * @param {string} generation
+   * @returns {ConnectedPeers}
+   */
+  connectedPeers(generation) {
+    const cli = this.socketsForRole("cli", generation);
+    const phone = this.socketsForRole("phone", generation);
 
     if (cli.length === 1 && phone.length === 1) {
       return { kind: "ready", cli: cli[0], phone: phone[0] };
@@ -385,8 +461,9 @@ export class SignalSession {
     return { kind: "empty" };
   }
 
-  notifyPeerReady() {
-    const peers = this.connectedPeers();
+  /** @param {string} generation */
+  notifyPeerReady(generation) {
+    const peers = this.connectedPeers(generation);
     switch (peers.kind) {
       case "ready": {
         const message = JSON.stringify({ type: "peer-ready" });
@@ -401,10 +478,72 @@ export class SignalSession {
     }
   }
 
-  async ensureAlarm() {
+  /**
+   * Create a generation only while admitting a WebSocket. TURN requests never
+   * create sessions, so an alarmed room cannot be revived by a stale request.
+   * @returns {Promise<
+   *   | { kind: "active", generation: string, expiresAt: number }
+   *   | { kind: "expired" }
+   * >}
+   */
+  async beginOrJoinSignalSession() {
+    const lifecycle = parseSignalLifecycle(
+      await this.state.storage.get(SIGNAL_LIFECYCLE_KEY),
+    );
+    switch (lifecycle.kind) {
+      case "active":
+        if (lifecycle.expiresAt <= Date.now()) {
+          await this.expireSignalSession();
+          return { kind: "expired" };
+        }
+        await this.ensureLifecycleAlarm(lifecycle.expiresAt);
+        return lifecycle;
+      case "invalid":
+        await this.expireSignalSession();
+        return { kind: "expired" };
+      case "missing": {
+        const active = {
+          kind: "active",
+          generation: crypto.randomUUID(),
+          expiresAt: Date.now() + SIGNAL_SESSION_TTL_MS,
+        };
+        await this.state.storage.put(SIGNAL_LIFECYCLE_KEY, active);
+        await this.ensureLifecycleAlarm(active.expiresAt);
+        return active;
+      }
+    }
+  }
+
+  /**
+   * @returns {Promise<
+   *   | { kind: "active", generation: string, expiresAt: number }
+   *   | { kind: "expired" }
+   * >}
+   */
+  async requireActiveSignalSession() {
+    const lifecycle = parseSignalLifecycle(
+      await this.state.storage.get(SIGNAL_LIFECYCLE_KEY),
+    );
+    switch (lifecycle.kind) {
+      case "active":
+        if (lifecycle.expiresAt <= Date.now()) {
+          await this.expireSignalSession();
+          return { kind: "expired" };
+        }
+        return lifecycle;
+      case "missing":
+        return { kind: "expired" };
+      case "invalid":
+        await this.expireSignalSession();
+        return { kind: "expired" };
+    }
+  }
+
+  /** @param {number} expiresAt */
+  async ensureLifecycleAlarm(expiresAt) {
     const alarm = await this.state.storage.getAlarm();
-    if (alarm === null) {
-      await this.state.storage.setAlarm(Date.now() + SIGNAL_SESSION_TTL_MS);
+    if (alarm !== expiresAt) {
+      await this.state.storage.setAlarm(expiresAt);
     }
   }
 
@@ -414,7 +553,15 @@ export class SignalSession {
    * @returns {Promise<Response>}
    */
   async fetchTurnCredential(request, role) {
-    const peers = this.connectedPeers();
+    const lifecycle = await this.requireActiveSignalSession();
+    switch (lifecycle.kind) {
+      case "expired":
+        return v2Error(request, 410, "Signal session expired");
+      case "active":
+        break;
+    }
+
+    const peers = this.connectedPeers(lifecycle.generation);
     switch (peers.kind) {
       case "empty":
       case "waiting-for-cli":
@@ -432,36 +579,47 @@ export class SignalSession {
         break;
     }
 
-    const storageKey = `turn:${role}`;
+    const storageKey = `turn:${lifecycle.generation}:${role}`;
     const cached = await this.state.storage.get(storageKey);
     if (typeof cached === "string") {
       return this.turnCredentialResponse(request, cached);
     }
 
-    let pending = this.turnCredentialRequests.get(role);
+    const requestKey = `${lifecycle.generation}:${role}`;
+    let pending = this.turnCredentialRequests.get(requestKey);
     if (!pending) {
-      pending = this.mintAndStoreTurnCredential(storageKey, config);
-      this.turnCredentialRequests.set(role, pending);
+      pending = this.mintAndStoreTurnCredential(
+        storageKey,
+        lifecycle.generation,
+        config,
+      );
+      this.turnCredentialRequests.set(requestKey, pending);
     }
 
     try {
-      const serialized = await pending;
-      return this.turnCredentialResponse(request, serialized);
+      const result = await pending;
+      switch (result.kind) {
+        case "stored":
+          return this.turnCredentialResponse(request, result.serialized);
+        case "expired":
+          return v2Error(request, 410, "Signal session expired");
+      }
     } catch {
       return v2Error(request, 502, "TURN credential provider failed");
     } finally {
-      if (this.turnCredentialRequests.get(role) === pending) {
-        this.turnCredentialRequests.delete(role);
+      if (this.turnCredentialRequests.get(requestKey) === pending) {
+        this.turnCredentialRequests.delete(requestKey);
       }
     }
   }
 
   /**
    * @param {string} storageKey
+   * @param {string} generation
    * @param {{ kind: "configured", keyId: string, apiToken: string }} config
-   * @returns {Promise<string>}
+   * @returns {Promise<TurnCredentialMint>}
    */
-  async mintAndStoreTurnCredential(storageKey, config) {
+  async mintAndStoreTurnCredential(storageKey, generation, config) {
     const endpoint =
       `https://rtc.live.cloudflare.com/v1/turn/keys/${encodeURIComponent(config.keyId)}` +
       "/credentials/generate-ice-servers";
@@ -494,8 +652,31 @@ export class SignalSession {
     }
 
     const serialized = JSON.stringify(parsed);
-    await this.state.storage.put(storageKey, serialized);
-    return serialized;
+    if (this.connectedPeers(generation).kind !== "ready") {
+      return { kind: "expired" };
+    }
+
+    /** @type {TurnCredentialMint} */
+    const result = await this.state.storage.transaction(async (transaction) => {
+      const lifecycle = parseSignalLifecycle(
+        await transaction.get(SIGNAL_LIFECYCLE_KEY),
+      );
+      switch (lifecycle.kind) {
+        case "missing":
+        case "invalid":
+          return { kind: "expired" };
+        case "active":
+          if (
+            lifecycle.generation !== generation ||
+            lifecycle.expiresAt <= Date.now()
+          ) {
+            return { kind: "expired" };
+          }
+          await transaction.put(storageKey, serialized);
+          return { kind: "stored", serialized };
+      }
+    });
+    return result;
   }
 
   /**
@@ -533,6 +714,8 @@ export class SignalSession {
       !attachment ||
       attachment.kind !== "peer" ||
       parseSignalRole(attachment.role) === null ||
+      typeof attachment.generation !== "string" ||
+      attachment.generation.length === 0 ||
       !Number.isSafeInteger(attachment.forwardedMessages) ||
       attachment.forwardedMessages < 0
     ) {
@@ -544,11 +727,24 @@ export class SignalSession {
       return;
     }
 
+    const lifecycle = await this.requireActiveSignalSession();
+    switch (lifecycle.kind) {
+      case "expired":
+        try { ws.close(1008, "signal session expired"); } catch {}
+        return;
+      case "active":
+        if (lifecycle.generation !== attachment.generation) {
+          try { ws.close(1008, "stale signal session"); } catch {}
+          return;
+        }
+        break;
+    }
+
     /** @type {SignalRole} */
     const role = attachment.role;
     /** @type {SignalRole} */
     const destinationRole = role === "cli" ? "phone" : "cli";
-    const destinations = this.state.getWebSockets(destinationRole);
+    const destinations = this.socketsForRole(destinationRole, lifecycle.generation);
     if (destinations.length !== 1) {
       try { ws.send(JSON.stringify({ type: "peer-not-ready" })); } catch {}
       return;
@@ -557,6 +753,7 @@ export class SignalSession {
     ws.serializeAttachment({
       kind: "peer",
       role,
+      generation: lifecycle.generation,
       forwardedMessages: attachment.forwardedMessages + 1,
     });
     try {
@@ -567,10 +764,33 @@ export class SignalSession {
   }
 
   async alarm() {
+    const lifecycle = parseSignalLifecycle(
+      await this.state.storage.get(SIGNAL_LIFECYCLE_KEY),
+    );
+    switch (lifecycle.kind) {
+      case "active":
+        if (lifecycle.expiresAt > Date.now()) {
+          // Alarm delivery is at-least-once. A retry for an erased generation
+          // must not delete a newer session using the same Durable Object ID.
+          await this.ensureLifecycleAlarm(lifecycle.expiresAt);
+          return;
+        }
+        await this.expireSignalSession();
+        return;
+      case "missing":
+      case "invalid":
+        await this.expireSignalSession();
+        return;
+    }
+  }
+
+  async expireSignalSession() {
     for (const ws of this.state.getWebSockets()) {
       try { ws.close(1001, "session expired"); } catch {}
     }
     await this.state.storage.deleteAll();
+    // This Worker's compatibility date predates deleteAll() clearing alarms.
+    await this.state.storage.deleteAlarm();
   }
 
   /** @param {WebSocket} ws */
@@ -592,8 +812,11 @@ export class SignalSession {
     if (role === null) {
       return;
     }
+    if (typeof attachment.generation !== "string" || attachment.generation.length === 0) {
+      return;
+    }
     const destinationRole = role === "cli" ? "phone" : "cli";
-    for (const peer of this.state.getWebSockets(destinationRole)) {
+    for (const peer of this.socketsForRole(destinationRole, attachment.generation)) {
       try { peer.send(JSON.stringify({ type: "peer-left" })); } catch {}
     }
   }

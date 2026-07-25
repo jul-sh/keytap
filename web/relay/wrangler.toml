@@ -22,9 +22,10 @@ new_sqlite_classes = ["RelaySession"]
 tag = "v2"
 new_sqlite_classes = ["SignalSession"]
 
-# Public v2 rendezvous requests are limited per source IP before they reach a
-# Durable Object or mint a TURN credential. Namespace IDs are arbitrary but
-# must be unique within this Worker.
+# Public v2 rendezvous requests receive a best-effort per-source-IP limit before
+# they reach a Durable Object or mint a TURN credential. This per-location
+# limiter is an abuse-speed bump, not authorization or exact quota accounting.
+# Namespace IDs are arbitrary but must be unique within this Worker.
 [[ratelimits]]
 name = "SIGNAL_RATE_LIMIT"
 namespace_id = "1001"
