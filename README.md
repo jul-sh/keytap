@@ -196,6 +196,13 @@ When keytap authenticates via your phone, additional trust considerations apply:
   compromised page can steal the named key and identity seed, then impersonate
   that passkey in nearby flows until `keytap init --force`. The URL fragment is
   absent from the initial HTTP request and Referer, but loaded JavaScript sees it.
+- **You trust that the QR code came from the intended CLI and was not replaced.**
+  Its public key is the phone's root of trust for the receiving endpoint. A
+  substituted QR authenticates an attacker's WebRTC offer, and the phone sends
+  the WebAuthn result to that attacker immediately after approval. The terminal
+  word comparison lets the intended CLI reject a substituted peer, but it
+  cannot undo that disclosure. Scan the QR directly from the terminal running
+  the command; do not use a copied or relayed image from an untrusted source.
 - **The QR value is public, not a shared secret.** Keep the code in view only
   long enough to connect. Someone who reads it can derive the rendezvous ID,
   race a fake phone, learn request metadata, or deny service, but cannot forge
