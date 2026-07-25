@@ -112,7 +112,18 @@ The flow is:
 3. the CLI and phone authenticate their WebRTC offer and answer with that capability
 4. WebRTC connects them directly when possible, with Cloudflare Realtime TURN as a fallback
 5. you approve with a passkey on the phone
-6. the WebAuthn result (including the PRF output when deriving) returns over the end-to-end encrypted WebRTC data channel
+6. that one approval returns two independent PRF outputs: the requested named key and a stable nearby-identity seed
+7. the page signs the fresh QR session and exact result with the Ed25519 identity derived from that seed
+8. the WebAuthn result and identity proof return over the end-to-end encrypted WebRTC data channel
+
+On a new machine, the first successful nearby derivation pins that public
+identity and credential ID (trust on first use). When `keytap init` was run on
+the same machine, its already-trusted credential ID anchors the first identity
+proof instead. Every later nearby derivation must use the pinned credential and
+verify a fresh signature before the CLI accepts or prints the key. This adds no
+second passkey prompt and nothing to the QR code. `keytap init --force`
+replaces the pin with the newly registered credential because it deliberately
+replaces the root passkey.
 
 The capability is 43 base64url characters, so the complete production URL is
 only 74 characters (`https://keytap.jul.sh/nearby#q=...`). The rendezvous ID is
@@ -161,7 +172,7 @@ keytap ties all derived keys to a single passkey registered under the `keytap.ju
 
 With that said, here is how keytap works within those constraints:
 
-- By default keytap does not sync or cache derived keys. It derives on demand, writes to stdout, and exits. There are no local config files, and no state is stored implicitly.
+- By default keytap does not sync or cache derived keys. It derives on demand, writes to stdout, and exits. The nearby-phone flow stores one public TOFU identity in `~/.local/state/keytap/nearby-identity.json`; it never stores a PRF output or derived key there.
 - The one explicit exception is remembering — `keytap remember NAME`, or the opt-in remember action on the nearby-phone page: it stores that derived key on this machine, with no TTL, until `keytap forget`, `keytap forget --all`, or passkey replacement. The key lands in a plain file (not encrypted at rest), silently upgraded to the OS keychain when the machine has one (then encrypted at rest by it). Either way, any process running as your user may be able to invoke keytap and use the key without a ceremony.
 - Remembered keys are tied to a fingerprint of the registered passkey credential. `keytap init` is a root boundary: it wipes all remembered entries, and lookups are scoped to the current root, so keys remembered under a replaced passkey are never used.
 - If you save the output, pipe it into another tool, or import it into an agent, that destination now holds the key and must be trusted accordingly.
@@ -173,13 +184,27 @@ With that said, here is how keytap works within those constraints:
 When keytap authenticates via your phone, additional trust considerations apply:
 
 - **You trust the web page served to your phone.** The code served by
-  `keytap.jul.sh` sees both the QR capability and the WebAuthn PRF output. A
-  compromised page can therefore steal the derived key. The URL fragment is
+  `keytap.jul.sh` sees the QR capability and both WebAuthn PRF outputs. A
+  compromised page can therefore steal the derived key and the stable nearby
+  identity seed, which would let it impersonate that passkey in later nearby
+  flows until you replace it with `keytap init --force`. The URL fragment is
   not sent in the initial HTTP request or in a Referer header, but the loaded
   JavaScript necessarily receives it.
 - **Anyone who can read the QR code has its one-time capability.** Keep it in
   view only long enough to connect. A fresh capability is generated for every
-  command and the rendezvous expires shortly afterward.
+  command and the rendezvous expires shortly afterward. TOFU cannot secure the
+  very first use: someone who learns that first QR capability can race the real
+  phone, pin their own passkey, and return the wrong derived key without an
+  independent warning. After a legitimate identity is pinned, the same attack
+  is rejected because the attacker cannot produce its signature. The Worker
+  alone cannot mount the race because it receives only a hash-derived
+  rendezvous ID, not the QR capability.
+- **The nearby identity pin is local public state, not a secret.** It is written
+  atomically with owner-only permissions to
+  `~/.local/state/keytap/nearby-identity.json` (and honors `$XDG_STATE_HOME`).
+  Local software able to replace that file can reset the trust decision.
+  `keytap init --force` is the current intentional reset path; there is no
+  separate trust-management command yet.
 - **The signaling Worker is not trusted with peer identity or key material.**
   It sees a derived rendezvous ID, SDP/ICE metadata, IP addresses, and timing.
   It can block, delay, replay, or replace messages, but replacement is rejected
@@ -191,6 +216,14 @@ When keytap authenticates via your phone, additional trust considerations apply:
   You still trust Cloudflare to operate the service, enforce credential expiry,
   and report usage for billing; payload confidentiality does not depend on the
   TURN operator being honest.
+
+The identity proof covers a hash of the fresh QR capability and both complete
+SDPs (including DTLS fingerprints and ICE candidates), plus the WebAuthn
+challenge, credential ID, named PRF result, key name, and identity public key.
+That makes it unusable in another QR or WebRTC session or for altered key
+material. The fixed identity seed comes from WebAuthn PRF's `second` output
+while the named key uses `first`, so both are obtained by the same
+`navigator.credentials.get()` approval and are domain-separated.
 
 ## Skipping repeated prompts
 

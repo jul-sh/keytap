@@ -3,6 +3,13 @@ const encoder = new TextEncoder();
 const RID_DOMAIN = encoder.encode('keytap:rendezvous:v2\0');
 const MAC_DOMAIN = encoder.encode('keytap:signal:v2\0');
 const KEY_INFO_PREFIX = 'keytap:signal-key:v2:';
+const IDENTITY_BINDING_DOMAIN = encoder.encode('keytap:nearby-identity-binding:v1\0');
+const IDENTITY_SESSION_DOMAIN = encoder.encode('keytap:nearby-identity-session:v1\0');
+const IDENTITY_PROOF_DOMAIN = encoder.encode('keytap:nearby-identity-proof:v1\0');
+const ED25519_PKCS8_SEED_PREFIX = Uint8Array.from([
+  0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06,
+  0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04, 0x20,
+]);
 
 export class ProtocolError extends Error {
   constructor(message) {
@@ -54,6 +61,116 @@ function u64(value) {
   return bytes;
 }
 
+function u32(value) {
+  if (!Number.isSafeInteger(value) || value < 0 || value > 0xffff_ffff) {
+    throw new ProtocolError('identity proof field is too large');
+  }
+  const bytes = new Uint8Array(4);
+  new DataView(bytes.buffer).setUint32(0, value, false);
+  return bytes;
+}
+
+function lengthPrefixed(value) {
+  return concatBytes(u32(value.length), value);
+}
+
+export async function createNearbySessionBinding(
+  capabilityBinding,
+  offer,
+  answer,
+  webCrypto = globalThis.crypto,
+) {
+  if (!(capabilityBinding instanceof Uint8Array) || capabilityBinding.length !== 32
+      || !(offer instanceof Uint8Array) || !(answer instanceof Uint8Array)) {
+    throw new ProtocolError('invalid nearby identity session');
+  }
+  if (!webCrypto?.subtle) throw new ProtocolError('WebCrypto is unavailable');
+  return new Uint8Array(await webCrypto.subtle.digest('SHA-256', concatBytes(
+    IDENTITY_SESSION_DOMAIN,
+    capabilityBinding,
+    u64(offer.length),
+    offer,
+    u64(answer.length),
+    answer,
+  )));
+}
+
+/**
+ * Canonical bytes signed by the passkey-derived nearby identity. The proof is
+ * bound to the fresh QR session and to the exact credential, named PRF result,
+ * key name, and submitted public identity.
+ */
+export function nearbyIdentityProofMessage({
+  sessionBinding,
+  challenge,
+  credentialId,
+  prfFirst,
+  keyName,
+  publicKey,
+}) {
+  const byteFields = [sessionBinding, challenge, credentialId, prfFirst, publicKey];
+  if (byteFields.some(value => !(value instanceof Uint8Array))) {
+    throw new ProtocolError('invalid identity proof field');
+  }
+  if (sessionBinding.length !== 32
+      || challenge.length < 16 || challenge.length > 128
+      || credentialId.length < 1 || credentialId.length > 1024
+      || prfFirst.length !== 32
+      || publicKey.length !== 32
+      || typeof keyName !== 'string') {
+    throw new ProtocolError('invalid identity proof field');
+  }
+  const name = encoder.encode(keyName);
+  if (name.length < 1 || name.length > 128) throw new ProtocolError('invalid identity proof key name');
+  return concatBytes(
+    IDENTITY_PROOF_DOMAIN,
+    lengthPrefixed(sessionBinding),
+    lengthPrefixed(challenge),
+    lengthPrefixed(credentialId),
+    lengthPrefixed(prfFirst),
+    lengthPrefixed(name),
+    lengthPrefixed(publicKey),
+  );
+}
+
+/** Derive and use the stable Ed25519 identity from WebAuthn PRF's second output. */
+export async function createNearbyIdentityProof(fields, prfSecond, webCrypto = globalThis.crypto) {
+  if (!(prfSecond instanceof Uint8Array) || prfSecond.length !== 32) {
+    throw new ProtocolError('invalid identity PRF output');
+  }
+  if (!webCrypto?.subtle) throw new ProtocolError('WebCrypto is unavailable');
+
+  const seed = prfSecond.slice();
+  const pkcs8 = concatBytes(ED25519_PKCS8_SEED_PREFIX, seed);
+  try {
+    const privateKey = await webCrypto.subtle.importKey(
+      'pkcs8',
+      pkcs8,
+      { name: 'Ed25519' },
+      true,
+      ['sign'],
+    );
+    const jwk = await webCrypto.subtle.exportKey('jwk', privateKey);
+    if (jwk.kty !== 'OKP' || jwk.crv !== 'Ed25519' || typeof jwk.x !== 'string') {
+      throw new ProtocolError('browser returned an invalid Ed25519 identity');
+    }
+    const publicKey = decodeBase64URL(jwk.x);
+    if (publicKey.length !== 32) throw new ProtocolError('browser returned an invalid Ed25519 identity');
+    const message = nearbyIdentityProofMessage({ ...fields, publicKey });
+    const signature = new Uint8Array(
+      await webCrypto.subtle.sign('Ed25519', privateKey, message),
+    );
+    if (signature.length !== 64) throw new ProtocolError('browser returned an invalid identity signature');
+    return { publicKey, signature };
+  } catch (error) {
+    if (error instanceof ProtocolError) throw error;
+    throw new ProtocolError('this browser cannot create the nearby Ed25519 identity proof');
+  } finally {
+    pkcs8.fill(0);
+    seed.fill(0);
+  }
+}
+
 function roleBytes(role) {
   if (role !== 'cli' && role !== 'phone') throw new ProtocolError('invalid signaling role');
   return encoder.encode(role);
@@ -95,6 +212,9 @@ export async function createSignalAuthenticator(capabilityBytes, webCrypto = glo
   const rendezvous = new Uint8Array(
     await webCrypto.subtle.digest('SHA-256', concatBytes(RID_DOMAIN, secret)),
   );
+  const identityBinding = new Uint8Array(
+    await webCrypto.subtle.digest('SHA-256', concatBytes(IDENTITY_BINDING_DOMAIN, secret)),
+  );
   const keyMaterial = await webCrypto.subtle.importKey('raw', secret, 'HKDF', false, ['deriveKey']);
 
   async function deriveKey(role) {
@@ -119,6 +239,7 @@ export async function createSignalAuthenticator(capabilityBytes, webCrypto = glo
   const keys = { cli: cliKey, phone: phoneKey };
   return Object.freeze({
     rendezvousId: encodeBase64URL(rendezvous),
+    capabilityBinding: identityBinding,
 
     /** @returns {Promise<{v: 2, from: 'cli'|'phone', seq: number, kind: 'offer'|'answer', body: string, mac: string}>} */
     async sign(role, seq, kind, bodyValue) {

@@ -59,6 +59,18 @@ fn test_prf_salt_different_names() {
 }
 
 #[test]
+fn nearby_identity_prf_salt_is_stable_and_separate_from_named_keys() {
+    assert_eq!(
+        hex::encode(nearby_identity_prf_salt()),
+        "0e77b3886c1dfd2ce68782dc0fa4b6872e75a18dfe28799aab9414b5fd8e249e"
+    );
+    assert_ne!(
+        nearby_identity_prf_salt().as_slice(),
+        prf_salt_for_name("nearby-identity-prf:v1").unwrap()
+    );
+}
+
+#[test]
 fn test_derive_raw_key_wrong_length() {
     assert!(matches!(
         derive_raw_key(&[0u8; 16]),

@@ -2,6 +2,7 @@ mod encrypt;
 mod env_keys;
 mod keychain;
 mod nearby;
+mod nearby_identity;
 mod nearby_protocol;
 mod remember;
 
@@ -25,7 +26,9 @@ fn main() {
     match cli.command {
         Command::Init { force } => {
             guard_ceremony("init", cli.prompt);
-            if !force && remember::previously_initialized() {
+            if !force
+                && (remember::previously_initialized() || nearby_identity::previously_pinned())
+            {
                 die(
                     "a keytap passkey is already set up on this machine. Running init again \
                      creates a new one: keys derived from the current passkey can no longer be \
@@ -35,6 +38,7 @@ fn main() {
             }
             let credential_id = register();
             remember::after_init(&credential_id);
+            nearby_identity::after_init(&credential_id);
         }
         Command::Public { ref name, format } => {
             with_derived_key(name, cli.prompt, |raw_key| emit_public_key(raw_key, format, name));

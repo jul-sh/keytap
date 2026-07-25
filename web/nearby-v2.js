@@ -1,6 +1,8 @@
 import {
   CLOUDFLARE_STUN_ONLY,
   ProtocolError,
+  createNearbyIdentityProof,
+  createNearbySessionBinding,
   createSignalAuthenticator,
   decodeBase64URL,
   encodeBase64URL,
@@ -67,7 +69,7 @@ function alertUser(...parts) {
  *   {kind: 'finished'} |
  *   {kind: 'failed'}
  * } Phase
- * @typedef {{session: DataSession, request: NearbyRequest}} ReadyData
+ * @typedef {{session: DataSession, request: NearbyRequest, sessionBinding: Uint8Array}} ReadyData
  * @typedef {{session: DataSession, request: AssertRequest, firstResult: FirstResult}} AssertionData
  * @typedef {AssertionData & {expiryAt: number}} OfferData
  * @typedef {{credentialId: Uint8Array, credentialIdB64: string, prfFirstB64: string}} FirstResult
@@ -75,7 +77,8 @@ function alertUser(...parts) {
  *   {kind: 'register', challenge: Uint8Array, prfSalt: Uint8Array, userId: Uint8Array, userName: string} |
  *   AssertRequest
  * } NearbyRequest
- * @typedef {{kind: 'assert', challenge: Uint8Array, prfSalt: Uint8Array, keyName: string, remember: RememberMode}} AssertRequest
+ * @typedef {{kind: 'assert', challenge: Uint8Array, prfSalt: Uint8Array, identitySalt: Uint8Array, identity: IdentityMode, keyName: string, remember: RememberMode}} AssertRequest
+ * @typedef {{kind: 'tofu'} | {kind: 'pinned', credentialId: Uint8Array}} IdentityMode
  * @typedef {{kind: 'disabled'} | {kind: 'available', windowSecs: number}} RememberMode
  * @typedef {{send: (message: object) => void, next: (timeoutMs?: number) => Promise<object>, close: () => void, isOpen: () => boolean}} DataSession
  */
@@ -468,7 +471,12 @@ async function establishPrivateChannel(authenticator) {
       signal.send(envelope);
       const channel = await channelPromise;
       if (channel.kind === 'failed') throw channel.error;
-      return channel.session;
+      const sessionBinding = await createNearbySessionBinding(
+        authenticator.capabilityBinding,
+        offerBytes,
+        encoder.encode(answerSdp),
+      );
+      return { session: channel.session, sessionBinding };
     } catch (error) {
       peer.close();
       throw error;
@@ -526,10 +534,24 @@ function parseRequest(message) {
   } else {
     throw new ProtocolError('invalid remember mode');
   }
+  const identity = expectObject(request.identity, 'identity mode');
+  let identityMode;
+  if (identity.kind === 'tofu') {
+    identityMode = { kind: 'tofu' };
+  } else if (identity.kind === 'pinned') {
+    identityMode = {
+      kind: 'pinned',
+      credentialId: expectBytes(identity.credentialId, 'pinned credential ID', 1, 1024),
+    };
+  } else {
+    throw new ProtocolError('invalid identity mode');
+  }
   return {
     kind: 'assert',
     challenge,
     prfSalt: expectBytes(request.prfSalt, 'PRF salt', 32, 32),
+    identitySalt: expectBytes(request.identitySalt, 'identity PRF salt', 32, 32),
+    identity: identityMode,
     keyName: expectString(request.keyName, 'key name'),
     remember: rememberMode,
   };
@@ -542,6 +564,11 @@ async function nextCliMessage(session, expectedType) {
     const codes = new Set(['invalid-message', 'unexpected-message', 'remember-mismatch']);
     if (!codes.has(message.code)) throw new ProtocolError('invalid CLI protocol error');
     throw new ProtocolError(`the CLI rejected the request (${message.code})`);
+  }
+  if (message.type === 'initial-rejected') {
+    const reasons = new Set(['identity-mismatch', 'invalid-identity-proof', 'identity-store-unavailable']);
+    if (!reasons.has(message.reason)) throw new ProtocolError('invalid CLI identity rejection');
+    throw new ProtocolError(`the CLI rejected the passkey identity (${message.reason})`);
   }
   if (message.type !== expectedType) throw new ProtocolError(`expected ${expectedType}`);
   return message;
@@ -583,17 +610,62 @@ function runRegister(request) {
   });
 }
 
-async function runAssertion(request, allowCredentialId) {
+async function runInitialAssertion(request, sessionBinding) {
+  const publicKey = {
+    challenge: request.challenge,
+    rpId: 'keytap.jul.sh',
+    userVerification: 'required',
+    timeout: 120_000,
+    extensions: {
+      prf: { eval: { first: request.prfSalt, second: request.identitySalt } },
+    },
+  };
+  if (request.identity.kind === 'pinned') {
+    publicKey.allowCredentials = [{ type: 'public-key', id: request.identity.credentialId }];
+  }
+  const credential = await navigator.credentials.get({ publicKey });
+  const prfResults = credential?.getClientExtensionResults()?.prf?.results;
+  const prfFirst = prfResults?.first;
+  const prfSecond = prfResults?.second;
+  if (!credential?.rawId || !prfFirst || !prfSecond) {
+    throw new Error('Both key and identity PRF outputs are required.');
+  }
+  const credentialId = new Uint8Array(credential.rawId);
+  const prfFirstBytes = new Uint8Array(prfFirst);
+  const prfSecondBytes = new Uint8Array(prfSecond);
+  let identity;
+  try {
+    identity = await createNearbyIdentityProof({
+      sessionBinding,
+      challenge: request.challenge,
+      credentialId,
+      prfFirst: prfFirstBytes,
+      keyName: request.keyName,
+    }, prfSecondBytes);
+  } finally {
+    prfSecondBytes.fill(0);
+  }
+  return {
+    credentialId,
+    credentialIdB64: encodeBase64URL(credential.rawId),
+    prfFirstB64: encodeBase64URL(prfFirst),
+    identity: {
+      algorithm: 'ed25519',
+      publicKey: encodeBase64URL(identity.publicKey),
+      signature: encodeBase64URL(identity.signature),
+    },
+  };
+}
+
+async function runRememberAssertion(request, allowCredentialId) {
   const publicKey = {
     challenge: request.challenge,
     rpId: 'keytap.jul.sh',
     userVerification: 'required',
     timeout: 120_000,
     extensions: { prf: { eval: { first: request.prfSalt } } },
+    allowCredentials: [{ type: 'public-key', id: allowCredentialId }],
   };
-  if (allowCredentialId) {
-    publicKey.allowCredentials = [{ type: 'public-key', id: allowCredentialId }];
-  }
   const credential = await navigator.credentials.get({ publicKey });
   const prfFirst = credential?.getClientExtensionResults()?.prf?.results?.first;
   if (!credential?.rawId || !prfFirst) throw new Error('PRF output was not returned.');
@@ -608,7 +680,7 @@ function isCancel(error) {
   return error && (error.name === 'NotAllowedError' || error.name === 'AbortError');
 }
 
-function configureForRequest(session, request) {
+function configureForRequest(session, request, sessionBinding) {
   $('offer').hidden = true;
   const button = $('start');
   button.disabled = false;
@@ -625,13 +697,13 @@ function configureForRequest(session, request) {
     button.textContent = 'Approve request';
   }
   say('Ready.');
-  phase = { kind: 'ready', data: { session, request } };
+  phase = { kind: 'ready', data: { session, request, sessionBinding } };
   if (request.kind === 'assert') runFirst();
 }
 
 function renderSecurityModel() {
   const paragraph = $('details').querySelector('p');
-  paragraph.textContent = 'The QR code carries a one-time capability that authenticates the complete WebRTC offer and answer, including their DTLS fingerprints. Cloudflare signaling and TURN can route or block the connection, but cannot silently substitute a peer or read the encrypted DataChannel. This webpage remains trusted because its code receives the QR capability. Remembering a key requires a second approval.';
+  paragraph.textContent = 'The QR code authenticates the complete WebRTC setup. On first use, the CLI remembers a public identity derived from this passkey; later results must carry a fresh signature from that same identity. Cloudflare signaling and TURN can route or block the connection, but cannot read the encrypted DataChannel. First use still trusts whoever scans the QR first, and this webpage remains trusted. Remembering a key requires a second approval.';
 }
 
 async function runFirst() {
@@ -670,7 +742,7 @@ async function runFirst() {
   say('Waiting for passkey approval…');
   let firstResult;
   try {
-    firstResult = await runAssertion(data.request, null);
+    firstResult = await runInitialAssertion(data.request, data.sessionBinding);
   } catch (error) {
     restoreAfterCeremonyError(data, button, error);
     return;
@@ -681,6 +753,7 @@ async function runFirst() {
       type: 'assertion-result',
       credentialId: firstResult.credentialIdB64,
       prfFirst: firstResult.prfFirstB64,
+      identity: firstResult.identity,
     });
     const assertionData = { session: data.session, request: data.request, firstResult };
     phase = { kind: 'assertion-ack', data: assertionData };
@@ -812,7 +885,7 @@ async function onRemember() {
     phase = { kind: 'remember-ceremony', data };
     say('Confirming with your passkey…');
     document.title = 'keytap: approve';
-    const result = await runAssertion(data.request, data.firstResult.credentialId);
+    const result = await runRememberAssertion(data.request, data.firstResult.credentialId);
     data.session.send({
       v: 2,
       type: 'remember-result',
@@ -870,14 +943,17 @@ function onDone() {
   setTimeout(() => session.close(), 750);
 }
 
-function failSession(session, _error) {
+function failSession(session, error) {
   if (phase.kind === 'failed' || phase.kind === 'finished') return;
   session.close();
   phase = { kind: 'failed' };
   $('offer').hidden = true;
   $('start')?.remove();
   document.title = 'keytap: connection failed';
-  alertUser('The private connection failed. Nothing else was sent. Run the command again and scan the fresh code.');
+  const identityFailure = error instanceof ProtocolError && /identity/.test(error.message);
+  alertUser(identityFailure
+    ? 'This passkey did not match the identity already trusted by the CLI, so no key was accepted.'
+    : 'The private connection failed. Nothing else was sent. Run the command again and scan the fresh code.');
   $('alert').focus();
 }
 
@@ -932,10 +1008,11 @@ export async function main() {
   try {
     const capability = takeCapabilityFromFragment();
     const authenticator = await createSignalAuthenticator(capability);
-    session = await establishPrivateChannel(authenticator);
+    const established = await establishPrivateChannel(authenticator);
+    session = established.session;
     say('Private connection established. Waiting for the request…');
     const request = parseRequest(await session.next(SIGNAL_TIMEOUT_MS));
-    configureForRequest(session, request);
+    configureForRequest(session, request, established.sessionBinding);
   } catch (error) {
     if (session) failSession(session, error);
     else failBeforeSession(error);

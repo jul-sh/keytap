@@ -16,6 +16,8 @@ use zeroize::Zeroizing;
 const RID_DOMAIN: &[u8] = b"keytap:rendezvous:v2\0";
 const MAC_DOMAIN: &[u8] = b"keytap:signal:v2\0";
 const KEY_INFO_PREFIX: &[u8] = b"keytap:signal-key:v2:";
+const IDENTITY_BINDING_DOMAIN: &[u8] = b"keytap:nearby-identity-binding:v1\0";
+const IDENTITY_SESSION_DOMAIN: &[u8] = b"keytap:nearby-identity-session:v1\0";
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -46,6 +48,29 @@ impl Capability {
 
     pub fn rendezvous_id(&self) -> String {
         URL_SAFE_NO_PAD.encode(self.rendezvous)
+    }
+
+    /// Bind passkey identity proofs to this exact one-time QR capability.
+    /// The bytes remain local to the two endpoints and are never sent to the
+    /// signaling service.
+    fn identity_capability_binding(&self) -> [u8; 32] {
+        let mut digest = Sha256::new();
+        digest.update(IDENTITY_BINDING_DOMAIN);
+        digest.update(self.secret.as_ref());
+        digest.finalize().into()
+    }
+
+    /// Bind a nearby identity proof to the QR capability and both complete
+    /// authenticated SDPs, including the DTLS fingerprints and ICE candidates.
+    pub fn identity_session_binding(&self, offer: &[u8], answer: &[u8]) -> [u8; 32] {
+        let mut digest = Sha256::new();
+        digest.update(IDENTITY_SESSION_DOMAIN);
+        digest.update(self.identity_capability_binding());
+        digest.update((offer.len() as u64).to_be_bytes());
+        digest.update(offer);
+        digest.update((answer.len() as u64).to_be_bytes());
+        digest.update(answer);
+        digest.finalize().into()
     }
 
     fn key_for(&self, role: SignalRole) -> [u8; 32] {
@@ -181,6 +206,10 @@ mod tests {
         assert_eq!(
             capability.rendezvous_id(),
             "6_2qUdwr2cvl5omCEB61Ys263Y1nu0TIjppVQPePcUA"
+        );
+        assert_eq!(
+            URL_SAFE_NO_PAD.encode(capability.identity_session_binding(b"offer", b"answer")),
+            "OCbUzlIS3pmQOcOtyIfbACBko5QZou4dTY4-dsa34Pc"
         );
         assert_eq!(
             URL_SAFE_NO_PAD.encode(capability.key_for(SignalRole::Cli)),

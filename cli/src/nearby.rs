@@ -5,6 +5,11 @@
 //! non-trickle WebRTC offer and answer (including ICE candidates and DTLS
 //! fingerprints), while WebRTC DTLS protects all application data.
 
+use crate::nearby_identity::{
+    Anchor as IdentityAnchor, Expectation as IdentityExpectation,
+    Proof as NearbyIdentityProof, ProofFields as NearbyIdentityProofFields,
+    Verification as IdentityVerification, VerificationError as IdentityVerificationError,
+};
 use crate::nearby_protocol::{Capability, SignalEnvelope, SignalKind, SignalRole};
 use crate::note;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -123,6 +128,29 @@ pub fn register_nearby() -> Vec<u8> {
 enum Operation<'a> {
     Register,
     Assert { name: &'a str, offer_remember: bool },
+}
+
+/// Everything valid only for one ceremony kind lives in that variant. The
+/// assertion branch owns the TOFU anchor and exact bytes its proof must bind.
+enum FlowPlan {
+    Registration {
+        request: CeremonyRequest,
+    },
+    Assertion {
+        request: CeremonyRequest,
+        key_name: String,
+        challenge: [u8; 32],
+        remember: RememberOffer,
+        identity: IdentityAnchor,
+    },
+}
+
+impl FlowPlan {
+    fn request(&self) -> &CeremonyRequest {
+        match self {
+            Self::Registration { request } | Self::Assertion { request, .. } => request,
+        }
+    }
 }
 
 enum FlowResult {
@@ -317,7 +345,7 @@ fn run_nearby_flow(operation: Operation<'_>) -> Result<FlowResult, String> {
 
     // Validate all local inputs before displaying a QR code or asking the
     // user to touch another device.
-    let (request, remember_offer) = build_request(&operation)?;
+    let plan = build_plan(&operation)?;
 
     let signal_base = signal_base_url();
     let capability = Capability::generate();
@@ -366,6 +394,8 @@ fn run_nearby_flow(operation: Operation<'_>) -> Result<FlowResult, String> {
     send_signal(&mut signaling, &offer)?;
 
     let answer_sdp = wait_for_answer(&mut signaling, &capability, setup_deadline)?;
+    let identity_binding =
+        capability.identity_session_binding(offer_sdp.as_bytes(), answer_sdp.as_bytes());
     let answer = RTCSessionDescription::answer(answer_sdp)
         .map_err(|error| format!("phone sent an invalid WebRTC answer: {error}"))?;
     runtime
@@ -392,12 +422,12 @@ fn run_nearby_flow(operation: Operation<'_>) -> Result<FlowResult, String> {
 
     session.send(&CliMessage::Request {
         version: PROTOCOL_VERSION,
-        request,
+        request: plan.request().clone(),
     })?;
 
     let first = session.receive(CEREMONY_RESPONSE_TIMEOUT)?;
-    let result = match (operation, first) {
-        (Operation::Register, PhoneMessage::RegistrationResult { credential_id, .. }) => {
+    let result = match (plan, first) {
+        (FlowPlan::Registration { .. }, PhoneMessage::RegistrationResult { credential_id, .. }) => {
             let credential_id = decode_credential_id(&credential_id)?;
             session.send(&CliMessage::InitialAccepted {
                 version: PROTOCOL_VERSION,
@@ -406,35 +436,70 @@ fn run_nearby_flow(operation: Operation<'_>) -> Result<FlowResult, String> {
             FlowResult::Registration { credential_id }
         }
         (
-            Operation::Assert { name, .. },
+            FlowPlan::Assertion {
+                key_name,
+                challenge,
+                remember,
+                identity,
+                ..
+            },
             PhoneMessage::AssertionResult {
                 credential_id,
                 prf_first,
+                identity: proof,
                 ..
             },
         ) => {
             let payload = decode_assertion_fields(&credential_id, &prf_first)?;
+            let proof = decode_identity_proof(&payload.credential_id, proof)?;
+            let proof_fields = NearbyIdentityProofFields {
+                session_binding: &identity_binding,
+                challenge: &challenge,
+                credential_id: &payload.credential_id,
+                prf_output: &payload.prf_output,
+                key_name: &key_name,
+                public_key: &proof.public_key,
+            };
+            match identity.verify_and_pin(&proof, &proof_fields) {
+                Ok(IdentityVerification::MatchedPin) => {}
+                Ok(IdentityVerification::TofuPinned { fingerprint }) => note(&format!(
+                    "Trusted this passkey for future nearby requests on this machine (TOFU identity {fingerprint})."
+                )),
+                Ok(IdentityVerification::InitPinCompleted { fingerprint }) => note(&format!(
+                    "Verified the passkey selected by init and pinned its nearby identity ({fingerprint})."
+                )),
+                Err(error) => {
+                    session
+                        .send(&CliMessage::InitialRejected {
+                            version: PROTOCOL_VERSION,
+                            reason: initial_rejection_reason(&error),
+                        })
+                        .ok();
+                    session.close();
+                    return Err(identity_error_message(error));
+                }
+            }
             session.send(&CliMessage::InitialAccepted {
                 version: PROTOCOL_VERSION,
             })?;
 
-            let followup = match remember_offer {
+            let followup = match remember {
                 RememberOffer::Disabled => {
                     session.close();
                     None
                 }
                 RememberOffer::Available { window_secs } => Some(Box::new(RememberWindow {
                     session,
-                    name: name.to_string(),
+                    name: key_name,
                     window_secs,
                     credential_id: payload.credential_id.clone(),
-                    prf_output: Zeroizing::new(payload.prf_output.clone()),
+                    prf_output: Zeroizing::new(payload.prf_output.to_vec()),
                 })),
             };
 
             FlowResult::Assertion {
                 credential_id: payload.credential_id,
-                prf_output: payload.prf_output,
+                prf_output: payload.prf_output.to_vec(),
                 followup,
             }
         }
@@ -997,6 +1062,11 @@ enum CliMessage {
         #[serde(rename = "v")]
         version: u8,
     },
+    InitialRejected {
+        #[serde(rename = "v")]
+        version: u8,
+        reason: InitialRejectedReason,
+    },
     RememberReady {
         #[serde(rename = "v")]
         version: u8,
@@ -1017,7 +1087,7 @@ enum CliMessage {
     },
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 enum CeremonyRequest {
     Register {
@@ -1034,8 +1104,21 @@ enum CeremonyRequest {
         key_name: String,
         #[serde(rename = "prfSalt")]
         prf_salt: String,
+        #[serde(rename = "identitySalt")]
+        identity_salt: String,
         challenge: String,
+        identity: NearbyIdentityRequest,
         remember: RememberOffer,
+    },
+}
+
+#[derive(Clone, Serialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+enum NearbyIdentityRequest {
+    Tofu,
+    Pinned {
+        #[serde(rename = "credentialId")]
+        credential_id: String,
     },
 }
 
@@ -1062,25 +1145,32 @@ enum RememberRejectedReason {
     Mismatch,
 }
 
-fn build_request(operation: &Operation<'_>) -> Result<(CeremonyRequest, RememberOffer), String> {
-    let mut challenge = [0u8; 32];
-    getrandom::getrandom(&mut challenge)
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum InitialRejectedReason {
+    IdentityMismatch,
+    InvalidIdentityProof,
+    IdentityStoreUnavailable,
+}
+
+fn build_plan(operation: &Operation<'_>) -> Result<FlowPlan, String> {
+    let mut challenge_bytes = [0u8; 32];
+    getrandom::getrandom(&mut challenge_bytes)
         .map_err(|error| format!("failed to generate WebAuthn challenge: {error}"))?;
-    let challenge = URL_SAFE_NO_PAD.encode(challenge);
+    let challenge = URL_SAFE_NO_PAD.encode(challenge_bytes);
 
     match operation {
         Operation::Register => {
             let prf_salt = keytap_core::prf_salt_for_name("default")
                 .map_err(|error| format!("failed to derive registration PRF salt: {error}"))?;
-            Ok((
-                CeremonyRequest::Register {
+            Ok(FlowPlan::Registration {
+                request: CeremonyRequest::Register {
                     challenge,
                     prf_salt: URL_SAFE_NO_PAD.encode(prf_salt),
                     user_id: URL_SAFE_NO_PAD.encode(b"keytap-user"),
                     user_name: "keytap".to_string(),
                 },
-                RememberOffer::Disabled,
-            ))
+            })
         }
         Operation::Assert {
             name,
@@ -1088,19 +1178,33 @@ fn build_request(operation: &Operation<'_>) -> Result<(CeremonyRequest, Remember
         } => {
             let prf_salt = keytap_core::prf_salt_for_name(name)
                 .map_err(|error| format!("invalid key name: {error}"))?;
+            let identity_salt = keytap_core::nearby_identity_prf_salt();
+            let identity = IdentityAnchor::load()
+                .map_err(|error| format!("could not load the nearby passkey identity: {error}"))?;
+            let identity_request = match identity.expectation() {
+                IdentityExpectation::FirstUse => NearbyIdentityRequest::Tofu,
+                IdentityExpectation::Pinned { credential_id } => NearbyIdentityRequest::Pinned {
+                    credential_id: URL_SAFE_NO_PAD.encode(credential_id),
+                },
+            };
             let remember = match (*offer_remember, remember_window_secs()) {
                 (true, window_secs) if window_secs > 0 => RememberOffer::Available { window_secs },
                 _ => RememberOffer::Disabled,
             };
-            Ok((
-                CeremonyRequest::Assert {
+            Ok(FlowPlan::Assertion {
+                request: CeremonyRequest::Assert {
                     key_name: (*name).to_string(),
                     prf_salt: URL_SAFE_NO_PAD.encode(prf_salt),
+                    identity_salt: URL_SAFE_NO_PAD.encode(identity_salt),
                     challenge,
+                    identity: identity_request,
                     remember,
                 },
+                key_name: (*name).to_string(),
+                challenge: challenge_bytes,
+                identity,
                 remember,
-            ))
+            })
         }
     }
 }
@@ -1121,6 +1225,7 @@ enum PhoneMessage {
         credential_id: String,
         #[serde(rename = "prfFirst")]
         prf_first: String,
+        identity: IdentityProofDto,
     },
     RememberBegin {
         #[serde(rename = "v")]
@@ -1137,6 +1242,16 @@ enum PhoneMessage {
     Done {
         #[serde(rename = "v")]
         version: u8,
+    },
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "algorithm", rename_all = "lowercase")]
+enum IdentityProofDto {
+    Ed25519 {
+        #[serde(rename = "publicKey")]
+        public_key: String,
+        signature: String,
     },
 }
 
@@ -1158,7 +1273,7 @@ fn decode_phone_message(text: &str) -> Result<PhoneMessage, String> {
 
 struct AssertionPayload {
     credential_id: Vec<u8>,
-    prf_output: Vec<u8>,
+    prf_output: [u8; 32],
 }
 
 fn decode_credential_id(value: &str) -> Result<Vec<u8>, String> {
@@ -1177,19 +1292,59 @@ fn decode_assertion_fields(
     prf_first: &str,
 ) -> Result<AssertionPayload, String> {
     let credential_id = decode_credential_id(credential_id)?;
-    let prf_output = URL_SAFE_NO_PAD
+    let prf_output: [u8; 32] = URL_SAFE_NO_PAD
         .decode(prf_first)
-        .map_err(|error| format!("invalid prfFirst: {error}"))?;
-    if prf_output.len() != 32 {
-        return Err(format!(
-            "passkey provider returned {} bytes of PRF output; expected 32",
-            prf_output.len()
-        ));
-    }
+        .map_err(|error| format!("invalid prfFirst: {error}"))?
+        .try_into()
+        .map_err(|value: Vec<u8>| {
+            format!(
+                "passkey provider returned {} bytes of PRF output; expected 32",
+                value.len()
+            )
+        })?;
     Ok(AssertionPayload {
         credential_id,
         prf_output,
     })
+}
+
+fn decode_identity_proof(
+    credential_id: &[u8],
+    proof: IdentityProofDto,
+) -> Result<NearbyIdentityProof, String> {
+    let IdentityProofDto::Ed25519 { public_key, signature } = proof;
+    Ok(NearbyIdentityProof {
+        credential_id: credential_id.to_vec(),
+        public_key: decode_fixed_base64url::<32>(&public_key, "identity public key")?,
+        signature: decode_fixed_base64url::<64>(&signature, "identity signature")?,
+    })
+}
+
+fn decode_fixed_base64url<const N: usize>(value: &str, label: &str) -> Result<[u8; N], String> {
+    URL_SAFE_NO_PAD
+        .decode(value)
+        .map_err(|error| format!("invalid {label}: {error}"))?
+        .try_into()
+        .map_err(|bytes: Vec<u8>| format!("invalid {label} length {}; expected {N}", bytes.len()))
+}
+
+fn initial_rejection_reason(error: &IdentityVerificationError) -> InitialRejectedReason {
+    match error {
+        IdentityVerificationError::IdentityMismatch => InitialRejectedReason::IdentityMismatch,
+        IdentityVerificationError::InvalidProof => InitialRejectedReason::InvalidIdentityProof,
+        IdentityVerificationError::Store(_) => InitialRejectedReason::IdentityStoreUnavailable,
+    }
+}
+
+fn identity_error_message(error: IdentityVerificationError) -> String {
+    match error {
+        IdentityVerificationError::IdentityMismatch => format!(
+            "{error}; refusing the returned key. If you intentionally replaced the keytap passkey, run `keytap init --force` first"
+        ),
+        IdentityVerificationError::InvalidProof | IdentityVerificationError::Store(_) => {
+            format!("{error}; refusing the returned key")
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1201,7 +1356,11 @@ mod tests {
         let request = CeremonyRequest::Assert {
             key_name: "deploy".into(),
             prf_salt: "salt".into(),
+            identity_salt: "identity-salt".into(),
             challenge: "challenge".into(),
+            identity: NearbyIdentityRequest::Pinned {
+                credential_id: "credential".into(),
+            },
             remember: RememberOffer::Available { window_secs: 60 },
         };
         let json = serde_json::to_value(CliMessage::Request {
@@ -1214,6 +1373,9 @@ mod tests {
         assert_eq!(json["request"]["kind"], "assert");
         assert_eq!(json["request"]["remember"]["kind"], "available");
         assert_eq!(json["request"]["remember"]["windowSecs"], 60);
+        assert_eq!(json["request"]["identity"]["kind"], "pinned");
+        assert_eq!(json["request"]["identity"]["credentialId"], "credential");
+        assert_eq!(json["request"]["identitySalt"], "identity-salt");
         assert!(json["request"].get("userId").is_none());
     }
 
@@ -1265,6 +1427,20 @@ mod tests {
                 "type": "remember-rejected",
                 "v": 2,
                 "reason": "mismatch"
+            })
+        );
+
+        let identity_rejected = serde_json::to_value(CliMessage::InitialRejected {
+            version: PROTOCOL_VERSION,
+            reason: InitialRejectedReason::IdentityMismatch,
+        })
+        .unwrap();
+        assert_eq!(
+            identity_rejected,
+            serde_json::json!({
+                "type": "initial-rejected",
+                "v": 2,
+                "reason": "identity-mismatch"
             })
         );
     }

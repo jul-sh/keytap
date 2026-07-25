@@ -4,11 +4,14 @@ import test from 'node:test';
 import {
   CLOUDFLARE_STUN_ONLY,
   ProtocolError,
+  createNearbyIdentityProof,
+  createNearbySessionBinding,
   createSignalAuthenticator,
   decodeBase64URL,
   encodeBase64URL,
   filterCloudflareIceServers,
   isAllowedCloudflareIceUrl,
+  nearbyIdentityProofMessage,
 } from './nearby-v2-protocol.js';
 
 test('matches the Rust rendezvous, HKDF, and HMAC vector', async () => {
@@ -22,6 +25,10 @@ test('matches the Rust rendezvous, HKDF, and HMAC vector', async () => {
   assert.equal(
     authenticator.rendezvousId,
     '6_2qUdwr2cvl5omCEB61Ys263Y1nu0TIjppVQPePcUA',
+  );
+  assert.equal(
+    encodeBase64URL(authenticator.capabilityBinding),
+    'xSlvZCIXRPywtFu-jlyNoi-WW45oSc_ufGvoTdYb54I',
   );
 
   const envelope = await authenticator.sign('cli', 0, 'offer', '{"type":"offer"}');
@@ -40,6 +47,46 @@ test('matches the Rust rendezvous, HKDF, and HMAC vector', async () => {
 
   const answer = await authenticator.sign('phone', 0, 'answer', 'v=0\r\n');
   assert.equal(answer.mac, 'Ob2oYFx6NK-1_LOY2br0jKfkJL-Pcxim2X-mAVRKuao');
+});
+
+test('derives a stable Ed25519 identity and signs the exact nearby result', async () => {
+  const authenticator = await createSignalAuthenticator(new Uint8Array(32).fill(0x42));
+  const sessionBinding = await createNearbySessionBinding(
+    authenticator.capabilityBinding,
+    new TextEncoder().encode('offer'),
+    new TextEncoder().encode('answer'),
+  );
+  const fields = {
+    sessionBinding,
+    challenge: new Uint8Array(32).fill(0x24),
+    credentialId: new TextEncoder().encode('credential-one'),
+    prfFirst: new Uint8Array(32).fill(0x11),
+    keyName: 'deploy',
+  };
+  const identitySeed = new Uint8Array(32).fill(7);
+  const proof = await createNearbyIdentityProof(fields, identitySeed);
+
+  assert.equal(encodeBase64URL(proof.publicKey), '6kpsY-KcUgq-9VB7Ey7F-ZVHdq6-vnuSQh7qaRRG0iw');
+  assert.equal(
+    encodeBase64URL(proof.signature),
+    '2UnoDFl5z93sC3gNM7-S3lYG6ckXzu3rIwedCYQvWDU2v-YvpuXlKtOnnLIscb0TSghY6_gUB6zcnTkPZHutAA',
+  );
+  const message = nearbyIdentityProofMessage({ ...fields, publicKey: proof.publicKey });
+  const publicKey = await crypto.subtle.importKey(
+    'raw',
+    proof.publicKey,
+    { name: 'Ed25519' },
+    false,
+    ['verify'],
+  );
+  assert.equal(await crypto.subtle.verify('Ed25519', publicKey, proof.signature, message), true);
+
+  const changed = nearbyIdentityProofMessage({
+    ...fields,
+    keyName: 'production',
+    publicKey: proof.publicKey,
+  });
+  assert.equal(await crypto.subtle.verify('Ed25519', publicKey, proof.signature, changed), false);
 });
 
 test('binds signaling authentication to role, sequence, kind, and body', async () => {

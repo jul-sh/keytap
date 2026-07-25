@@ -1395,6 +1395,7 @@ dependencies = [
  "base64 0.22.1",
  "bech32 0.11.1",
  "dbus-secret-service",
+ "ed25519-dalek",
  "getrandom 0.2.17",
  "hex",
  "hkdf",
