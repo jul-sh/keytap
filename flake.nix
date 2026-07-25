@@ -16,12 +16,12 @@
         # Updated automatically by the release workflow
         releases = {
           aarch64-darwin = {
-            url = "https://github.com/jul-sh/keytap/releases/download/v6.4.0/keytap-v6.4.0-arm64.zip";
-            hash = "sha256-wiTBujQuN15Wis/+h7sq7f3+1FYLcL7FBfeBJu6iP0M=";
+            url = "https://github.com/jul-sh/keytap/releases/download/v6.4.1/keytap-v6.4.1-arm64.zip";
+            hash = "sha256-6MlEt1sn80GfoKpKkNXnftk6GUFta7ACH62r5XIcMvQ=";
           };
           x86_64-linux = {
-            url = "https://github.com/jul-sh/keytap/releases/download/v6.4.0/keytap-v6.4.0-linux-x86_64.zip";
-            hash = "sha256-R/kJYVpOO8YcBDzh4NAjRRH2C6yMjm6PqcGgxZrmf4o=";
+            url = "https://github.com/jul-sh/keytap/releases/download/v6.4.1/keytap-v6.4.1-linux-x86_64.zip";
+            hash = "sha256-94CEsEtBSuzm8YDMrYvTX1JgzLRWIjDpSt6/jBW4rRY=";
           };
         };
 
