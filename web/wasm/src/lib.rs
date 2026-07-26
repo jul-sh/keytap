@@ -90,6 +90,11 @@ pub async fn cli_run(argv: Vec<String>, stdin: &[u8], host: Host) -> Result<JsVa
         Plan::Run(cli) => cli,
     };
 
+    if cli.nearby {
+        host.stderr("error: --nearby is only available in the installed keytap CLI");
+        return done(Vec::new(), 1, None);
+    }
+
     let command = cli.command;
     let stdout: Vec<u8> = match &command {
         Command::Init { force } => {
@@ -273,6 +278,14 @@ mod plan_tests {
     fn init_parses_its_force_switch() {
         match plan(argv("init --force")) {
             Plan::Run(cli) => assert!(matches!(cli.command, Command::Init { force: true })),
+            _ => panic!("expected run"),
+        }
+    }
+
+    #[test]
+    fn nearby_parses_for_the_installed_cli_surface() {
+        match plan(argv("reveal --nearby")) {
+            Plan::Run(cli) => assert!(cli.nearby),
             _ => panic!("expected run"),
         }
     }

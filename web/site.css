@@ -93,6 +93,7 @@ body {
   overflow-y: auto;
   overscroll-behavior: contain;
   padding: 18px var(--pad) 28px;
+  font-family: var(--mono);
   font-size: 1rem;
   line-height: 1.6;
 }

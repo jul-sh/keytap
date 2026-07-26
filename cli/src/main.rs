@@ -24,6 +24,11 @@ fn main() {
         Invocation::Parsed(Ok(cli)) => cli,
     };
 
+    let ceremony = match cli.nearby {
+        true => Ceremony::Nearby,
+        false => Ceremony::Automatic,
+    };
+
     match cli.command {
         Command::Init { force } => {
             guard_ceremony("init", cli.prompt);
@@ -37,22 +42,26 @@ fn main() {
                     "could not prepare the nearby identity update: {error}"
                 ))
             });
-            register(pending_init);
+            register(pending_init, ceremony);
             remember::after_init();
         }
         Command::Public { ref name, format } => {
-            with_derived_key(name, cli.prompt, |raw_key| emit_public_key(raw_key, format, name));
+            with_derived_key(name, cli.prompt, ceremony, |raw_key| {
+                emit_public_key(raw_key, format, name)
+            });
         }
         Command::Reveal { ref name, format } => {
-            with_derived_key(name, cli.prompt, |raw_key| emit_private_key(raw_key, format));
+            with_derived_key(name, cli.prompt, ceremony, |raw_key| {
+                emit_private_key(raw_key, format)
+            });
         }
         Command::Encrypt { ref name, ref recipients, ref recipients_file, no_self } => {
-            with_derived_key(name, cli.prompt, |raw_key| {
+            with_derived_key(name, cli.prompt, ceremony, |raw_key| {
                 encrypt::encrypt(raw_key, recipients, recipients_file, !no_self)
             });
         }
         Command::Decrypt { ref name } => {
-            with_derived_key(name, cli.prompt, |raw_key| encrypt::decrypt(raw_key));
+            with_derived_key(name, cli.prompt, ceremony, |raw_key| encrypt::decrypt(raw_key));
         }
         Command::Remember { ref name } => {
             // Fail fast on names derivation would reject, and on machines
@@ -62,7 +71,7 @@ fn main() {
             }
             guard_ceremony("remember", cli.prompt);
             let mut target = remember::write_target();
-            let assertion = authenticate(name, SUPPRESS_REMEMBER);
+            let assertion = authenticate(name, SUPPRESS_REMEMBER, ceremony);
             let raw_key = derive_key(&assertion.prf_output);
             remember::remember(&mut target, name, &assertion.credential_id, &raw_key);
         }
@@ -86,7 +95,12 @@ fn main() {
 /// Nothing is stored unless the user opts in on the nearby page. The opt-in
 /// is backed by a second ceremony and settles only after `use_key` has emitted
 /// its output, so the command's result is never delayed by it.
-fn with_derived_key(name: &str, allow_prompt: bool, use_key: impl FnOnce(&[u8])) {
+fn with_derived_key(
+    name: &str,
+    allow_prompt: bool,
+    ceremony: Ceremony,
+    use_key: impl FnOnce(&[u8]),
+) {
     if let Some(raw_key) = env_keys::resolve(name) {
         return use_key(&raw_key);
     }
@@ -102,7 +116,7 @@ fn with_derived_key(name: &str, allow_prompt: bool, use_key: impl FnOnce(&[u8]))
             var = env_keys::var_name(name)
         ));
     }
-    let assertion = authenticate(name, OFFER_REMEMBER);
+    let assertion = authenticate(name, OFFER_REMEMBER, ceremony);
     let raw_key = derive_key(&assertion.prf_output);
     use_key(&raw_key);
     if let Some(window) = assertion.followup {
@@ -139,6 +153,14 @@ fn in_ci() -> bool {
 const OFFER_REMEMBER: bool = true;
 const SUPPRESS_REMEMBER: bool = false;
 
+/// How to reach WebAuthn once a ceremony is actually needed. Environment and
+/// remembered keys are resolved before this choice matters.
+#[derive(Clone, Copy)]
+enum Ceremony {
+    Automatic,
+    Nearby,
+}
+
 /// A completed passkey ceremony: the PRF output plus the ID of the credential
 /// that produced it (the latter identifies the root for remembered keys).
 struct Assertion {
@@ -170,7 +192,10 @@ impl Assertion {
 
 /// Authenticate with a passkey ceremony.
 #[cfg(feature = "native-passkey")]
-fn authenticate(name: &str, offer_remember: bool) -> Assertion {
+fn authenticate(name: &str, offer_remember: bool, ceremony: Ceremony) -> Assertion {
+    if let Ceremony::Nearby = ceremony {
+        return Assertion::nearby(nearby::authenticate_nearby(name, offer_remember));
+    }
     match keytap_macos::assert(name) {
         keytap_macos::AssertionOutcome::Success { prf_output, credential_id } => {
             Assertion::native(prf_output, credential_id)
@@ -186,8 +211,12 @@ fn authenticate(name: &str, offer_remember: bool) -> Assertion {
 }
 
 #[cfg(not(feature = "native-passkey"))]
-fn authenticate(name: &str, offer_remember: bool) -> Assertion {
-    Assertion::nearby(nearby::authenticate_nearby(name, offer_remember))
+fn authenticate(name: &str, offer_remember: bool, ceremony: Ceremony) -> Assertion {
+    match ceremony {
+        Ceremony::Automatic | Ceremony::Nearby => {
+            Assertion::nearby(nearby::authenticate_nearby(name, offer_remember))
+        }
+    }
 }
 
 fn derive_key(prf_output: &[u8]) -> Zeroizing<Vec<u8>> {
@@ -197,7 +226,13 @@ fn derive_key(prf_output: &[u8]) -> Zeroizing<Vec<u8>> {
 }
 
 #[cfg(feature = "native-passkey")]
-fn register(pending_init: nearby_identity::PendingInit) -> nearby_identity::PersistedInit {
+fn register(
+    pending_init: nearby_identity::PendingInit,
+    ceremony: Ceremony,
+) -> nearby_identity::PersistedInit {
+    if let Ceremony::Nearby = ceremony {
+        return nearby::register_nearby(pending_init);
+    }
     match keytap_macos::register() {
         keytap_macos::RegistrationOutcome::Success { credential_id } => {
             match pending_init.commit(&credential_id) {
@@ -227,8 +262,13 @@ fn register(pending_init: nearby_identity::PendingInit) -> nearby_identity::Pers
 }
 
 #[cfg(not(feature = "native-passkey"))]
-fn register(pending_init: nearby_identity::PendingInit) -> nearby_identity::PersistedInit {
-    nearby::register_nearby(pending_init)
+fn register(
+    pending_init: nearby_identity::PendingInit,
+    ceremony: Ceremony,
+) -> nearby_identity::PersistedInit {
+    match ceremony {
+        Ceremony::Automatic | Ceremony::Nearby => nearby::register_nearby(pending_init),
+    }
 }
 
 fn emit_private_key(raw_key: &[u8], format: keytap_cli_spec::Format) {

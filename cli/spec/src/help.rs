@@ -50,6 +50,22 @@ pub fn overview(cli: &Command) -> String {
         out.push_str(&legend);
     }
 
+    let options: Vec<(String, String)> = cli
+        .get_arguments()
+        .filter(|arg| in_overview(arg))
+        .map(|arg| {
+            let description = arg.get_help().map(|help| help.to_string()).unwrap_or_default();
+            (legend_key(arg), description)
+        })
+        .collect();
+    if !options.is_empty() {
+        let width = options.iter().map(|(key, _)| key.len()).max().unwrap_or(0);
+        out.push_str("\nOptions\n");
+        for (key, description) in options {
+            out.push_str(&format!("  {key:width$}  {description}\n"));
+        }
+    }
+
     out.push_str("\nSkip repeated prompts for a key: `keytap remember NAME` (see `keytap remember --help`).\nHolds that expire instead (ssh-agent, TTLs): see `keytap reveal --help`.\nCI (headless, $CI set): keys come from `$KEYTAP_KEY_<NAME>` \u{2014} see `keytap reveal --help`.\n");
 
     out.push_str("Run `");

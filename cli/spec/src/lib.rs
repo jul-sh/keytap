@@ -25,6 +25,10 @@ pub struct Cli {
     #[command(subcommand)]
     pub command: Command,
 
+    /// Use the QR-code nearby-phone flow instead of native passkey UI
+    #[arg(long, global = true)]
+    pub nearby: bool,
+
     /// Run a passkey ceremony even under $CI (the QR code lands in the job log)
     // With $CI set, a missing key fails fast instead of prompting — a prompt
     // in a headless job is a hung runner, not a question. This is the
@@ -324,11 +328,24 @@ mod tests {
     #[test]
     fn parse_defaults() {
         match invoke(argv("reveal")) {
-            Invocation::Parsed(Ok(cli)) => match cli.command {
-                Command::Reveal { name, .. } => assert_eq!(name, "default"),
-                _ => panic!("wrong command"),
-            },
+            Invocation::Parsed(Ok(cli)) => {
+                assert!(!cli.nearby);
+                match cli.command {
+                    Command::Reveal { name, .. } => assert_eq!(name, "default"),
+                    _ => panic!("wrong command"),
+                }
+            }
             _ => panic!("expected parse"),
+        }
+    }
+
+    #[test]
+    fn nearby_is_a_global_flow_override() {
+        for line in ["--nearby reveal", "reveal --nearby"] {
+            match invoke(argv(line)) {
+                Invocation::Parsed(Ok(cli)) => assert!(cli.nearby, "argv: {line:?}"),
+                _ => panic!("expected parse for {line:?}"),
+            }
         }
     }
 
@@ -350,5 +367,6 @@ mod tests {
         for cmd in completions() {
             assert!(text.contains(&cmd.0), "overview missing {}", cmd.0);
         }
+        assert!(text.contains("--nearby"));
     }
 }

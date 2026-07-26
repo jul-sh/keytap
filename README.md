@@ -37,6 +37,10 @@ Arguments & options
   -R VAL    File containing age recipients (one per line)
   --all     Forget every remembered key, including ones from previous passkeys
 
+Options
+  --nearby  Use the QR-code nearby-phone flow instead of native passkey UI
+  --prompt  Run a passkey ceremony even under $CI (the QR code lands in the job log)
+
 Skip repeated prompts for a key: `keytap remember NAME` (see `keytap remember --help`).
 Holds that expire instead (ssh-agent, TTLs): see `keytap reveal --help`.
 CI (headless, $CI set): keys come from `$KEYTAP_KEY_<NAME>` — see `keytap reveal --help`.
@@ -63,6 +67,9 @@ Use `keytap remember NAME` when you prefer local storage to repeated prompts.
   an encrypted WebRTC connection; Cloudflare TURN relays it when direct ICE
   fails. On first use, confirm the same two words in the terminal. Later uses
   authenticate the pinned passkey identity without another comparison.
+
+Pass `--nearby` to any installed command that needs a ceremony to request the
+phone flow explicitly.
 
 The nearby page can also remember the key after a second passkey approval,
 without another QR scan.
@@ -118,21 +125,6 @@ as [FIDO2 SSH keys](https://developers.yubico.com/SSH/Securing_git_with_SSH_and_
 - **Trust the phone web page.** It sees the PRF outputs and nearby identity seed.
 - The QR is public. Someone who reads it can race the phone, observe request
   metadata, or deny service, but cannot forge the CLI's signed offer.
-- The first-use words protect the CLI from accepting a fake phone; they do not
-  make a malicious QR safe. Later requests use the pinned passkey identity.
-- Signaling and Cloudflare TURN see network metadata and can deny service, but
-  WebRTC keeps payloads encrypted end to end.
-- TURN credentials are public and unmetered by account; quota abuse is accepted.
-- The local identity pin is public state. Local software able to replace it can
-  reset trust; `keytap init --force` is the intentional reset.
-- Legacy `#s` links rely on manually comparing the full host public key and do
-  not pin the passkey identity.
-
-The QR key authenticates the WebRTC offer and its DTLS fingerprint. First use
-binds the word comparison to the exact request and session; the CLI buffers the
-result until you confirm the words. The phone signs results with a separate
-passkey-derived identity, which the CLI pins for later requests. Fresh sessions
-and challenges reject captured results from another command.
 
 ## Skipping repeated prompts
 

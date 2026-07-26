@@ -43,6 +43,14 @@
   src: url(./fonts/IosevkaCharon-700.woff2) format("woff2");
 }
 
+@font-face {
+  font-family: "Iosevka Charon Mono";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url(./fonts/IosevkaCharonMono-400.woff2) format("woff2");
+}
+
 :root {
   color-scheme: dark;
   --bg: hsl(240, 100%, 20%);
@@ -57,6 +65,5 @@
   --callout-bg: hsla(240, 100%, 32%, 0.4);
   --display: "Pixelify Sans", monospace;
   --body: "Iosevka Charon", "SF Mono", "Menlo", "Consolas", monospace;
-  /* The terminal's historical name for the body face. */
-  --mono: var(--body);
+  --mono: "Iosevka Charon Mono", "SF Mono", "Menlo", "Consolas", monospace;
 }
