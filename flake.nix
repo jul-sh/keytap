@@ -17,11 +17,11 @@
         releases = {
           aarch64-darwin = {
             url = "https://github.com/jul-sh/keytap/releases/download/v7.0.0/keytap-v7.0.0-arm64.zip";
-            hash = "sha256-aanPZmY3muFXWrXDkVKv8MLGRm0zvZ4+x79KFKeJa5M=";
+            hash = "sha256-08DVBfOIa35DorbkHV95spTlwY6OOyVsUSHe/eyShYg=";
           };
           x86_64-linux = {
             url = "https://github.com/jul-sh/keytap/releases/download/v7.0.0/keytap-v7.0.0-linux-x86_64.zip";
-            hash = "sha256-L4i8psozBbTQ58MHdOUeVQvIxsEY8/Cf7KVeVdonJ4g=";
+            hash = "sha256-Tzrj04WYu2QyJv6v+CALNG3MRhDTxl0xx+Lb7v4q/QU=";
           };
         };
 
