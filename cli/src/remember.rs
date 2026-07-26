@@ -1,10 +1,10 @@
 //! Remembered keys: explicit, per-machine persistence of derived keys.
 //!
-//! keytap stays stateless by default — every command derives on demand and
-//! stores nothing. `keytap remember NAME` is the one opt-in exception: it runs
-//! the normal ceremony, then stores the raw derived key in the OS keychain so
-//! later commands for that name skip the prompt. No TTL; entries live until
-//! `keytap forget`, `keytap forget --all`, or the passkey is replaced.
+//! keytap stays stateless unless the user explicitly chooses local storage,
+//! either with `keytap remember NAME` or on the nearby approval page. The raw
+//! derived key is then stored in the local key store so later commands for
+//! that name skip the prompt. No TTL; entries live until `keytap forget`,
+//! `keytap forget --all`, or the passkey is replaced.
 //!
 //! Every remembered key is tied to a *root*: a fingerprint of the WebAuthn
 //! credential that produced it. The nearby identity file is the sole root
@@ -29,7 +29,7 @@ const ROOT_ID_CONTEXT: &[u8] = b"keytap:root-id:v1:";
 
 /// The stores that may hold remembered keys, in lookup order: the OS keychain
 /// first, then the plain-file store. The keychain participates when this
-/// machine can open one; the file store once some `keytap remember` has
+/// machine can open one; the file store once an explicit remember choice has
 /// stored into it (that is what brings it into existence). `Err` means this
 /// machine has no store at all and carries the keychain's reason.
 fn open_stores() -> Result<Vec<Box<dyn Keychain>>, KeychainError> {
@@ -172,10 +172,10 @@ pub fn remember(target: &mut WriteTarget, name: &str, credential_id: &[u8], raw_
     }
 }
 
-/// Honor a remember opt-in from the phone page's second passkey ceremony.
-/// Unlike `keytap remember`, storing is best-effort: the command's real job is
-/// the key it just derived, so trouble remembering warns and the command
-/// carries on.
+/// Honor the storage disposition signed by the phone's nearby assertion.
+/// Storage remains best-effort for ordinary derivation commands: failure is
+/// reported to both endpoints, while the verified one-time key can still be
+/// used by the command.
 pub enum NearbyRememberOutcome {
     Stored,
     /// Identity authority or durable local storage was unavailable. This is
@@ -188,8 +188,8 @@ pub fn remember_requested_nearby(
     credential_id: &[u8],
     raw_key: &[u8],
 ) -> NearbyRememberOutcome {
-    // This runs after the command's output is already on stdout, so every
-    // line goes through the non-panicking printer.
+    // This may run before a derivation command writes stdout, so every message
+    // remains a non-panicking stderr note and cannot corrupt key output.
     let could_not = |why: &str| {
         crate::note(&format!(
             "warning: you asked on your phone to remember '{name}' on this machine, but {why}"

@@ -5,7 +5,8 @@
 //! page derives an Ed25519 key from the latter and signs the exact nearby
 //! result. A short authentication string authenticates the first channel
 //! before this module pins the public identity and credential ID. A later
-//! nearby flow must match both and carry a valid, fresh signature.
+//! nearby flow must match both and carry a valid, fresh signature over the
+//! returned key material and its one-time-versus-store disposition.
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
@@ -18,7 +19,7 @@ use crate::nearby_sas::ConfirmedComparison;
 
 const FORMAT: &str = "keytap-nearby-identity-v2";
 const PRF_SALT_CONTEXT: &[u8] = b"keytap:nearby-identity-prf:v1";
-const PROOF_DOMAIN: &[u8] = b"keytap:nearby-identity-proof:v2\0";
+const PROOF_DOMAIN: &[u8] = b"keytap:nearby-identity-proof:v3\0";
 
 enum PairingState {
     FirstUse,
@@ -92,6 +93,17 @@ pub struct ProofContext<'a> {
     pub challenge: &'a [u8],
     pub prf_output: &'a [u8; 32],
     pub key_name: &'a str,
+    pub disposition: AssertionDisposition,
+}
+
+/// The phone's choice for this exact assertion. It is part of the signed
+/// identity proof so signaling or data-channel message rewriting cannot turn
+/// a one-time use into a local storage request.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum AssertionDisposition {
+    Once,
+    Remember,
 }
 
 #[derive(Clone, Copy)]
@@ -354,7 +366,7 @@ pub fn proof_message(proof: &Proof, context: &ProofContext<'_>) -> Vec<u8> {
             + context.prf_output.len()
             + context.key_name.len()
             + proof.public_key.len()
-            + 24,
+            + 25,
     );
     message.extend_from_slice(PROOF_DOMAIN);
     message.push(match context.binding {
@@ -366,6 +378,10 @@ pub fn proof_message(proof: &Proof, context: &ProofContext<'_>) -> Vec<u8> {
     append_field(&mut message, &proof.credential_id);
     append_field(&mut message, context.prf_output);
     append_field(&mut message, context.key_name.as_bytes());
+    message.push(match context.disposition {
+        AssertionDisposition::Once => 0,
+        AssertionDisposition::Remember => 1,
+    });
     append_field(&mut message, &proof.public_key);
     message
 }
@@ -835,6 +851,7 @@ mod tests {
             challenge,
             prf_output: prf,
             key_name: "deploy",
+            disposition: AssertionDisposition::Once,
         }
     }
 
@@ -850,6 +867,7 @@ mod tests {
             challenge,
             prf_output: prf,
             key_name: "deploy",
+            disposition: AssertionDisposition::Once,
         }
     }
 
@@ -1226,6 +1244,22 @@ mod tests {
     }
 
     #[test]
+    fn disposition_cannot_be_flipped_after_the_phone_signs() {
+        let proof = signed_proof([7; 32], b"credential-one", TestBinding::Bootstrap);
+        let digest = [0x42; 32];
+        let confirmation = ConfirmedComparison::from_digest_for_test(digest);
+        let challenge = [0x24; 32];
+        let prf = [0x11; 32];
+        let mut context = bootstrap_fields_for(&proof, &confirmation, &challenge, &prf);
+        context.disposition = AssertionDisposition::Remember;
+
+        assert!(matches!(
+            verify_proof(&proof, &context),
+            Err(VerificationError::InvalidProof)
+        ));
+    }
+
+    #[test]
     fn proof_bytes_are_deterministic_for_browser_interop() {
         let proof = signed_proof([7; 32], b"credential-one", TestBinding::Bootstrap);
         assert_eq!(
@@ -1234,7 +1268,7 @@ mod tests {
         );
         assert_eq!(
             URL_SAFE_NO_PAD.encode(proof.signature),
-            "NVy39fNzZCAiPt1NmmwKtykd-vRk9SPzvlxnHd_Lp8smT5qNZZJ5OVvlObjz3hrsPoCVNDtZU4onn_bgPqyFDQ"
+            "IX4VUH_eU2LO8p6PHiv4TGTPuJeR2py11D2rz97nt7hCCQFAjALLRkIHXq9viryIPfek-zGZmgfFoG6cNcUJAg"
         );
     }
 }

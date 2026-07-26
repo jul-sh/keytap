@@ -64,16 +64,24 @@ fn main() {
             with_derived_key(name, cli.prompt, ceremony, |raw_key| encrypt::decrypt(raw_key));
         }
         Command::Remember { ref name } => {
-            // Fail fast on names derivation would reject, and on machines
-            // with nowhere to store, before any ceremony.
+            // Fail fast on invalid names or unavailable local storage before
+            // asking either device to perform a ceremony.
             if let Err(e) = keytap_core::prf_salt_for_name(name) {
                 die(&e.to_string());
             }
             guard_ceremony("remember", cli.prompt);
             let mut target = remember::write_target();
-            let assertion = authenticate(name, SUPPRESS_REMEMBER, ceremony);
-            let raw_key = derive_key(&assertion.prf_output);
-            remember::remember(&mut target, name, &assertion.credential_id, &raw_key);
+            let assertion = authenticate(name, nearby::StoragePolicy::Remember, ceremony);
+            match assertion.storage {
+                nearby::StorageOutcome::Once => {
+                    let raw_key = derive_key(&assertion.prf_output);
+                    remember::remember(&mut target, name, &assertion.credential_id, &raw_key);
+                }
+                nearby::StorageOutcome::Stored => {}
+                nearby::StorageOutcome::Unavailable => {
+                    die("the nearby assertion succeeded, but this key could not be remembered")
+                }
+            }
         }
         Command::Forget { ref name, all } => {
             if all {
@@ -92,9 +100,9 @@ fn main() {
 /// ceremony, deriving on demand. Under `$CI` the ceremony rung is refused
 /// unless `--prompt` asks for it.
 ///
-/// Nothing is stored unless the user opts in on the nearby page. The opt-in
-/// is backed by a second ceremony and settles only after `use_key` has emitted
-/// its output, so the command's result is never delayed by it.
+/// Nothing is stored unless the user chooses it on the nearby page. That
+/// choice is carried by the single authenticated assertion and settles before
+/// this function receives the result, so there is no post-output wait.
 fn with_derived_key(
     name: &str,
     allow_prompt: bool,
@@ -116,17 +124,9 @@ fn with_derived_key(
             var = env_keys::var_name(name)
         ));
     }
-    let assertion = authenticate(name, OFFER_REMEMBER, ceremony);
+    let assertion = authenticate(name, nearby::StoragePolicy::Choose, ceremony);
     let raw_key = derive_key(&assertion.prf_output);
     use_key(&raw_key);
-    if let Some(window) = assertion.followup {
-        // The output must be out of the process before the opt-in window:
-        // the window may end via Ctrl-C (_exit skips buffered-IO flushing),
-        // and a piped consumer deserves the key now, not after the wait.
-        use std::io::Write;
-        std::io::stdout().flush().ok();
-        window.settle(&raw_key);
-    }
 }
 
 /// `init` and `remember` exist to run a ceremony; under `$CI` that still
@@ -147,12 +147,6 @@ fn in_ci() -> bool {
     std::env::var("CI").is_ok_and(|v| !v.is_empty() && v != "false" && v != "0")
 }
 
-/// Values for `authenticate`'s `offer_remember`, named so call sites read as
-/// policy: derivation commands offer the nearby page's post-auth remember action;
-/// `keytap remember` suppresses it (that command already stores the key).
-const OFFER_REMEMBER: bool = true;
-const SUPPRESS_REMEMBER: bool = false;
-
 /// How to reach WebAuthn once a ceremony is actually needed. Environment and
 /// remembered keys are resolved before this choice matters.
 #[derive(Clone, Copy)]
@@ -166,9 +160,7 @@ enum Ceremony {
 struct Assertion {
     prf_output: Zeroizing<Vec<u8>>,
     credential_id: Vec<u8>,
-    /// Still-open window for the nearby page's post-auth remember opt-in;
-    /// settled after the command's output. Never present for the native flow.
-    followup: Option<nearby::RememberWindow>,
+    storage: nearby::StorageOutcome,
 }
 
 impl Assertion {
@@ -177,7 +169,7 @@ impl Assertion {
         Assertion {
             prf_output: Zeroizing::new(prf_output),
             credential_id,
-            followup: None,
+            storage: nearby::StorageOutcome::Once,
         }
     }
 
@@ -185,16 +177,20 @@ impl Assertion {
         Assertion {
             prf_output: Zeroizing::new(assertion.prf_output),
             credential_id: assertion.credential_id,
-            followup: assertion.followup,
+            storage: assertion.storage,
         }
     }
 }
 
 /// Authenticate with a passkey ceremony.
 #[cfg(feature = "native-passkey")]
-fn authenticate(name: &str, offer_remember: bool, ceremony: Ceremony) -> Assertion {
+fn authenticate(
+    name: &str,
+    storage_policy: nearby::StoragePolicy,
+    ceremony: Ceremony,
+) -> Assertion {
     if let Ceremony::Nearby = ceremony {
-        return Assertion::nearby(nearby::authenticate_nearby(name, offer_remember));
+        return Assertion::nearby(nearby::authenticate_nearby(name, storage_policy));
     }
     match keytap_macos::assert(name) {
         keytap_macos::AssertionOutcome::Success { prf_output, credential_id } => {
@@ -205,16 +201,20 @@ fn authenticate(name: &str, offer_remember: bool, ceremony: Ceremony) -> Asserti
         }
         keytap_macos::AssertionOutcome::Error(msg) => {
             eprintln!("Couldn't open native passkey flow: {msg}");
-            Assertion::nearby(nearby::authenticate_nearby(name, offer_remember))
+            Assertion::nearby(nearby::authenticate_nearby(name, storage_policy))
         }
     }
 }
 
 #[cfg(not(feature = "native-passkey"))]
-fn authenticate(name: &str, offer_remember: bool, ceremony: Ceremony) -> Assertion {
+fn authenticate(
+    name: &str,
+    storage_policy: nearby::StoragePolicy,
+    ceremony: Ceremony,
+) -> Assertion {
     match ceremony {
         Ceremony::Automatic | Ceremony::Nearby => {
-            Assertion::nearby(nearby::authenticate_nearby(name, offer_remember))
+            Assertion::nearby(nearby::authenticate_nearby(name, storage_policy))
         }
     }
 }

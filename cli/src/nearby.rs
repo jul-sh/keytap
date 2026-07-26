@@ -6,7 +6,7 @@
 //! the data-channel peer before it sends any WebAuthn result.
 
 use crate::nearby_identity::{
-    Anchor as IdentityAnchor, InitCommitError as IdentityInitCommitError,
+    Anchor as IdentityAnchor, AssertionDisposition, InitCommitError as IdentityInitCommitError,
     PairingAnchor as IdentityPairingAnchor, PairingConstraint as IdentityPairingConstraint,
     PendingInit as PendingIdentityInit, PersistedInit as PersistedIdentityInit,
     PinnedAnchor as PinnedIdentityAnchor, Proof as NearbyIdentityProof,
@@ -45,8 +45,8 @@ use zeroize::Zeroizing;
 
 const DEFAULT_SIGNAL_URL: &str = "wss://keytap-relay.julsh.workers.dev";
 const PAGE_URL: &str = "https://keytap.jul.sh/nearby";
-const DATA_CHANNEL_LABEL: &str = "keytap/3";
-const DATA_CHANNEL_PROTOCOL: &str = "keytap.v3";
+const DATA_CHANNEL_LABEL: &str = "keytap/4";
+const DATA_CHANNEL_PROTOCOL: &str = "keytap.v4";
 
 const PEER_JOIN_TIMEOUT: Duration = Duration::from_secs(300);
 const CONNECTION_SETUP_TIMEOUT: Duration = Duration::from_secs(120);
@@ -63,22 +63,19 @@ const DATA_FRAME_LIMIT: usize = 16 * 1024;
 const CLOUDFLARE_STUN_URL: &str = "stun:stun.cloudflare.com:3478";
 const CLOUDFLARE_TURN_UDP_URL: &str = "turn:turn.cloudflare.com:3478?transport=udp";
 
-const DEFAULT_REMEMBER_WINDOW_SECS: u64 = 60;
-const REMEMBER_PENDING_EXTENSION_SECS: u64 = 150;
-
 /// A completed nearby assertion ceremony.
 pub struct NearbyAssertion {
     pub prf_output: Vec<u8>,
     pub credential_id: Vec<u8>,
-    pub followup: Option<RememberWindow>,
+    pub storage: StorageOutcome,
 }
 
-/// Authenticate via a nearby device. `offer_remember` controls whether the
-/// phone may perform the acknowledged second ceremony used for local storage.
-pub fn authenticate_nearby(name: &str, offer_remember: bool) -> NearbyAssertion {
+/// Authenticate via a nearby device. `storage_policy` controls whether the
+/// phone may request local storage before performing its single assertion.
+pub fn authenticate_nearby(name: &str, storage_policy: StoragePolicy) -> NearbyAssertion {
     let result = run_nearby_flow(Operation::Assert {
         name,
-        offer_remember,
+        storage_policy,
     })
     .unwrap_or_else(|error| crate::die(&error));
 
@@ -86,11 +83,11 @@ pub fn authenticate_nearby(name: &str, offer_remember: bool) -> NearbyAssertion 
         FlowResult::Assertion {
             credential_id,
             prf_output,
-            followup,
+            storage,
         } => NearbyAssertion {
             credential_id,
             prf_output,
-            followup,
+            storage,
         },
         FlowResult::Registration { .. } => {
             crate::die("nearby protocol returned a registration for an assertion request")
@@ -114,8 +111,28 @@ pub fn register_nearby(pending_init: PendingIdentityInit) -> PersistedIdentityIn
 }
 
 enum Operation<'a> {
-    Register { pending_init: PendingIdentityInit },
-    Assert { name: &'a str, offer_remember: bool },
+    Register {
+        pending_init: PendingIdentityInit,
+    },
+    Assert {
+        name: &'a str,
+        storage_policy: StoragePolicy,
+    },
+}
+
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum StoragePolicy {
+    Choose,
+    Remember,
+}
+
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum StorageOutcome {
+    Once,
+    Stored,
+    Unavailable,
 }
 
 /// Everything valid only for one ceremony kind lives in that variant.
@@ -128,14 +145,14 @@ enum FlowPlan {
         request: PairingCeremonyRequest,
         key_name: String,
         challenge: [u8; 32],
-        remember: RememberOffer,
+        storage: StoragePolicy,
         anchor: IdentityPairingAnchor,
     },
     PinnedAssertion {
         request: PinnedCeremonyRequest,
         key_name: String,
         challenge: [u8; 32],
-        remember: RememberOffer,
+        storage: StoragePolicy,
         anchor: PinnedIdentityAnchor,
     },
 }
@@ -158,6 +175,7 @@ enum BufferedPairingResult {
     Assertion {
         credential_id: String,
         prf_first: String,
+        disposition: AssertionDisposition,
         proof: IdentityProofDto,
     },
 }
@@ -170,6 +188,7 @@ enum PairingAuthorization {
         confirmation: SasConfirmation,
         credential_id: String,
         prf_first: String,
+        disposition: AssertionDisposition,
         proof: IdentityProofDto,
     },
 }
@@ -177,10 +196,11 @@ enum PairingAuthorization {
 struct AssertionCompletion {
     key_name: String,
     challenge: [u8; 32],
-    remember: RememberOffer,
+    storage: StoragePolicy,
     identity: AuthenticatedIdentity,
     credential_id: String,
     prf_first: String,
+    disposition: AssertionDisposition,
     proof: IdentityProofDto,
 }
 
@@ -191,174 +211,14 @@ enum FlowResult {
     Assertion {
         credential_id: Vec<u8>,
         prf_output: Vec<u8>,
-        followup: Option<RememberWindow>,
+        storage: StorageOutcome,
     },
 }
 
-/// The open post-auth opt-in window. Keeping the peer connection and runtime
-/// here lets `main.rs` emit the key before waiting for the optional gesture.
-pub struct RememberWindow {
-    session: RtcSession,
-    name: String,
-    window_secs: u64,
-    credential_id: Vec<u8>,
-    prf_output: Zeroizing<Vec<u8>>,
-}
-
-enum RememberState {
-    AwaitingChoice { deadline: Instant },
-    AwaitingResult { deadline: Instant },
-}
-
-impl RememberWindow {
-    pub fn settle(mut self, raw_key: &[u8]) {
-        note(&format!(
-            "Key delivered. Waiting up to {}s in case you choose \u{201c}remember\u{201d} on \
-             your phone (finishing or closing the page there ends the wait; Ctrl-C skips).",
-            self.window_secs
-        ));
-        exit_zero_on_sigint();
-        self.run_window(raw_key);
-    }
-
-    fn run_window(&mut self, raw_key: &[u8]) {
-        let start = Instant::now();
-        let mut state = RememberState::AwaitingChoice {
-            deadline: start + Duration::from_secs(self.window_secs),
-        };
-        let mut announced_pending = false;
-        let mut warned_mismatch = false;
-
-        loop {
-            let deadline = match state {
-                RememberState::AwaitingChoice { deadline }
-                | RememberState::AwaitingResult { deadline } => deadline,
-            };
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                return;
-            }
-
-            let message = match self.session.receive(remaining) {
-                Ok(message) => message,
-                Err(_) => return,
-            };
-
-            state = match (state, message) {
-                (_, PhoneMessage::Done) => return,
-                (RememberState::AwaitingChoice { .. }, PhoneMessage::RememberBegin) => {
-                    if !announced_pending {
-                        announced_pending = true;
-                        note("Remember chosen on the phone; waiting for the passkey approval…");
-                    }
-                    if self.session.send(&CliMessage::RememberReady).is_err() {
-                        return;
-                    }
-                    RememberState::AwaitingResult {
-                        deadline: Instant::now()
-                            + Duration::from_secs(REMEMBER_PENDING_EXTENSION_SECS),
-                    }
-                }
-                (RememberState::AwaitingResult { deadline }, PhoneMessage::RememberBegin) => {
-                    // Idempotent retry if the phone did not observe the first ACK.
-                    if self.session.send(&CliMessage::RememberReady).is_err() {
-                        return;
-                    }
-                    RememberState::AwaitingResult { deadline }
-                }
-                (
-                    RememberState::AwaitingResult { deadline },
-                    PhoneMessage::RememberResult {
-                        credential_id,
-                        prf_first,
-                        ..
-                    },
-                ) => match decode_assertion_fields(&credential_id, &prf_first) {
-                    Err(error) => {
-                        self.session
-                            .send_protocol_error(ProtocolErrorCode::InvalidMessage);
-                        note(&format!(
-                            "warning: ignored invalid remember approval: {error}"
-                        ));
-                        RememberState::AwaitingResult { deadline }
-                    }
-                    Ok(payload) if self.matches_first_ceremony(&payload) => {
-                        match crate::remember::remember_requested_nearby(
-                            &self.name,
-                            &self.credential_id,
-                            raw_key,
-                        ) {
-                            crate::remember::NearbyRememberOutcome::Stored => {
-                                self.session.send(&CliMessage::RememberAccepted).ok();
-                            }
-                            crate::remember::NearbyRememberOutcome::Unavailable => {
-                                self.session
-                                    .send(&CliMessage::RememberRejected {
-                                        reason: RememberRejectedReason::Unavailable,
-                                    })
-                                    .ok();
-                            }
-                        }
-                        return;
-                    }
-                    Ok(_) => {
-                        self.session
-                            .send(&CliMessage::RememberRejected {
-                                reason: RememberRejectedReason::Mismatch,
-                            })
-                            .ok();
-                        if !warned_mismatch {
-                            warned_mismatch = true;
-                            note(&format!(
-                                "warning: the \u{201c}remember\u{201d} approval on your phone \
-                                     used a different passkey than the one that derived this key; \
-                                     nothing was stored. You can retry on the phone, or run \
-                                     `keytap remember {}` on this machine to store it \
-                                     deliberately.",
-                                self.name
-                            ));
-                        }
-                        RememberState::AwaitingChoice { deadline }
-                    }
-                },
-                (
-                    state @ RememberState::AwaitingChoice { .. },
-                    PhoneMessage::RememberResult { .. },
-                ) => {
-                    self.session
-                        .send_protocol_error(ProtocolErrorCode::UnexpectedMessage);
-                    state
-                }
-                (state, PhoneMessage::SasPhoneCommit { .. })
-                | (state, PhoneMessage::SasPhoneReveal { .. })
-                | (state, PhoneMessage::SasPhoneRejected)
-                | (state, PhoneMessage::PairedRegistrationResult { .. })
-                | (state, PhoneMessage::PairedAssertionResult { .. })
-                | (state, PhoneMessage::AssertionResult { .. }) => {
-                    self.session
-                        .send_protocol_error(ProtocolErrorCode::UnexpectedMessage);
-                    state
-                }
-            };
-        }
-    }
-
-    fn matches_first_ceremony(&self, payload: &AssertionPayload) -> bool {
-        use subtle::ConstantTimeEq;
-        let prf_matches: bool = payload.prf_output.ct_eq(&self.prf_output).into();
-        payload.credential_id == self.credential_id && prf_matches
-    }
-}
-
-/// From here to exit, Ctrl-C means "stop waiting, all is well" because the
-/// command already emitted its result.
-fn exit_zero_on_sigint() {
-    extern "C" fn exit_ok(_: libc::c_int) {
-        unsafe { libc::_exit(0) }
-    }
-    unsafe {
-        libc::signal(libc::SIGINT, exit_ok as extern "C" fn(libc::c_int) as usize);
-    }
+#[derive(Clone, Copy)]
+enum AuthorizedDisposition {
+    Once,
+    Remember,
 }
 
 fn run_nearby_flow(operation: Operation<'_>) -> Result<FlowResult, String> {
@@ -494,17 +354,18 @@ fn run_nearby_flow(operation: Operation<'_>) -> Result<FlowResult, String> {
             request,
             key_name,
             challenge,
-            remember,
+            storage,
             anchor,
         } => {
-            let (confirmation, credential_id, prf_first, proof) =
+            let (confirmation, credential_id, prf_first, disposition, proof) =
                 match run_pairing(&session, request, &identity_binding)? {
                     PairingAuthorization::Assertion {
                         confirmation,
                         credential_id,
                         prf_first,
+                        disposition,
                         proof,
-                    } => (confirmation, credential_id, prf_first, proof),
+                    } => (confirmation, credential_id, prf_first, disposition, proof),
                     PairingAuthorization::Registration { .. } => {
                         return reject_unexpected_pairing(&session)
                     }
@@ -514,13 +375,14 @@ fn run_nearby_flow(operation: Operation<'_>) -> Result<FlowResult, String> {
                 AssertionCompletion {
                     key_name,
                     challenge,
-                    remember,
+                    storage,
                     identity: AuthenticatedIdentity::Pairing {
                         anchor,
                         confirmation,
                     },
                     credential_id,
                     prf_first,
+                    disposition,
                     proof,
                 },
             )?
@@ -529,7 +391,7 @@ fn run_nearby_flow(operation: Operation<'_>) -> Result<FlowResult, String> {
             request,
             key_name,
             challenge,
-            remember,
+            storage,
             anchor,
         } => {
             session.send(&CliMessage::Request { request })?;
@@ -537,20 +399,21 @@ fn run_nearby_flow(operation: Operation<'_>) -> Result<FlowResult, String> {
                 PhoneMessage::AssertionResult {
                     credential_id,
                     prf_first,
+                    disposition,
                     identity: proof,
-                    ..
                 } => complete_assertion(
                     session,
                     AssertionCompletion {
                         key_name,
                         challenge,
-                        remember,
+                        storage,
                         identity: AuthenticatedIdentity::Pinned {
                             anchor,
                             session_digest: identity_binding,
                         },
                         credential_id,
                         prf_first,
+                        disposition,
                         proof,
                     },
                 )?,
@@ -575,12 +438,20 @@ fn complete_assertion(
     let AssertionCompletion {
         key_name,
         challenge,
-        remember,
+        storage,
         identity,
         credential_id,
         prf_first,
+        disposition,
         proof,
     } = completion;
+    let disposition = match authorize_disposition(storage, disposition) {
+        Ok(disposition) => disposition,
+        Err(error) => {
+            session.send_protocol_error(ProtocolErrorCode::UnexpectedMessage);
+            return Err(error);
+        }
+    };
     let payload = decode_assertion_fields(&credential_id, &prf_first)?;
     let proof = decode_identity_proof(&payload.credential_id, proof)?;
     let verification = match identity {
@@ -595,6 +466,7 @@ fn complete_assertion(
                 challenge: &challenge,
                 prf_output: &payload.prf_output,
                 key_name: &key_name,
+                disposition: disposition.proof_value(),
             };
             anchor.verify_and_pin_after_sas(&proof, &context).map(|()| {
                 note("Pairing confirmed; pinned this passkey identity for future nearby requests.")
@@ -611,6 +483,7 @@ fn complete_assertion(
                 challenge: &challenge,
                 prf_output: &payload.prf_output,
                 key_name: &key_name,
+                disposition: disposition.proof_value(),
             };
             anchor.verify(&proof, &context)
         }
@@ -634,32 +507,61 @@ fn complete_assertion(
             return Err(identity_error_message(error));
         }
     }
-    let acknowledgement_delivered = match session.send(&CliMessage::InitialAccepted) {
-        Ok(()) => true,
-        Err(error) => {
-            note(&format!(
-                "Passkey result was verified, but the phone acknowledgement could not be delivered: {error}"
-            ));
-            false
+    let storage = match disposition {
+        AuthorizedDisposition::Once => StorageOutcome::Once,
+        AuthorizedDisposition::Remember => {
+            let raw_key = Zeroizing::new(
+                keytap_core::derive_raw_key(&payload.prf_output)
+                    .map_err(|error| format!("key derivation failed: {error}"))?,
+            );
+            match crate::remember::remember_requested_nearby(
+                &key_name,
+                &payload.credential_id,
+                &raw_key,
+            ) {
+                crate::remember::NearbyRememberOutcome::Stored => StorageOutcome::Stored,
+                crate::remember::NearbyRememberOutcome::Unavailable => {
+                    StorageOutcome::Unavailable
+                }
+            }
         }
     };
 
-    let followup = match (remember, acknowledgement_delivered) {
-        (RememberOffer::Disabled, _) | (_, false) => None,
-        (RememberOffer::Available { window_secs }, true) => Some(RememberWindow {
-            session,
-            name: key_name,
-            window_secs,
-            credential_id: payload.credential_id.clone(),
-            prf_output: Zeroizing::new(payload.prf_output.to_vec()),
-        }),
-    };
+    if let Err(error) = session.send(&CliMessage::AssertionAccepted { storage }) {
+        note(&format!(
+            "Passkey result was verified, but the phone acknowledgement could not be delivered: {error}"
+        ));
+    }
 
     Ok(FlowResult::Assertion {
         credential_id: payload.credential_id,
         prf_output: payload.prf_output.to_vec(),
-        followup,
+        storage,
     })
+}
+
+impl AuthorizedDisposition {
+    fn proof_value(self) -> AssertionDisposition {
+        match self {
+            Self::Once => AssertionDisposition::Once,
+            Self::Remember => AssertionDisposition::Remember,
+        }
+    }
+}
+
+fn authorize_disposition(
+    policy: StoragePolicy,
+    disposition: AssertionDisposition,
+) -> Result<AuthorizedDisposition, String> {
+    match (policy, disposition) {
+        (StoragePolicy::Choose, AssertionDisposition::Once) => Ok(AuthorizedDisposition::Once),
+        (StoragePolicy::Choose | StoragePolicy::Remember, AssertionDisposition::Remember) => {
+            Ok(AuthorizedDisposition::Remember)
+        }
+        (StoragePolicy::Remember, AssertionDisposition::Once) => {
+            Err("phone declined local storage required by this command".into())
+        }
+    }
 }
 
 fn run_pairing(
@@ -719,11 +621,13 @@ fn run_pairing(
             PhoneMessage::PairedAssertionResult {
                 credential_id,
                 prf_first,
+                disposition,
                 identity: proof,
             },
         ) => BufferedPairingResult::Assertion {
             credential_id,
             prf_first,
+            disposition,
             proof,
         },
         (_, PhoneMessage::SasPhoneRejected | PhoneMessage::Done) => {
@@ -748,11 +652,13 @@ fn run_pairing(
         BufferedPairingResult::Assertion {
             credential_id,
             prf_first,
+            disposition,
             proof,
         } => PairingAuthorization::Assertion {
             confirmation: confirmed,
             credential_id,
             prf_first,
+            disposition,
             proof,
         },
     })
@@ -1243,10 +1149,8 @@ enum CliMessage {
     InitialIndeterminate {
         reason: InitialIndeterminateReason,
     },
-    RememberReady,
-    RememberAccepted,
-    RememberRejected {
-        reason: RememberRejectedReason,
+    AssertionAccepted {
+        storage: StorageOutcome,
     },
     ProtocolError {
         code: ProtocolErrorCode,
@@ -1274,7 +1178,7 @@ enum PairingCeremonyRequest {
         identity_salt: String,
         challenge: String,
         identity: PairingIdentityRequest,
-        remember: RememberOffer,
+        storage: StoragePolicy,
     },
 }
 
@@ -1290,7 +1194,7 @@ enum PinnedCeremonyRequest {
         identity_salt: String,
         challenge: String,
         identity: PinnedIdentityRequest,
-        remember: RememberOffer,
+        storage: StoragePolicy,
     },
 }
 
@@ -1316,7 +1220,7 @@ impl PairingCeremonyRequest {
                 identity_salt,
                 challenge,
                 identity,
-                remember,
+                storage,
             } => {
                 bytes.push(1);
                 append_sas_field(&mut bytes, &decode_sas_field(challenge, "challenge")?);
@@ -1336,12 +1240,9 @@ impl PairingCeremonyRequest {
                         );
                     }
                 }
-                match remember {
-                    RememberOffer::Disabled => bytes.push(0),
-                    RememberOffer::Available { window_secs } => {
-                        bytes.push(1);
-                        bytes.extend_from_slice(&window_secs.to_be_bytes());
-                    }
+                match storage {
+                    StoragePolicy::Choose => bytes.push(0),
+                    StoragePolicy::Remember => bytes.push(1),
                 }
             }
         }
@@ -1383,27 +1284,10 @@ enum PinnedIdentityRequest {
 }
 
 #[derive(Clone, Copy, Serialize)]
-#[serde(tag = "kind", rename_all = "lowercase")]
-enum RememberOffer {
-    Disabled,
-    Available {
-        #[serde(rename = "windowSecs")]
-        window_secs: u64,
-    },
-}
-
-#[derive(Clone, Copy, Serialize)]
 #[serde(rename_all = "kebab-case")]
 enum ProtocolErrorCode {
     InvalidMessage,
     UnexpectedMessage,
-}
-
-#[derive(Clone, Copy, Serialize)]
-#[serde(rename_all = "lowercase")]
-enum RememberRejectedReason {
-    Mismatch,
-    Unavailable,
 }
 
 #[derive(Clone, Copy, Serialize)]
@@ -1442,19 +1326,14 @@ fn build_plan(operation: Operation<'_>) -> Result<FlowPlan, String> {
         }
         Operation::Assert {
             name,
-            offer_remember,
+            storage_policy,
         } => {
             let prf_salt = keytap_core::prf_salt_for_name(name)
                 .map_err(|error| format!("invalid key name: {error}"))?;
             let identity_salt = crate::nearby_identity::prf_salt();
             let anchor = IdentityAnchor::load()
                 .map_err(|error| format!("could not load the nearby passkey identity: {error}"))?;
-            let remember = match offer_remember {
-                true => RememberOffer::Available {
-                    window_secs: DEFAULT_REMEMBER_WINDOW_SECS,
-                },
-                false => RememberOffer::Disabled,
-            };
+            let storage = storage_policy;
             let key_name = name.to_string();
             let prf_salt = URL_SAFE_NO_PAD.encode(prf_salt);
             let identity_salt = URL_SAFE_NO_PAD.encode(identity_salt);
@@ -1475,12 +1354,12 @@ fn build_plan(operation: Operation<'_>) -> Result<FlowPlan, String> {
                             identity_salt,
                             challenge,
                             identity,
-                            remember,
+                            storage,
                         },
                         key_name,
                         challenge: challenge_bytes,
                         anchor,
-                        remember,
+                        storage,
                     })
                 }
                 IdentityAnchor::Pinned(anchor) => Ok(FlowPlan::PinnedAssertion {
@@ -1492,12 +1371,12 @@ fn build_plan(operation: Operation<'_>) -> Result<FlowPlan, String> {
                         identity: PinnedIdentityRequest::Pinned {
                             credential_id: URL_SAFE_NO_PAD.encode(anchor.credential_id()),
                         },
-                        remember,
+                        storage,
                     },
                     key_name,
                     challenge: challenge_bytes,
                     anchor,
-                    remember,
+                    storage,
                 }),
             }
         }
@@ -1523,6 +1402,7 @@ enum PhoneMessage {
         credential_id: String,
         #[serde(rename = "prfFirst")]
         prf_first: String,
+        disposition: AssertionDisposition,
         identity: IdentityProofDto,
     },
     AssertionResult {
@@ -1530,14 +1410,8 @@ enum PhoneMessage {
         credential_id: String,
         #[serde(rename = "prfFirst")]
         prf_first: String,
+        disposition: AssertionDisposition,
         identity: IdentityProofDto,
-    },
-    RememberBegin,
-    RememberResult {
-        #[serde(rename = "credentialId")]
-        credential_id: String,
-        #[serde(rename = "prfFirst")]
-        prf_first: String,
     },
     Done,
 }
@@ -1657,17 +1531,20 @@ mod tests {
             identity: PinnedIdentityRequest::Pinned {
                 credential_id: "credential".into(),
             },
-            remember: RememberOffer::Available { window_secs: 60 },
+            storage: StoragePolicy::Choose,
         };
         let json = serde_json::to_value(CliMessage::Request { request }).unwrap();
         assert_eq!(json["type"], "request");
         assert_eq!(json["request"]["kind"], "assert");
-        assert_eq!(json["request"]["remember"]["kind"], "available");
-        assert_eq!(json["request"]["remember"]["windowSecs"], 60);
+        assert_eq!(json["request"]["storage"], "choose");
         assert_eq!(json["request"]["identity"]["kind"], "pinned");
         assert_eq!(json["request"]["identity"]["credentialId"], "credential");
         assert_eq!(json["request"]["identitySalt"], "identity-salt");
         assert!(json["request"].get("userId").is_none());
+        assert_eq!(
+            serde_json::to_value(StoragePolicy::Remember).unwrap(),
+            serde_json::json!("remember")
+        );
     }
 
     #[test]
@@ -1680,17 +1557,34 @@ mod tests {
             identity: PairingIdentityRequest::Credential {
                 credential_id: URL_SAFE_NO_PAD.encode(b"cred"),
             },
-            remember: RememberOffer::Available { window_secs: 60 },
+            storage: StoragePolicy::Choose,
         };
         let canonical = request.sas_bytes().unwrap();
         assert_eq!(
             URL_SAFE_NO_PAD.encode(&canonical),
-            "AQAAACABAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQAAACACAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgAAACADAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwAAAAZkZXBsb3kBAAAABGNyZWQBAAAAAAAAADw"
+            "AQAAACABAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQAAACACAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgAAACADAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwAAAAZkZXBsb3kBAAAABGNyZWQA"
         );
         let context = SasContext::bind(&[4; 32], &canonical);
         assert_eq!(
             URL_SAFE_NO_PAD.encode(context.as_bytes()),
-            "ov2kOyVpend0ognXvoqine2hW54dYUqDikvCzmw4xqE"
+            "-ttmWQ8-kdx7xyaCzmPOpk7KNSnoYJkNBd_OwlhIxQs"
+        );
+
+        let mut required = request.clone();
+        let PairingCeremonyRequest::Assert { storage, .. } = &mut required else {
+            unreachable!()
+        };
+        *storage = StoragePolicy::Remember;
+        let required = required.sas_bytes().unwrap();
+        assert_eq!(
+            &required[..required.len() - 1],
+            &canonical[..canonical.len() - 1]
+        );
+        assert_eq!(canonical.last(), Some(&0));
+        assert_eq!(required.last(), Some(&1));
+        assert_ne!(
+            SasContext::bind(&[4; 32], &canonical).as_bytes(),
+            SasContext::bind(&[4; 32], &required).as_bytes()
         );
 
         let json = serde_json::to_value(CliMessage::PairingRequest {
@@ -1722,7 +1616,7 @@ mod tests {
         assert_eq!(json["request"]["prfSalt"], "salt");
         assert_eq!(json["request"]["userId"], "user-id");
         assert_eq!(json["request"]["userName"], "keytap");
-        assert!(json["request"].get("remember").is_none());
+        assert!(json["request"].get("storage").is_none());
     }
 
     #[test]
@@ -1739,29 +1633,19 @@ mod tests {
             })
         );
 
-        let rejected = serde_json::to_value(CliMessage::RememberRejected {
-            reason: RememberRejectedReason::Mismatch,
-        })
-        .unwrap();
-        assert_eq!(
-            rejected,
-            serde_json::json!({
-                "type": "remember-rejected",
-                "reason": "mismatch"
-            })
-        );
-
-        let unavailable = serde_json::to_value(CliMessage::RememberRejected {
-            reason: RememberRejectedReason::Unavailable,
-        })
-        .unwrap();
-        assert_eq!(
-            unavailable,
-            serde_json::json!({
-                "type": "remember-rejected",
-                "reason": "unavailable"
-            })
-        );
+        for (storage, expected) in [
+            (StorageOutcome::Once, "once"),
+            (StorageOutcome::Stored, "stored"),
+            (StorageOutcome::Unavailable, "unavailable"),
+        ] {
+            assert_eq!(
+                serde_json::to_value(CliMessage::AssertionAccepted { storage }).unwrap(),
+                serde_json::json!({
+                    "type": "assertion-accepted",
+                    "storage": expected
+                })
+            );
+        }
 
         let identity_rejected = serde_json::to_value(CliMessage::InitialRejected {
             reason: InitialRejectedReason::IdentityMismatch,
@@ -1795,10 +1679,7 @@ mod tests {
 
     #[test]
     fn phone_messages_are_strictly_typed() {
-        assert!(matches!(
-            decode_phone_message(r#"{"type":"remember-begin"}"#).unwrap(),
-            PhoneMessage::RememberBegin
-        ));
+        assert!(decode_phone_message(r#"{"type":"remember-begin"}"#).is_err());
         assert!(matches!(
             decode_phone_message(
                 r#"{"type":"paired-registration-result","credentialId":"Y3JlZA"}"#
@@ -1811,9 +1692,41 @@ mod tests {
         )
         .is_err());
         assert!(decode_phone_message(r#"{"type":"unknown"}"#).is_err());
+        let complete = r#"{"type":"assertion-result","credentialId":"YQ","prfFirst":"cHJm","disposition":"remember","identity":{"algorithm":"ed25519","publicKey":"cHVi","signature":"c2ln"}}"#;
+        assert!(matches!(
+            decode_phone_message(complete).unwrap(),
+            PhoneMessage::AssertionResult {
+                disposition: AssertionDisposition::Remember,
+                ..
+            }
+        ));
+        let missing = r#"{"type":"assertion-result","credentialId":"YQ","prfFirst":"cHJm","identity":{"algorithm":"ed25519","publicKey":"cHVi","signature":"c2ln"}}"#;
+        assert!(decode_phone_message(missing).is_err());
+        let paired_missing = r#"{"type":"paired-assertion-result","credentialId":"YQ","prfFirst":"cHJm","identity":{"algorithm":"ed25519","publicKey":"cHVi","signature":"c2ln"}}"#;
+        assert!(decode_phone_message(paired_missing).is_err());
+        let unknown = r#"{"type":"assertion-result","credentialId":"YQ","prfFirst":"cHJm","disposition":"later","identity":{"algorithm":"ed25519","publicKey":"cHVi","signature":"c2ln"}}"#;
+        assert!(decode_phone_message(unknown).is_err());
+        let extra = r#"{"type":"assertion-result","credentialId":"YQ","prfFirst":"cHJm","disposition":"once","identity":{"algorithm":"ed25519","publicKey":"cHVi","signature":"c2ln"},"remember":true}"#;
+        assert!(decode_phone_message(extra).is_err());
+    }
+
+    #[test]
+    fn response_disposition_must_be_authorized_by_request_policy() {
+        assert!(matches!(
+            authorize_disposition(StoragePolicy::Choose, AssertionDisposition::Once),
+            Ok(AuthorizedDisposition::Once)
+        ));
+        assert!(matches!(
+            authorize_disposition(StoragePolicy::Choose, AssertionDisposition::Remember),
+            Ok(AuthorizedDisposition::Remember)
+        ));
         assert!(
-            decode_phone_message(r#"{"type":"assertion-result","credentialId":"YQ"}"#).is_err()
+            authorize_disposition(StoragePolicy::Remember, AssertionDisposition::Once).is_err()
         );
+        assert!(matches!(
+            authorize_disposition(StoragePolicy::Remember, AssertionDisposition::Remember),
+            Ok(AuthorizedDisposition::Remember)
+        ));
     }
 
     #[test]

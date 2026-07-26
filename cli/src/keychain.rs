@@ -290,6 +290,7 @@ pub mod file {
     use base64::Engine;
     use serde_json::{Map, Value};
     use std::collections::BTreeMap;
+    use std::fs::File;
     use std::path::{Path, PathBuf};
     use zeroize::Zeroizing;
 
@@ -317,7 +318,11 @@ pub mod file {
     /// never stored a file never touch the filesystem.
     pub fn open_existing() -> Option<FileStore> {
         let path = default_path()?;
-        path.is_file().then(|| FileStore { path })
+        existing_at(path)
+    }
+
+    fn existing_at(path: PathBuf) -> Option<FileStore> {
+        (path.is_file() || path.with_extension("json.tmp").is_file()).then(|| FileStore { path })
     }
 
     /// The store at the default path for writing; the parent directory is
@@ -336,6 +341,40 @@ pub mod file {
         path: PathBuf,
     }
 
+    /// A permanent sidecar whose OS lock serializes the complete
+    /// read-modify-write transaction. The kernel releases the lock on crash;
+    /// keeping the file avoids the stale-sentinel problem of `create_new`.
+    struct StoreLock {
+        _file: File,
+    }
+
+    impl StoreLock {
+        fn acquire(store_path: &Path) -> Result<Self, KeychainError> {
+            let path = store_path.with_extension("json.lock");
+            let io_err = |what: &str, error: std::io::Error| {
+                KeychainError::Backend(format!("{what} {}: {error}", path.display()))
+            };
+            if let Some(dir) = path.parent() {
+                make_private_dir(dir)
+                    .map_err(|error| io_err("creating the directory for", error))?;
+            }
+            let file = open_private_lock_file(&path).map_err(|error| io_err("opening", error))?;
+            file.lock().map_err(|error| io_err("locking", error))?;
+            let temporary = store_path.with_extension("json.tmp");
+            match std::fs::remove_file(&temporary) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(KeychainError::Backend(format!(
+                        "removing stale temporary store {}: {error}",
+                        temporary.display()
+                    )))
+                }
+            }
+            Ok(Self { _file: file })
+        }
+    }
+
     impl FileStore {
         /// A store at an explicit path, for tests.
         #[cfg(test)]
@@ -352,6 +391,18 @@ pub mod file {
                 "{} is not a keytap file store ({why}); move it aside to start fresh",
                 self.path.display()
             ))
+        }
+
+        /// Atomic replacement makes an unlocked read consistent. The sole
+        /// exception is a crash-leftover temp: lock once to scavenge it,
+        /// including when the first write died before publishing the store.
+        fn read_for_query(&self) -> Result<BTreeMap<String, Vec<u8>>, KeychainError> {
+            if self.path.with_extension("json.tmp").is_file() {
+                let _lock = StoreLock::acquire(&self.path)?;
+                self.read()
+            } else {
+                self.read()
+            }
         }
 
         /// Every entry in the store; an absent file is an empty store.
@@ -408,12 +459,25 @@ pub mod file {
             let json =
                 serde_json::to_string_pretty(&root).expect("a map of strings serializes");
 
+            // The transaction lock makes this fixed name unique among
+            // writers, and acquiring that lock removes a crash remnant before
+            // any new snapshot is read.
             let tmp = self.path.with_extension("json.tmp");
-            // A leftover temp file from a crash may carry stale permissions;
-            // recreating it guarantees the 0600 applies.
-            let _ = std::fs::remove_file(&tmp);
-            write_private_file(&tmp, json.as_bytes()).map_err(|e| io_err("writing", e))?;
-            std::fs::rename(&tmp, &self.path).map_err(|e| io_err("replacing", e))
+            if let Err(error) = write_private_file(&tmp, json.as_bytes()) {
+                std::fs::remove_file(&tmp).ok();
+                return Err(io_err("writing", error));
+            }
+            if let Err(error) = std::fs::rename(&tmp, &self.path) {
+                std::fs::remove_file(&tmp).ok();
+                return Err(io_err("replacing", error));
+            }
+            if let Err(error) = sync_parent(&self.path) {
+                crate::note(&format!(
+                    "warning: updated the remembered-key store at {}, but couldn't confirm its directory is durable; the update is visible now but might not survive sudden power loss: {error}",
+                    self.path.display()
+                ));
+            }
+            Ok(())
         }
     }
 
@@ -428,37 +492,67 @@ pub mod file {
         std::fs::create_dir_all(dir)
     }
 
+    fn open_private_lock_file(path: &Path) -> std::io::Result<File> {
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true).write(true).create(true).truncate(false);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        options.open(path)
+    }
+
     #[cfg(unix)]
     fn write_private_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         use std::io::Write;
         use std::os::unix::fs::OpenOptionsExt;
         let mut file = std::fs::OpenOptions::new()
             .write(true)
-            .create(true)
-            .truncate(true)
+            .create_new(true)
             .mode(0o600)
             .open(path)?;
-        file.write_all(bytes)
+        file.write_all(bytes)?;
+        file.sync_all()
     }
 
     #[cfg(not(unix))]
     fn write_private_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-        std::fs::write(path, bytes)
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)?;
+        file.write_all(bytes)?;
+        file.sync_all()
+    }
+
+    #[cfg(unix)]
+    fn sync_parent(path: &Path) -> std::io::Result<()> {
+        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        File::open(parent)?.sync_all()
+    }
+
+    #[cfg(not(unix))]
+    fn sync_parent(_path: &Path) -> std::io::Result<()> {
+        Ok(())
     }
 
     impl Keychain for FileStore {
         fn get(&self, account: &str) -> Result<Option<Zeroizing<Vec<u8>>>, KeychainError> {
-            let mut entries = self.read()?;
+            let mut entries = self.read_for_query()?;
             Ok(entries.remove(account).map(Zeroizing::new))
         }
 
         fn set(&mut self, account: &str, value: &[u8]) -> Result<(), KeychainError> {
+            let _lock = StoreLock::acquire(&self.path)?;
             let mut entries = self.read()?;
             entries.insert(account.to_string(), value.to_vec());
             self.write(&entries)
         }
 
         fn delete(&mut self, account: &str) -> Result<bool, KeychainError> {
+            let _lock = StoreLock::acquire(&self.path)?;
             let mut entries = self.read()?;
             let existed = entries.remove(account).is_some();
             if existed {
@@ -468,7 +562,7 @@ pub mod file {
         }
 
         fn accounts(&self) -> Result<Vec<String>, KeychainError> {
-            Ok(self.read()?.into_keys().collect())
+            Ok(self.read_for_query()?.into_keys().collect())
         }
     }
 
@@ -476,12 +570,43 @@ pub mod file {
     mod tests {
         use super::*;
 
+        const RACE_CHILD_PATH: &str = "KEYTAP_FILE_STORE_RACE_CHILD_PATH";
+        const RACE_CHILD_READY: &str = "KEYTAP_FILE_STORE_RACE_CHILD_READY";
+        const RACE_CHILD_OPERATION: &str = "KEYTAP_FILE_STORE_RACE_CHILD_OPERATION";
+
         /// A store under a fresh temp directory; the caller cleans up.
         fn temp_store(tag: &str) -> (PathBuf, FileStore) {
             let dir = std::env::temp_dir()
                 .join(format!("keytap-file-store-test-{}-{tag}", std::process::id()));
             let _ = std::fs::remove_dir_all(&dir);
             (dir.clone(), FileStore::at(dir.join("remembered.json")))
+        }
+
+        fn spawn_race_child(path: &Path, ready: &Path, operation: &str) -> std::process::Child {
+            std::process::Command::new(std::env::current_exe().unwrap())
+                .arg("--exact")
+                .arg(
+                    "keychain::file::tests::cross_process_update_cannot_restore_entries_deleted_while_it_waited",
+                )
+                .arg("--nocapture")
+                .env(RACE_CHILD_PATH, path)
+                .env(RACE_CHILD_READY, ready)
+                .env(RACE_CHILD_OPERATION, operation)
+                .spawn()
+                .unwrap()
+        }
+
+        fn assert_child_waits_for_lock(child: &mut std::process::Child, ready: &Path, label: &str) {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while !ready.is_file() && std::time::Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            assert!(ready.is_file(), "{label} child did not reach the update");
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            assert!(
+                child.try_wait().unwrap().is_none(),
+                "child {label} bypassed the transaction lock"
+            );
         }
 
         #[test]
@@ -526,6 +651,101 @@ pub mod file {
                 std::fs::read_to_string(store.path()).unwrap(),
                 "not json at all",
                 "a failed write must leave the original file untouched"
+            );
+
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn next_mutation_removes_a_crash_leftover_containing_keys() {
+            let (dir, mut store) = temp_store("stale-temporary");
+            store.set("remember:root:a", b"a").unwrap();
+            let temporary = store.path().with_extension("json.tmp");
+            std::fs::write(&temporary, b"raw secret from interrupted write").unwrap();
+
+            assert!(!store.delete("missing").unwrap());
+            assert!(!temporary.exists());
+
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn first_write_crash_is_discovered_and_scavenged_by_a_read_path() {
+            let (dir, store) = temp_store("first-write-crash");
+            std::fs::create_dir_all(&dir).unwrap();
+            let temporary = store.path().with_extension("json.tmp");
+            std::fs::write(&temporary, b"raw key from interrupted first write").unwrap();
+
+            let recovered = existing_at(store.path().to_path_buf()).unwrap();
+            assert!(recovered.accounts().unwrap().is_empty());
+            assert!(!temporary.exists());
+            assert!(!recovered.path().exists());
+
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn cross_process_update_cannot_restore_entries_deleted_while_it_waited() {
+            if let (Some(path), Some(ready), Some(operation)) = (
+                std::env::var_os(RACE_CHILD_PATH),
+                std::env::var_os(RACE_CHILD_READY),
+                std::env::var_os(RACE_CHILD_OPERATION),
+            ) {
+                let ready = PathBuf::from(ready);
+                std::fs::write(ready, b"ready").unwrap();
+                let mut store = FileStore::at(PathBuf::from(path));
+                match operation.to_str().unwrap() {
+                    "set" => store.set("remember:new-root:new", b"new").unwrap(),
+                    "delete" => assert!(store.delete("remember:old-root:delete-me").unwrap()),
+                    operation => panic!("unknown child operation {operation}"),
+                }
+                return;
+            }
+
+            let (dir, mut store) = temp_store("cross-process-race");
+            store.set("remember:old-root:a", b"old-a").unwrap();
+            store.set("remember:old-root:b", b"old-b").unwrap();
+
+            let lock = StoreLock::acquire(store.path()).unwrap();
+            let ready = dir.join("child-ready");
+            let mut child = spawn_race_child(store.path(), &ready, "set");
+            assert_child_waits_for_lock(&mut child, &ready, "set");
+
+            // Model init cleanup while the other process is waiting to
+            // remember under a new root. Its later update must read this
+            // committed map, not republish the stale old-root snapshot.
+            let mut entries = store.read().unwrap();
+            entries.retain(|account, _| !account.starts_with("remember:old-root:"));
+            store.write(&entries).unwrap();
+            drop(lock);
+
+            assert!(child.wait().unwrap().success());
+            assert_eq!(
+                store.accounts().unwrap(),
+                vec!["remember:new-root:new".to_string()]
+            );
+
+            // Exercise the other public mutation too: a waiting delete must
+            // base its rewrite on a competing update committed under the
+            // same lock, rather than erase that update with an old snapshot.
+            store
+                .set("remember:old-root:delete-me", b"old")
+                .unwrap();
+            let lock = StoreLock::acquire(store.path()).unwrap();
+            let mut entries = store.read().unwrap();
+            entries.insert("remember:new-root:preserved".to_string(), b"new".to_vec());
+            let ready = dir.join("delete-child-ready");
+            let mut child = spawn_race_child(store.path(), &ready, "delete");
+            assert_child_waits_for_lock(&mut child, &ready, "delete");
+            store.write(&entries).unwrap();
+            drop(lock);
+            assert!(child.wait().unwrap().success());
+            assert_eq!(
+                store.accounts().unwrap(),
+                vec![
+                    "remember:new-root:new".to_string(),
+                    "remember:new-root:preserved".to_string(),
+                ]
             );
 
             let _ = std::fs::remove_dir_all(&dir);

@@ -3,7 +3,7 @@ const encoder = new TextEncoder();
 const RID_DOMAIN = encoder.encode('keytap:rendezvous:v3\0');
 const OFFER_SIGNATURE_DOMAIN = encoder.encode('keytap:signal-offer:v3\0');
 const IDENTITY_SESSION_DOMAIN = encoder.encode('keytap:nearby-identity-session:v2\0');
-const IDENTITY_PROOF_DOMAIN = encoder.encode('keytap:nearby-identity-proof:v2\0');
+const IDENTITY_PROOF_DOMAIN = encoder.encode('keytap:nearby-identity-proof:v3\0');
 const SAS_CONTEXT_DOMAIN = encoder.encode('keytap:nearby-sas-context:v1\0');
 const SAS_COMMIT_DOMAIN = encoder.encode('keytap:nearby-sas-commit:v1\0');
 const SAS_DIGEST_DOMAIN = encoder.encode('keytap:nearby-sas-digest:v1\0');
@@ -147,16 +147,16 @@ export function nearbySasRequestBytes(request) {
     default:
       throw new ProtocolError('invalid SAS identity mode');
   }
-  let remember;
-  switch (request.remember?.kind) {
-    case 'disabled':
-      remember = new Uint8Array([0]);
+  let storage;
+  switch (request.storage) {
+    case 'choose':
+      storage = new Uint8Array([0]);
       break;
-    case 'available':
-      remember = concatBytes(new Uint8Array([1]), u64(request.remember.windowSecs));
+    case 'remember':
+      storage = new Uint8Array([1]);
       break;
     default:
-      throw new ProtocolError('invalid SAS remember mode');
+      throw new ProtocolError('invalid SAS storage policy');
   }
   return concatBytes(
     new Uint8Array([1]),
@@ -165,7 +165,7 @@ export function nearbySasRequestBytes(request) {
     lengthPrefixed(request.identitySalt),
     lengthPrefixed(encoder.encode(request.keyName)),
     identity,
-    remember,
+    storage,
   );
 }
 
@@ -278,7 +278,7 @@ export async function parseSasWordList(bytes) {
 /**
  * Canonical bytes signed by the passkey-derived nearby identity. The proof is
  * bound to the fresh QR session and to the exact credential, named PRF result,
- * key name, and submitted public identity.
+ * key name, requested storage disposition, and submitted public identity.
  */
 export function nearbyIdentityProofMessage({
   binding,
@@ -286,6 +286,7 @@ export function nearbyIdentityProofMessage({
   credentialId,
   prfFirst,
   keyName,
+  disposition,
   publicKey,
 }) {
   const bindingDigest = binding?.digest;
@@ -299,7 +300,8 @@ export function nearbyIdentityProofMessage({
       || credentialId.length < 1 || credentialId.length > 1024
       || prfFirst.length !== 32
       || publicKey.length !== 32
-      || typeof keyName !== 'string') {
+      || typeof keyName !== 'string'
+      || (disposition !== 'once' && disposition !== 'remember')) {
     throw new ProtocolError('invalid identity proof field');
   }
   const name = encoder.encode(keyName);
@@ -312,6 +314,7 @@ export function nearbyIdentityProofMessage({
     lengthPrefixed(credentialId),
     lengthPrefixed(prfFirst),
     lengthPrefixed(name),
+    new Uint8Array([disposition === 'once' ? 0 : 1]),
     lengthPrefixed(publicKey),
   );
 }

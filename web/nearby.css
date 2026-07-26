@@ -143,6 +143,10 @@ code {
   margin-top: 20px;
 }
 
+.offer .action[hidden] {
+  display: none;
+}
+
 .pairing-words {
   display: block;
   margin: 18px 0;

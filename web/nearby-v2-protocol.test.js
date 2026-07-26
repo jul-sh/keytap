@@ -70,6 +70,7 @@ test('derives a stable Ed25519 identity and signs the exact nearby result', asyn
     credentialId: new TextEncoder().encode('credential-one'),
     prfFirst: new Uint8Array(32).fill(0x11),
     keyName: 'deploy',
+    disposition: 'once',
   };
   const identitySeed = new Uint8Array(32).fill(7);
   const proof = await createNearbyIdentityProof(fields, identitySeed);
@@ -77,7 +78,7 @@ test('derives a stable Ed25519 identity and signs the exact nearby result', asyn
   assert.equal(encodeBase64URL(proof.publicKey), '6kpsY-KcUgq-9VB7Ey7F-ZVHdq6-vnuSQh7qaRRG0iw');
   assert.equal(
     encodeBase64URL(proof.signature),
-    'NVy39fNzZCAiPt1NmmwKtykd-vRk9SPzvlxnHd_Lp8smT5qNZZJ5OVvlObjz3hrsPoCVNDtZU4onn_bgPqyFDQ',
+    'IX4VUH_eU2LO8p6PHiv4TGTPuJeR2py11D2rz97nt7hCCQFAjALLRkIHXq9viryIPfek-zGZmgfFoG6cNcUJAg',
   );
   const message = nearbyIdentityProofMessage({ ...fields, publicKey: proof.publicKey });
   const publicKey = await crypto.subtle.importKey(
@@ -89,12 +90,19 @@ test('derives a stable Ed25519 identity and signs the exact nearby result', asyn
   );
   assert.equal(await crypto.subtle.verify('Ed25519', publicKey, proof.signature, message), true);
 
-  const changed = nearbyIdentityProofMessage({
+  const changedName = nearbyIdentityProofMessage({
     ...fields,
     keyName: 'production',
     publicKey: proof.publicKey,
   });
-  assert.equal(await crypto.subtle.verify('Ed25519', publicKey, proof.signature, changed), false);
+  assert.equal(await crypto.subtle.verify('Ed25519', publicKey, proof.signature, changedName), false);
+
+  const changedDisposition = nearbyIdentityProofMessage({
+    ...fields,
+    disposition: 'remember',
+    publicKey: proof.publicKey,
+  });
+  assert.equal(await crypto.subtle.verify('Ed25519', publicKey, proof.signature, changedDisposition), false);
 });
 
 test('matches the Rust commit–reveal SAS vector and pinned word list', async () => {
@@ -141,15 +149,23 @@ test('canonically binds the exact pairing request', async () => {
     identitySalt: new Uint8Array(32).fill(3),
     keyName: 'deploy',
     identity: { kind: 'pairing-credential', credentialId: new TextEncoder().encode('cred') },
-    remember: { kind: 'available', windowSecs: 60 },
+    storage: 'choose',
   };
   assert.equal(
     encodeBase64URL(nearbySasRequestBytes(request)),
-    'AQAAACABAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQAAACACAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgAAACADAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwAAAAZkZXBsb3kBAAAABGNyZWQBAAAAAAAAADw',
+    'AQAAACABAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQAAACACAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgAAACADAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwAAAAZkZXBsb3kBAAAABGNyZWQA',
   );
   assert.equal(
     encodeBase64URL(await createSasContext(new Uint8Array(32).fill(4), request)),
-    'ov2kOyVpend0ognXvoqine2hW54dYUqDikvCzmw4xqE',
+    '-ttmWQ8-kdx7xyaCzmPOpk7KNSnoYJkNBd_OwlhIxQs',
+  );
+  assert.throws(
+    () => nearbySasRequestBytes({ ...request, storage: { kind: 'choose' } }),
+    /storage policy/,
+  );
+  assert.notDeepEqual(
+    nearbySasRequestBytes(request),
+    nearbySasRequestBytes({ ...request, storage: 'remember' }),
   );
 });
 
@@ -224,4 +240,14 @@ test('the phone has no word-match confirmation control', async () => {
   assert.ok(pairing, 'pairing section must exist');
   assert.doesNotMatch(pairing, /<button|They match|match|mismatch/i);
   assert.match(pairing, /confirm them once in the terminal/i);
+});
+
+test('the storage choice is obvious, ordered, and described', async () => {
+  const html = await readFile(new URL('./nearby.html', import.meta.url), 'utf8');
+  const offer = html.match(/<section class="offer"[\s\S]*?<\/section>/)?.[0];
+  assert.ok(offer, 'storage choice section must exist');
+  assert.match(offer, /aria-labelledby="offer-heading"/);
+  assert.match(offer, /id="done-btn"[^>]*aria-describedby="offer-body offer-hint"[^>]*>Use once</);
+  assert.match(offer, /id="remember-btn"[^>]*aria-describedby="offer-body offer-hint"[^>]*>Use and remember</);
+  assert.ok(offer.indexOf('Use once') < offer.indexOf('Use and remember'));
 });

@@ -71,9 +71,6 @@ Use `keytap remember NAME` when you prefer local storage to repeated prompts.
 Pass `--nearby` to any installed command that needs a ceremony to request the
 phone flow explicitly.
 
-The nearby page can also remember the key after a second passkey approval,
-without another QR scan.
-
 ## Install
 
 ```bash
@@ -144,8 +141,9 @@ Otherwise it writes an owner-only file at
 not encrypted; treat it like an SSH private key. Any process running as you may
 be able to use remembered keys without another ceremony.
 
-Nearby auth offers the same option after a successful derivation. It requires a
-second passkey approval but reuses the connection, so there is no second scan.
+Nearby auth offers the same option before approval. Choose **Use once** to store
+nothing, or **Use and remember** to store the key on the CLI machine using that
+same passkey approval.
 
 For an expiring SSH hold, use `ssh-agent`:
 

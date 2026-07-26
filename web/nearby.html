@@ -28,14 +28,14 @@
     <section class="pairing" id="pairing" hidden>
       <h2 id="pairing-heading" tabindex="-1">Pairing words</h2>
       <output class="pairing-words" id="pairing-words" aria-label="Pairing words" aria-live="polite" tabindex="-1"></output>
-      <p>Finish the passkey step here. The result is sent to the CLI, which buffers it until you compare both words, in order, and confirm them once in the terminal that displayed the QR code.</p>
+      <p id="pairing-copy">Finish the passkey step here. The result is sent to the CLI, which buffers it until you compare both words, in order, and confirm them once in the terminal that displayed the QR code.</p>
     </section>
-    <section class="offer" id="offer" hidden>
+    <section class="offer" id="offer" aria-labelledby="offer-heading" hidden>
       <h2 id="offer-heading" tabindex="-1">Remember on that machine?</h2>
       <p id="offer-body"></p>
       <p class="hint" id="offer-hint"></p>
-      <button class="action" id="remember-btn" type="button" aria-describedby="offer-body">Remember on that machine</button>
-      <button class="action action-secondary" id="done-btn" type="button">Don’t remember</button>
+      <button class="action" id="done-btn" type="button" aria-describedby="offer-body offer-hint">Use once</button>
+      <button class="action action-secondary" id="remember-btn" type="button" aria-describedby="offer-body offer-hint">Use and remember</button>
     </section>
     <button class="action" id="start" type="button" disabled>Loading…</button>
     <p class="status" id="status" role="status" aria-live="polite" tabindex="-1"></p>
