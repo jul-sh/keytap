@@ -345,12 +345,19 @@ export class SignalSession {
       return v2Error(request, 400, "role must be cli or phone");
     }
 
-    const lifecycle = await this.beginOrJoinSignalSession();
+    const lifecycle = await this.beginOrJoinSignalSession(role);
     switch (lifecycle.kind) {
       case "expired":
         return v2Error(request, 410, "Signal session expired");
       case "active":
         break;
+    }
+
+    if (
+      role === "phone" &&
+      this.socketsForRole("cli", lifecycle.generation).length !== 1
+    ) {
+      return v2Error(request, 410, "CLI is no longer waiting");
     }
 
     if (this.socketsForRole(role, lifecycle.generation).length !== 0) {
@@ -383,7 +390,8 @@ export class SignalSession {
         attachment &&
         attachment.kind === "peer" &&
         attachment.role === role &&
-        attachment.generation === generation
+        attachment.generation === generation &&
+        socket.readyState === WebSocket.OPEN
       );
     });
   }
@@ -400,14 +408,16 @@ export class SignalSession {
   }
 
   /**
-   * Create a generation only while admitting a WebSocket. TURN requests never
-   * create sessions, so an alarmed room cannot be revived by a stale request.
+   * Only the CLI creates a generation, before it prints the QR. A phone can
+   * join that live generation but cannot revive an old link after the CLI has
+   * left. TURN requests never create sessions either.
+   * @param {SignalRole} role
    * @returns {Promise<
    *   | { kind: "active", generation: string, expiresAt: number }
    *   | { kind: "expired" }
    * >}
    */
-  async beginOrJoinSignalSession() {
+  async beginOrJoinSignalSession(role) {
     const lifecycle = parseSignalLifecycle(
       await this.state.storage.get(SIGNAL_LIFECYCLE_KEY),
     );
@@ -417,22 +427,37 @@ export class SignalSession {
           await this.expireSignalSession();
           return { kind: "expired" };
         }
+        if (
+          role === "cli" &&
+          this.socketsForRole("cli", lifecycle.generation).length === 0
+        ) {
+          // A closing CLI's delayed callback must not erase its replacement.
+          await this.expireSignalSession();
+          return this.createSignalSession();
+        }
         await this.ensureLifecycleAlarm(lifecycle.expiresAt);
         return lifecycle;
       case "invalid":
         await this.expireSignalSession();
         return { kind: "expired" };
       case "missing": {
-        const active = {
-          kind: "active",
-          generation: crypto.randomUUID(),
-          expiresAt: Date.now() + SIGNAL_SESSION_TTL_MS,
-        };
-        await this.state.storage.put(SIGNAL_LIFECYCLE_KEY, active);
-        await this.ensureLifecycleAlarm(active.expiresAt);
-        return active;
+        if (role === "phone") {
+          return { kind: "expired" };
+        }
+        return this.createSignalSession();
       }
     }
+  }
+
+  async createSignalSession() {
+    const active = {
+      kind: "active",
+      generation: crypto.randomUUID(),
+      expiresAt: Date.now() + SIGNAL_SESSION_TTL_MS,
+    };
+    await this.state.storage.put(SIGNAL_LIFECYCLE_KEY, active);
+    await this.ensureLifecycleAlarm(active.expiresAt);
+    return active;
   }
 
   /**
@@ -647,15 +672,36 @@ export class SignalSession {
     await this.state.storage.deleteAlarm();
   }
 
+  /** @param {string} generation */
+  async expireSignalGeneration(generation) {
+    const lifecycle = parseSignalLifecycle(
+      await this.state.storage.get(SIGNAL_LIFECYCLE_KEY),
+    );
+    if (lifecycle.kind !== "active" || lifecycle.generation !== generation) {
+      return;
+    }
+    await this.expireSignalSession();
+  }
+
   /** @param {WebSocket} ws */
   async webSocketClose(ws) {
-    this.notifyOtherPeerLeft(ws);
+    const attachment = ws.deserializeAttachment();
+    if (attachment?.role === "cli" && typeof attachment.generation === "string") {
+      await this.expireSignalGeneration(attachment.generation);
+    } else {
+      this.notifyOtherPeerLeft(ws);
+    }
     try { ws.close(); } catch {}
   }
 
   /** @param {WebSocket} ws */
   async webSocketError(ws) {
-    this.notifyOtherPeerLeft(ws);
+    const attachment = ws.deserializeAttachment();
+    if (attachment?.role === "cli" && typeof attachment.generation === "string") {
+      await this.expireSignalGeneration(attachment.generation);
+    } else {
+      this.notifyOtherPeerLeft(ws);
+    }
     try { ws.close(1011, "error"); } catch {}
   }
 

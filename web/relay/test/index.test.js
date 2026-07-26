@@ -27,12 +27,16 @@ class FakeSocket {
     this.attachment = { kind: "peer", role, generation, forwardedMessages: 0 };
     this.sent = [];
     this.closed = [];
+    this.readyState = WebSocket.OPEN;
   }
 
   serializeAttachment(value) { this.attachment = value; }
   deserializeAttachment() { return this.attachment; }
   send(value) { this.sent.push(value); }
-  close(...args) { this.closed.push(args); }
+  close(...args) {
+    this.closed.push(args);
+    this.readyState = WebSocket.CLOSING;
+  }
 }
 
 class FakeState {
@@ -166,17 +170,106 @@ test("a signaling room caps each role at one connected socket", async () => {
   assert.equal(await response.text(), "cli is already connected");
 });
 
-test("WebSocket admission creates and reuses one persisted session generation", async () => {
+test("only CLI admission creates and reuses a persisted session generation", async () => {
   const state = new FakeState();
   const session = new SignalSession(state, turnEnvironment());
 
-  const first = await session.beginOrJoinSignalSession();
-  const second = await session.beginOrJoinSignalSession();
+  const first = await session.beginOrJoinSignalSession("cli");
+  state.sockets.cli.push(new FakeSocket("cli", first.generation));
+  const second = await session.beginOrJoinSignalSession("cli");
 
   assert.equal(first.kind, "active");
   assert.deepEqual(second, first);
   assert.deepEqual(state.storage.values.get(LIFECYCLE_KEY), first);
   assert.equal(state.storage.alarm, first.expiresAt);
+});
+
+test("a phone cannot create a missing signaling room", async () => {
+  const state = new FakeState();
+  const session = new SignalSession(state, turnEnvironment());
+  const request = new Request(`https://relay.test/v2/signal/${RID}?role=phone`, {
+    headers: { Upgrade: "websocket" },
+  });
+
+  const response = await session.fetch(request);
+
+  assert.equal(response.status, 410);
+  assert.equal(await response.text(), "Signal session expired");
+  assert.equal(state.storage.values.has(LIFECYCLE_KEY), false);
+});
+
+test("a phone cannot join after the CLI signaling socket starts closing", async () => {
+  const state = activateState(new FakeState());
+  const cli = new FakeSocket("cli");
+  cli.readyState = WebSocket.CLOSING;
+  state.sockets.cli.push(cli);
+  const session = new SignalSession(state, turnEnvironment());
+  const request = new Request(`https://relay.test/v2/signal/${RID}?role=phone`, {
+    headers: { Upgrade: "websocket" },
+  });
+
+  const response = await session.fetch(request);
+
+  assert.equal(response.status, 410);
+  assert.equal(await response.text(), "CLI is no longer waiting");
+  assert.equal(state.sockets.phone.length, 0);
+});
+
+test("CLI departure retires its generation and closes the phone", async () => {
+  const state = readyState();
+  const session = new SignalSession(state, turnEnvironment());
+
+  await session.webSocketClose(state.sockets.cli[0]);
+
+  assert.equal(state.storage.values.size, 0);
+  assert.equal(state.storage.alarm, null);
+  assert.deepEqual(state.sockets.phone[0].closed, [[1001, "session expired"]]);
+});
+
+test("a stale CLI close cannot retire a newer generation", async () => {
+  const state = readyState("generation-b");
+  const session = new SignalSession(state, turnEnvironment());
+  const staleCli = new FakeSocket("cli", "generation-a");
+
+  await session.webSocketClose(staleCli);
+
+  assert.deepEqual(state.storage.values.get(LIFECYCLE_KEY), {
+    kind: "active",
+    generation: "generation-b",
+    expiresAt: state.storage.alarm,
+  });
+  assert.deepEqual(state.sockets.phone[0].closed, []);
+});
+
+test("replacement CLI gets a new generation before the old close arrives", async () => {
+  const state = readyState("generation-a");
+  const oldCli = state.sockets.cli[0];
+  oldCli.readyState = WebSocket.CLOSING;
+  const oldPhone = state.sockets.phone[0];
+  const session = new SignalSession(state, turnEnvironment());
+
+  const replacement = await session.beginOrJoinSignalSession("cli");
+  assert.equal(replacement.kind, "active");
+  assert.notEqual(replacement.generation, "generation-a");
+  assert.deepEqual(oldPhone.closed, [[1001, "session expired"]]);
+  const newCli = new FakeSocket("cli", replacement.generation);
+  state.sockets.cli.push(newCli);
+
+  await session.webSocketClose(oldCli);
+
+  assert.deepEqual(state.storage.values.get(LIFECYCLE_KEY), replacement);
+  assert.deepEqual(newCli.closed, []);
+});
+
+test("CLI signaling error retires its generation", async () => {
+  const state = readyState();
+  const session = new SignalSession(state, turnEnvironment());
+
+  await session.webSocketError(state.sockets.cli[0]);
+
+  assert.equal(state.storage.values.size, 0);
+  assert.equal(state.storage.alarm, null);
+  assert.deepEqual(state.sockets.phone[0].closed, [[1001, "session expired"]]);
 });
 
 test("a TURN request cannot create a missing signal session", async () => {
