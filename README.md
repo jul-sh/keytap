@@ -1,22 +1,51 @@
-# Passkeys that turn into real keys.
+# Keytap
 
 <img src="macos/keytap.icon/Assets/icon.png" width="128" alt="keytap icon" />
 
-`keytap` derives reproducible `age` identities, SSH keys, and 32-byte secrets
-from a passkey using WebAuthn PRF.
+Keytap derives reproducible `age` identities, SSH keys, and 32-byte secrets
+from a passkey using WebAuthn PRF. The same passkey and name produce the same
+key wherever that passkey is available; different names produce independent
+keys. Derived keys are not stored unless you choose `remember`.
 
-> **Pre-release:** I use Keytap for my own projects, but it is not stable yet.
-> Expect breaking changes, and do not make it the only way to recover important
-> secrets.
+> **Pre-release:** Expect breaking changes. Do not make Keytap the only way to
+> recover important secrets.
 
-Same passkey + same name = same key. Different names produce independent keys.
-By default, no derived key is stored.
+[Try the web demo](https://keytap.jul.sh). It supports key derivation; nearby
+approval, remembered keys, and CI behavior require the installed CLI.
 
-Try it without installing at [keytap.jul.sh](https://keytap.jul.sh).
+## Install
 
-The web demo shares the CLI parser and key-derivation code. Machine key
-storage, nearby approval, and CI environment-key behavior require the
-installed CLI.
+Download the matching archive from the
+[latest release](https://github.com/jul-sh/keytap/releases/latest). Releases
+support Apple silicon macOS and x86-64 Linux. On macOS, keep `Keytap.app`
+intact and put its `Contents/MacOS/keytap` executable on your `PATH`; on Linux,
+put the `keytap` binary on your `PATH`.
+
+With Nix:
+
+```bash
+nix profile install github:jul-sh/keytap
+```
+
+To verify a downloaded archive:
+
+```bash
+gh attestation verify keytap-*.zip -R jul-sh/keytap
+```
+
+## Quick start
+
+```bash
+keytap init                                # only if you do not already have a keytap passkey
+keytap public github --as ssh
+keytap encrypt backup < secret > secret.age
+keytap decrypt backup < secret.age
+```
+
+Run `keytap <command> --help` for command-specific options.
+
+<details>
+<summary>Command reference</summary>
 
 <!--HELP:BEGIN-->
 ```
@@ -52,201 +81,62 @@ Run `keytap <COMMAND> --help` for the full details of any command.
 ```
 <!--HELP:END-->
 
+</details>
 
-## How it works
+## Approval
 
-1. `keytap init` registers a passkey for `keytap.jul.sh`.
-2. A command asks that passkey for deterministic PRF output scoped to a name.
-3. `keytap` formats the resulting key material as `age`, SSH, hex, or base64.
+On macOS, commands using an existing passkey open the native prompt and print a
+forwardable approval URL at the same time; the first verified approval wins.
+Registration uses one route: `keytap init` is native, while
+`keytap init --nearby` uses a nearby device. Other platforms use nearby
+approval.
 
-Use names such as `github`, `backup`, or `deploy` for domain separation. Run
-the same command on another machine with the same passkey to reproduce the key.
-Use `keytap remember NAME` when you prefer local storage to repeated prompts.
+Nearby approval uses end-to-end encrypted WebRTC and tries direct P2P first. If
+direct connection fails, only an allowlisted passkey identity may use the
+managed relay; other identities receive a clear relay-access error.
 
-## Approval routes
+`init --nearby` has its own terminal word check. Each CLI machine's first
+nearby key request also requires comparing two words; later approval URLs for
+that machine can be forwarded and approved remotely. macOS may still ask for
+Local Network access. A stable signed release avoids repeated debug-build
+firewall identities, but does not remove that privacy prompt.
 
-- **Using an existing passkey on macOS:** keytap opens the native passkey
-  prompt and prints a forwardable approval URL at the same time. The first
-  verified approval wins; keytap closes the other route.
-- **Registration on macOS:** `keytap init` uses the native prompt;
-  `keytap init --nearby` uses a nearby device. Registration has one route so
-  two successful attempts cannot create different passkeys.
-- **Other platforms:** passkey ceremonies use a QR code and approval URL on a
-  nearby device.
+## Remembered keys and CI
 
-Nearby approval authenticates an end-to-end encrypted WebRTC connection. It
-tries direct peer-to-peer connectivity first. If that fails, an allowlisted
-passkey identity can authorize the managed relay; an identity outside the
-allowlist gets a specific error explaining why relay access is unavailable.
-Registration and nearby identity pairing are separate. `init --nearby` has a
-terminal word comparison, and the first later key request approved through the
-nearby route has one too. Complete that first nearby key request while someone
-is at the terminal. Afterward, approval URLs can be forwarded and approved
-remotely with nobody at the Mac.
+`keytap remember NAME` stores that derived key on the current machine without a
+TTL, until `forget` or passkey replacement. It uses macOS Keychain or Linux
+Secret Service when available; the fallback is an owner-only, unencrypted state
+file. Treat remembered keys like private keys. **Use once** skips storing the
+named key, but nearby pairing metadata is still retained.
 
-On macOS, direct P2P can trigger Local Network privacy once per user; signing
-does not remove that prompt. A stable Developer ID release normally avoids the
-repeated Application Firewall prompts caused by rebuilding an ad-hoc-signed
-debug binary. “Find and connect to devices on your local network” is the Local
-Network alert; “accept incoming network connections” is the Application
-Firewall alert.
-
-## Install
+By default, Keytap does not open an interactive ceremony when `$CI` is set. Set
+`KEYTAP_KEY_<NAME>` to `keytap reveal <name> --as age` output; names are
+uppercased and non-alphanumeric characters become `_`.
 
 ```bash
-case "$(uname -s)/$(uname -m)" in
-  Darwin/arm64) ASSET='arm64.zip' ;;
-  Linux/x86_64) ASSET='linux-x86_64.zip' ;;
-  *) echo 'Keytap has no release for this platform.' >&2; exit 1 ;;
-esac
-URL=$(curl -fsSL https://api.github.com/repos/jul-sh/keytap/releases/latest \
-  | grep -o '"browser_download_url": *"[^"]*"' | cut -d '"' -f 4 \
-  | grep "$ASSET$") \
-  && curl -fLO "$URL" && mkdir -p ~/.local/bin \
-  && if [ "$(uname -s)" = Darwin ]; then
-       mkdir -p ~/.local/share/keytap && unzip -o keytap-*-arm64.zip -d ~/.local/share/keytap \
-       && ln -sf ~/.local/share/keytap/Keytap.app/Contents/MacOS/keytap ~/.local/bin/keytap
-     else
-       unzip -o keytap-*-linux-x86_64.zip keytap -d ~/.local/bin
-     fi
+keytap reveal ci --as age | gh secret set KEYTAP_KEY_CI
 ```
 
-Releases are built in CI with [build attestation](https://docs.github.com/en/actions/security-for-github-actions/using-artifact-attestations).
-To verify a downloaded release was built from this repository:
+Leaking that value permanently compromises the named key; retire the name.
 
-```bash
-gh attestation verify keytap-*.zip -R jul-sh/keytap
-```
+## Security
+
+Keytap is a convenience tool, not a high-assurance key manager. You trust your
+passkey provider, WebAuthn PRF, and the `keytap.jul.sh` relying party.
+
+- Losing the passkey can make every derived key unrecoverable; replacing it
+  creates a different set of keys. Keep another recovery path.
+- Anything receiving private output receives the key and must be trusted.
+- Key names provide domain separation, not secrecy.
+- Protect forwarded approval URLs from substitution. Anyone with the URL can
+  observe request metadata, race approval, or deny service; the URL alone
+  cannot forge the waiting CLI or authorize relay access. The approval page
+  sees PRF-derived and nearby identity material.
 
 ## Guides
 
 - [Share an encrypted `.env` through Git with multiple developers](docs/team-env.md)
 - [Deploy Cloudflare signaling and allowlisted TURN](docs/turn.md)
-
-## Security
-
-`keytap` is a convenience tool, not a high-assurance key manager. You trust your
-passkey provider, WebAuthn PRF, and the `keytap.jul.sh` relying party.
-
-- By default, keys are derived on demand, written to stdout, and not stored.
-- Anything receiving stdout receives the key and must be trusted.
-- `remember` stores a named key locally and lets processes running as you use it
-  without another ceremony.
-- Replacing the passkey changes every derived key and clears remembered keys.
-- Key names and PRF inputs provide domain separation, not secrecy.
-
-For stronger isolation, use per-device SSH keys or hardware-backed tools such
-as [FIDO2 SSH keys](https://developers.yubico.com/SSH/Securing_git_with_SSH_and_FIDO2.html),
-[`age-keygen`](https://github.com/FiloSottile/age), or
-[`age-plugin-yubikey`](https://github.com/str4d/age-plugin-yubikey).
-
-### Nearby approval
-
-- **Protect the nearby link when forwarding it.** A substituted URL can send
-  the approved result to a different CLI. Anyone who sees the real link can
-  observe request metadata, race the intended approver, or deny service. The
-  link alone cannot forge the waiting CLI or authorize relay access.
-- **Trust the approval page.** It sees the PRF outputs and nearby identity seed.
-
-## Skipping repeated prompts
-
-`keytap remember` stores one named key on the current machine. It has no TTL;
-the key stays until you forget it or replace the passkey.
-
-```bash
-keytap remember deploy      # one ceremony; 'deploy' stops prompting on this machine
-keytap reveal deploy        # instant, no prompt
-keytap remembered           # list remembered names (never key material)
-keytap forget deploy        # back to prompting; or: keytap forget --all
-```
-
-`remember` uses macOS Keychain or desktop Linux Secret Service when available.
-Otherwise it writes an owner-only file at
-`~/.local/state/keytap/remembered.json` (honoring `$XDG_STATE_HOME`). The file is
-not encrypted; treat it like an SSH private key. Any process running as you may
-be able to use remembered keys without another ceremony.
-
-Nearby auth offers the same option before approval. Choose **Use once** not to
-store the named derived key, or **Use and remember** to store it on the CLI
-machine using that same passkey approval.
-
-For an expiring SSH hold, use `ssh-agent`:
-
-```bash
-eval "$(ssh-agent -s)"
-keytap reveal ha --as ssh | ssh-add -t 900 -   # one auth, 15-minute hold
-```
-
-For reuse within one script, keep the key in a variable and clear it afterward:
-
-```bash
-KEY=$(keytap reveal deploy --as hex)
-use "$KEY"; use "$KEY"
-unset KEY
-```
-
-Whatever holds the key must be trusted.
-
-## CI
-
-Under `$CI`, `keytap` refuses to start an interactive ceremony. Provide each
-derived key through an environment variable instead:
-
-```bash
-# once, on a machine with the passkey
-keytap reveal ci --as age | gh secret set KEYTAP_KEY_CI
-```
-
-```yaml
-# in the job: the same commands as on your machine, no branching
-env:
-  KEYTAP_KEY_CI: ${{ secrets.KEYTAP_KEY_CI }}
-steps:
-  - run: keytap decrypt ci < secrets/api-token.age
-```
-
-- The value must be `keytap reveal <name> --as age` output.
-- The variable is `KEYTAP_KEY_` plus the uppercased name, with non-alphanumeric
-  characters replaced by `_` (`my-app` → `KEYTAP_KEY_MY_APP`).
-- A present variable wins over remembered keys and ceremonies. Invalid or empty
-  values fail instead of falling back to a prompt.
-- A leaked value compromises that name permanently; retire the name. It does
-  not reveal the passkey root or keys under other names.
-
-Use `--prompt` only when someone will approve either the native prompt or the
-forwarded nearby URL.
-
-## Tips
-
-### Streaming
-
-`encrypt` and `decrypt` stream stdin to stdout:
-
-```bash
-printf '%s' "$SECRET" | keytap encrypt backup > secret.age   # stdin → stdout
-keytap decrypt backup < secret.age | load-into-env           # → a consumer, no temp file
-```
-
-### Use with the `age` CLI
-
-Derived keys also work with the regular `age` CLI:
-
-```bash
-echo "secret" | age -r "$(keytap public notes --as age)" > secret.age
-age -d -i <(keytap reveal notes --as age) secret.age
-```
-
-### Nix flake
-
-```nix
-{
-  inputs.keytap.url = "github:jul-sh/keytap";
-
-  outputs = { keytap, ... }: {
-    # add keytap.packages.${system}.default to your buildInputs
-  };
-}
-```
 
 ## License
 
