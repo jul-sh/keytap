@@ -17,7 +17,9 @@
     }
   ],
   "exports": {
-    "RelayRoom": { "type": "durable-object", "storage": "sqlite" }
+    "RelayRoom": { "type": "durable-object", "storage": "sqlite" },
+    "RelaySession": { "type": "durable-object", "state": "deleted" },
+    "SignalSession": { "type": "durable-object", "state": "deleted" }
   },
   "observability": {
     "enabled": true

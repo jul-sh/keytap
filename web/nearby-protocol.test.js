@@ -33,7 +33,7 @@ const APPROVER_INFO = encoder.encode('keytap:relay-key:v1\0approver-to-cli');
 const BOX_DOMAIN = encoder.encode('keytap:relay-box:v1\0');
 const CLI_DIRECTION = encoder.encode('CLI\0');
 const APPROVER_DIRECTION = encoder.encode('APP\0');
-const IDENTITY_PROOF_DOMAIN = encoder.encode('keytap:nearby-identity-proof:v1\0');
+const IDENTITY_PROOF_DOMAIN = encoder.encode('keytap:nearby-identity-proof:v4\0');
 const REGISTRATION_IDENTITY_PROOF_DOMAIN = encoder.encode(
   'keytap:nearby-registration-identity-proof:v1\0',
 );

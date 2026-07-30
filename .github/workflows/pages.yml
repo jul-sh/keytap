@@ -1,35 +1,43 @@
-name: Deploy Pages
+name: Deploy Worker and Pages
 
 on:
-  push:
-    branches:
-      - main
-    paths:
-      - .github/workflows/pages.yml
-      - .well-known/**
-      - web/*
-      - '!web/*.test.js'
-      - '!web/package.json'
-      - web/fonts/**
-      - web/wasm/**
-      - core/**
-      - Cargo.toml
-      - Cargo.lock
-      # The terminal's wasm build compiles the CLI spec (parser + help text).
-      - cli/spec/**
-  workflow_dispatch:
+  workflow_call:
+    secrets:
+      AGE_SECRET_KEY:
+        required: true
 
 permissions:
   contents: read
   pages: write
   id-token: write
 
-concurrency:
-  group: pages
-  cancel-in-progress: true
-
 jobs:
-  deploy:
+  worker:
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - uses: cachix/install-nix-action@51f3067b56fe8ae331890c77d4e454f6d60615ff # v31
+
+      - name: Decrypt Cloudflare API token
+        run: |
+          nix profile install nixpkgs#age
+          CLOUDFLARE_API_TOKEN=$(echo "$AGE_SECRET_KEY" | age -d -i - distribution/secrets/CLOUDFLARE_API_TOKEN.age)
+          echo "::add-mask::$CLOUDFLARE_API_TOKEN"
+          echo "CLOUDFLARE_API_TOKEN=$CLOUDFLARE_API_TOKEN" >> "$GITHUB_ENV"
+        env:
+          AGE_SECRET_KEY: ${{ secrets.AGE_SECRET_KEY }}
+
+      - name: Deploy relay Worker
+        working-directory: web/relay
+        run: npx --yes wrangler@4.115.0 deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ env.CLOUDFLARE_API_TOKEN }}
+
+  pages:
+    needs: worker
     runs-on: ubuntu-latest
     environment:
       name: github-pages

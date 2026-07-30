@@ -21,5 +21,5 @@ npx --yes wrangler@4.115.0 deploy
 
 If the deployment uses another hostname, set that origin in the CLI and
 approval page and allow its WebSocket URL in the page's Content Security
-Policy. The `Deploy Relay Worker` workflow performs the same deployment for
-this repository.
+Policy. The production workflows deploy the Worker, then Pages, before
+publishing a release.

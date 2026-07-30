@@ -50,7 +50,7 @@ fn initialized_state_dir(tag: &str) -> std::path::PathBuf {
     std::fs::create_dir_all(dir.join("keytap")).unwrap();
     std::fs::write(
         dir.join("keytap/nearby-identity.json"),
-        r#"{"format":"keytap-nearby-identity-v1","identity":{"kind":"credential","credentialId":"ABEiM0RVZneImaq7zN3u_w"}}"#,
+        r#"{"format":"keytap-nearby-identity-v3","identity":{"kind":"credential","credentialId":"ABEiM0RVZneImaq7zN3u_w"}}"#,
     )
     .unwrap();
     dir

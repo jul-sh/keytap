@@ -17,9 +17,9 @@ use std::path::{Path, PathBuf};
 
 use crate::nearby_sas::ConfirmedComparison;
 
-const FORMAT: &str = "keytap-nearby-identity-v1";
+const FORMAT: &str = "keytap-nearby-identity-v3";
 const PRF_SALT_CONTEXT: &[u8] = b"keytap:nearby-identity-prf:v1";
-const PROOF_DOMAIN: &[u8] = b"keytap:nearby-identity-proof:v1\0";
+const PROOF_DOMAIN: &[u8] = b"keytap:nearby-identity-proof:v4\0";
 const REGISTRATION_PROOF_DOMAIN: &[u8] = b"keytap:nearby-registration-identity-proof:v1\0";
 
 enum PairingState {
@@ -1286,7 +1286,7 @@ mod tests {
     fn identity_file_rejects_unknown_top_level_fields() {
         let path = Path::new("nearby-identity.json");
         let bytes = br#"{
-            "format": "keytap-nearby-identity-v1",
+            "format": "keytap-nearby-identity-v3",
             "identity": {
                 "kind": "credential",
                 "credentialId": "Y3JlZGVudGlhbA"
@@ -1301,7 +1301,7 @@ mod tests {
     fn identity_file_rejects_unknown_variant_fields() {
         let path = Path::new("nearby-identity.json");
         let bytes = br#"{
-            "format": "keytap-nearby-identity-v1",
+            "format": "keytap-nearby-identity-v3",
             "identity": {
                 "kind": "credential",
                 "credentialId": "Y3JlZGVudGlhbA",
@@ -1793,7 +1793,7 @@ mod tests {
         );
         assert_eq!(
             URL_SAFE_NO_PAD.encode(proof.signature),
-            "FI5i8E_aJfYVyMSx4mLpyNlkxeShIynByHP6uw_Ynw7E6qMidgretZF9y-lDgXep-ulV4cxDeNBYTwlkdWX6BQ"
+            "PYgkMisxDZMDucil0AhET2g5G7Ei2y_qvvBffVgrj0avbVMSXa2l6miyBkFBcHRMkXsCT8Dk5pTaA-OLTRwMDA"
         );
 
         let registration = signed_registration_proof([7; 32], b"credential-one");

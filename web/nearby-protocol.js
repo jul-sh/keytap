@@ -12,7 +12,7 @@ const APPROVER_DIRECTION = encoder.encode('APP\0');
 const SAS_CONTEXT_DOMAIN = encoder.encode('keytap:nearby-sas-context:v1\0');
 const SAS_COMMIT_DOMAIN = encoder.encode('keytap:nearby-sas-commit:v1\0');
 const SAS_DIGEST_DOMAIN = encoder.encode('keytap:nearby-sas-digest:v1\0');
-const IDENTITY_PROOF_DOMAIN = encoder.encode('keytap:nearby-identity-proof:v1\0');
+const IDENTITY_PROOF_DOMAIN = encoder.encode('keytap:nearby-identity-proof:v4\0');
 const REGISTRATION_IDENTITY_PROOF_DOMAIN = encoder.encode(
   'keytap:nearby-registration-identity-proof:v1\0',
 );
