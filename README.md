@@ -13,40 +13,6 @@ keys. Derived keys are not stored unless you choose `remember`.
 [Try the web demo](https://keytap.jul.sh). It supports key derivation; nearby
 approval, remembered keys, and CI behavior require the installed CLI.
 
-## Install
-
-Download the matching archive from the
-[latest release](https://github.com/jul-sh/keytap/releases/latest). Releases
-support Apple silicon macOS and x86-64 Linux. On macOS, keep `Keytap.app`
-intact and put its `Contents/MacOS/keytap` executable on your `PATH`; on Linux,
-put the `keytap` binary on your `PATH`.
-
-With Nix:
-
-```bash
-nix profile install github:jul-sh/keytap
-```
-
-To verify a downloaded archive:
-
-```bash
-gh attestation verify keytap-*.zip -R jul-sh/keytap
-```
-
-## Quick start
-
-```bash
-keytap init                                # only if you do not already have a keytap passkey
-keytap public github --as ssh
-keytap encrypt backup < secret > secret.age
-keytap decrypt backup < secret.age
-```
-
-Run `keytap <command> --help` for command-specific options.
-
-<details>
-<summary>Command reference</summary>
-
 <!--HELP:BEGIN-->
 ```
 Derive keys and encrypt files from a passkey.
@@ -81,7 +47,25 @@ Run `keytap <COMMAND> --help` for the full details of any command.
 ```
 <!--HELP:END-->
 
-</details>
+## Install
+
+Download the matching archive from the
+[latest release](https://github.com/jul-sh/keytap/releases/latest). Releases
+support Apple silicon macOS and x86-64 Linux. On macOS, keep `Keytap.app`
+intact and put its `Contents/MacOS/keytap` executable on your `PATH`; on Linux,
+put the `keytap` binary on your `PATH`.
+
+With Nix:
+
+```bash
+nix profile install github:jul-sh/keytap
+```
+
+To verify a downloaded archive:
+
+```bash
+gh attestation verify keytap-*.zip -R jul-sh/keytap
+```
 
 ## Approval
 
