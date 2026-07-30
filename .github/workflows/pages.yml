@@ -7,8 +7,14 @@ on:
     paths:
       - .github/workflows/pages.yml
       - .well-known/**
-      - web/**
+      - web/*
+      - '!web/*.test.js'
+      - '!web/package.json'
+      - web/fonts/**
+      - web/wasm/**
       - core/**
+      - Cargo.toml
+      - Cargo.lock
       # The terminal's wasm build compiles the CLI spec (parser + help text).
       - cli/spec/**
   workflow_dispatch:
@@ -42,7 +48,9 @@ jobs:
           mkdir -p _site/.well-known
           cp .well-known/apple-app-site-association _site/.well-known/
           cp web/CNAME _site/
-          cp web/*.html web/*.js web/*.css web/*.png web/*.txt _site/ 2>/dev/null || true
+          find web -maxdepth 1 -type f \
+            \( -name '*.html' -o -name '*.js' -o -name '*.css' -o -name '*.png' -o -name '*.txt' \) \
+            ! -name '*.test.js' -exec cp {} _site/ \;
           test -s _site/nearby-sas-words.txt
           cp -r web/fonts _site/fonts
           cp -r web/pkg _site/pkg

@@ -32,15 +32,7 @@ if [ -z "$TOKEN" ]; then
     exit 1
 fi
 
-# Build recipient args
-RECIPIENT_ARGS=""
-while IFS= read -r line; do
-    line="$(echo "$line" | sed 's/#.*//' | xargs)"
-    [ -z "$line" ] && continue
-    RECIPIENT_ARGS="$RECIPIENT_ARGS -r $line"
-done < "$RECIPIENTS"
-
-printf '%s' "$TOKEN" | age $RECIPIENT_ARGS -o "$OUTPUT"
+printf '%s' "$TOKEN" | age -R "$RECIPIENTS" -o "$OUTPUT"
 
 echo "Encrypted token saved to $OUTPUT"
 echo "To decrypt: age -d -i <key-file> $OUTPUT"

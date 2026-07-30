@@ -6,17 +6,13 @@ set -euo pipefail
 BUNDLE="${1:?Usage: notarize.sh <bundle>}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-AGE_KEY=$("$SCRIPT_DIR/get-age-key.sh") || { echo "Notarization skipped (secrets unavailable)"; exit 0; }
-
 TMPDIR_TK=$(mktemp -d)
 trap 'rm -rf "$TMPDIR_TK"' EXIT
 
-printf '%s' "$AGE_KEY" > "$TMPDIR_TK/age-key.txt"
-age -d -i "$TMPDIR_TK/age-key.txt" "$SCRIPT_DIR/secrets/NOTARY_KEY_BASE64.age" \
+NOTARY_KEY_ID=$("$SCRIPT_DIR/read-secret.sh" NOTARY_KEY_ID)
+NOTARY_ISSUER_ID=$("$SCRIPT_DIR/read-secret.sh" NOTARY_ISSUER_ID)
+"$SCRIPT_DIR/read-secret.sh" NOTARY_KEY_BASE64 \
   | base64 --decode > "$TMPDIR_TK/auth_key.p8"
-NOTARY_KEY_ID=$(age -d -i "$TMPDIR_TK/age-key.txt" "$SCRIPT_DIR/secrets/NOTARY_KEY_ID.age")
-NOTARY_ISSUER_ID=$(age -d -i "$TMPDIR_TK/age-key.txt" "$SCRIPT_DIR/secrets/NOTARY_ISSUER_ID.age")
-rm -f "$TMPDIR_TK/age-key.txt"
 
 ditto -c -k --keepParent "$BUNDLE" "$TMPDIR_TK/notarize.zip"
 

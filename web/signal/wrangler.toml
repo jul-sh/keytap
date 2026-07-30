@@ -1,0 +1,15 @@
+name = "keytap-signal"
+main = "src/index.js"
+compatibility_date = "2026-07-29"
+account_id = "28fb983f1661b4931e2ceec7f9a0b8c2"
+
+[secrets]
+required = ["TURN_KEY_ID", "TURN_KEY_API_TOKEN"]
+
+[[durable_objects.bindings]]
+name = "SIGNAL_SESSION"
+class_name = "SignalSession"
+
+[exports.SignalSession]
+type = "durable-object"
+storage = "sqlite"

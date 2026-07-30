@@ -1,3 +1,5 @@
+#[cfg(any(target_os = "macos", test))]
+mod approval;
 mod encrypt;
 mod env_keys;
 mod keychain;
@@ -8,6 +10,8 @@ mod nearby_sas;
 mod remember;
 
 use keytap_cli_spec::{Command, Invocation};
+#[cfg(target_os = "macos")]
+use std::sync::{mpsc, Arc};
 use zeroize::Zeroizing;
 
 fn main() {
@@ -24,13 +28,8 @@ fn main() {
         Invocation::Parsed(Ok(cli)) => cli,
     };
 
-    let ceremony = match cli.nearby {
-        true => Ceremony::Nearby,
-        false => Ceremony::Automatic,
-    };
-
     match cli.command {
-        Command::Init { force } => {
+        Command::Init { force, nearby } => {
             guard_ceremony("init", cli.prompt);
             let init_mode = if force {
                 nearby_identity::InitMode::Replace
@@ -39,29 +38,35 @@ fn main() {
             };
             let pending_init = nearby_identity::prepare_init(init_mode).unwrap_or_else(|error| {
                 die(&format!(
-                    "could not prepare the nearby identity update: {error}"
+                    "could not prepare the local credential record update: {error}"
                 ))
             });
-            register(pending_init, ceremony);
+            let route = registration_route(nearby);
+            register(pending_init, route);
             remember::after_init();
         }
         Command::Public { ref name, format } => {
-            with_derived_key(name, cli.prompt, ceremony, |raw_key| {
+            with_derived_key(name, cli.prompt, |raw_key| {
                 emit_public_key(raw_key, format, name)
             });
         }
         Command::Reveal { ref name, format } => {
-            with_derived_key(name, cli.prompt, ceremony, |raw_key| {
+            with_derived_key(name, cli.prompt, |raw_key| {
                 emit_private_key(raw_key, format)
             });
         }
-        Command::Encrypt { ref name, ref recipients, ref recipients_file, no_self } => {
-            with_derived_key(name, cli.prompt, ceremony, |raw_key| {
+        Command::Encrypt {
+            ref name,
+            ref recipients,
+            ref recipients_file,
+            no_self,
+        } => {
+            with_derived_key(name, cli.prompt, |raw_key| {
                 encrypt::encrypt(raw_key, recipients, recipients_file, !no_self)
             });
         }
         Command::Decrypt { ref name } => {
-            with_derived_key(name, cli.prompt, ceremony, |raw_key| encrypt::decrypt(raw_key));
+            with_derived_key(name, cli.prompt, encrypt::decrypt);
         }
         Command::Remember { ref name } => {
             // Fail fast on invalid names or unavailable local storage before
@@ -71,7 +76,7 @@ fn main() {
             }
             guard_ceremony("remember", cli.prompt);
             let mut target = remember::write_target();
-            let assertion = authenticate(name, nearby::StoragePolicy::Remember, ceremony);
+            let assertion = authenticate(name, nearby::StoragePolicy::Remember);
             match assertion.storage {
                 nearby::StorageOutcome::Once => {
                     let raw_key = derive_key(&assertion.prf_output);
@@ -100,15 +105,13 @@ fn main() {
 /// ceremony, deriving on demand. Under `$CI` the ceremony rung is refused
 /// unless `--prompt` asks for it.
 ///
-/// Nothing is stored unless the user chooses it on the nearby page. That
-/// choice is carried by the single authenticated assertion and settles before
-/// this function receives the result, so there is no post-output wait.
-fn with_derived_key(
-    name: &str,
-    allow_prompt: bool,
-    ceremony: Ceremony,
-    use_key: impl FnOnce(&[u8]),
-) {
+/// The named derived key is retained only when the user explicitly chooses to
+/// remember it. First approval may still establish the local credential record
+/// used to constrain later passkey ceremonies.
+fn with_derived_key(name: &str, allow_prompt: bool, use_key: impl FnOnce(&[u8])) {
+    if let Err(error) = keytap_core::prf_salt_for_name(name) {
+        die(&error.to_string());
+    }
     if let Some(raw_key) = env_keys::resolve(name) {
         return use_key(&raw_key);
     }
@@ -120,11 +123,11 @@ fn with_derived_key(
             "$CI is set and there is no key for '{name}': refusing to start a passkey ceremony \
              (it would hang this job). Set ${var} to the output of \
              `keytap reveal {name} --as age`, or pass --prompt to run the ceremony anyway \
-             (the QR code lands in the job log).",
+             (the approval URL lands in the job log).",
             var = env_keys::var_name(name)
         ));
     }
-    let assertion = authenticate(name, nearby::StoragePolicy::Choose, ceremony);
+    let assertion = authenticate(name, nearby::StoragePolicy::Choose);
     let raw_key = derive_key(&assertion.prf_output);
     use_key(&raw_key);
 }
@@ -135,8 +138,7 @@ fn guard_ceremony(command: &str, allow_prompt: bool) {
     if in_ci() && !allow_prompt {
         die(&format!(
             "$CI is set: refusing to start the passkey ceremony `keytap {command}` needs \
-             (it would hang this job). Pass --prompt to run it anyway \
-             (the QR code lands in the job log)."
+             (it would hang this job). Pass --prompt to run it anyway."
         ));
     }
 }
@@ -147,12 +149,31 @@ fn in_ci() -> bool {
     std::env::var("CI").is_ok_and(|v| !v.is_empty() && v != "false" && v != "0")
 }
 
-/// How to reach WebAuthn once a ceremony is actually needed. Environment and
-/// remembered keys are resolved before this choice matters.
+/// Registration is deliberately single-route. Creating two credentials in
+/// parallel cannot be rolled back safely if both authenticators finish.
 #[derive(Clone, Copy)]
-enum Ceremony {
-    Automatic,
+enum RegistrationRoute {
+    #[cfg(target_os = "macos")]
+    Native,
     Nearby,
+}
+
+fn registration_route(nearby_requested: bool) -> RegistrationRoute {
+    if nearby_requested {
+        RegistrationRoute::Nearby
+    } else {
+        default_registration_route()
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn default_registration_route() -> RegistrationRoute {
+    RegistrationRoute::Native
+}
+
+#[cfg(not(target_os = "macos"))]
+fn default_registration_route() -> RegistrationRoute {
+    RegistrationRoute::Nearby
 }
 
 /// A completed passkey ceremony: the PRF output plus the ID of the credential
@@ -164,13 +185,26 @@ struct Assertion {
 }
 
 impl Assertion {
-    #[cfg(feature = "native-passkey")]
-    fn native(prf_output: Vec<u8>, credential_id: Vec<u8>) -> Self {
-        Assertion {
-            prf_output: Zeroizing::new(prf_output),
+    #[cfg(any(target_os = "macos", test))]
+    fn native(prf_output: Vec<u8>, credential_id: Vec<u8>) -> Result<Self, String> {
+        let prf_output = Zeroizing::new(prf_output);
+        if prf_output.len() != 32 {
+            return Err(format!(
+                "native passkey provider returned {} bytes of PRF output; expected 32",
+                prf_output.len()
+            ));
+        }
+        if credential_id.is_empty() || credential_id.len() > 1024 {
+            return Err(format!(
+                "native passkey provider returned a credential ID of {} bytes; expected 1 to 1024",
+                credential_id.len()
+            ));
+        }
+        Ok(Assertion {
+            prf_output,
             credential_id,
             storage: nearby::StorageOutcome::Once,
-        }
+        })
     }
 
     fn nearby(assertion: nearby::NearbyAssertion) -> Self {
@@ -182,41 +216,196 @@ impl Assertion {
     }
 }
 
-/// Authenticate with a passkey ceremony.
-#[cfg(feature = "native-passkey")]
-fn authenticate(
-    name: &str,
-    storage_policy: nearby::StoragePolicy,
-    ceremony: Ceremony,
-) -> Assertion {
-    if let Ceremony::Nearby = ceremony {
-        return Assertion::nearby(nearby::authenticate_nearby(name, storage_policy));
-    }
-    match keytap_macos::assert(name) {
-        keytap_macos::AssertionOutcome::Success { prf_output, credential_id } => {
-            Assertion::native(prf_output, credential_id)
-        }
-        keytap_macos::AssertionOutcome::Error(msg) if msg == "cancelled" => {
-            die(&msg);
-        }
-        keytap_macos::AssertionOutcome::Error(msg) => {
-            eprintln!("Couldn't open native passkey flow: {msg}");
-            Assertion::nearby(nearby::authenticate_nearby(name, storage_policy))
-        }
+#[cfg(test)]
+mod assertion_candidate_tests {
+    use super::Assertion;
+
+    #[test]
+    fn native_candidate_is_bounded_before_it_can_claim_the_race() {
+        assert!(Assertion::native(vec![7; 32], vec![9; 20]).is_ok());
+        assert!(Assertion::native(vec![7; 31], vec![9; 20]).is_err());
+        assert!(Assertion::native(vec![7; 32], Vec::new()).is_err());
+        assert!(Assertion::native(vec![7; 32], vec![9; 1025]).is_err());
     }
 }
 
-#[cfg(not(feature = "native-passkey"))]
-fn authenticate(
-    name: &str,
-    storage_policy: nearby::StoragePolicy,
-    ceremony: Ceremony,
-) -> Assertion {
-    match ceremony {
-        Ceremony::Automatic | Ceremony::Nearby => {
-            Assertion::nearby(nearby::authenticate_nearby(name, storage_policy))
-        }
+/// Authenticate with a passkey ceremony.
+#[cfg(target_os = "macos")]
+fn authenticate(name: &str, storage_policy: nearby::StoragePolicy) -> Assertion {
+    use approval::{ApprovalRace, ApprovalRoute, ClaimOutcome};
+
+    enum NearbyWorkerOutcome {
+        Committed(nearby::NearbyAssertion),
+        CommitFailed(String),
+        Failed(String),
+        SupersededByNative,
     }
+
+    enum NearbyWorkerEvent {
+        InvitationShown,
+        Finished(NearbyWorkerOutcome),
+    }
+
+    enum NearbyStartup {
+        InvitationShown,
+        Finished(NearbyWorkerOutcome),
+    }
+
+    let native_authority = nearby_identity::native_assertion_authority()
+        .unwrap_or_else(|error| die(&format!("could not load the local passkey record: {error}")));
+    let race = Arc::new(ApprovalRace::pending());
+    let nearby_cancellation = nearby::NearbyCancellation::new();
+    let native_credential = match &native_authority {
+        nearby_identity::NativeAssertionAuthority::New(_) => {
+            keytap_macos::AssertionCredential::Discoverable
+        }
+        nearby_identity::NativeAssertionAuthority::Existing(authority) => {
+            keytap_macos::AssertionCredential::Constrained {
+                credential_id: authority.credential_id().to_vec(),
+            }
+        }
+    };
+    let native_prf_salt = keytap_core::prf_salt_for_name(name)
+        .expect("authenticate is called only after validating the key name")
+        .try_into()
+        .expect("keytap PRF salts are always 32 bytes");
+    let native_operation =
+        keytap_macos::AssertionOperation::new(native_prf_salt, native_credential);
+    let native_cancellation = native_operation.cancellation_handle();
+    let (nearby_tx, nearby_rx) = mpsc::sync_channel(1);
+    let nearby_name = name.to_string();
+    let nearby_race = Arc::clone(&race);
+    let worker_cancellation = nearby_cancellation.clone();
+    std::thread::Builder::new()
+        .name("keytap-nearby-approval".into())
+        .spawn(move || {
+            let invitation_tx = nearby_tx.clone();
+            let prepared = nearby::prepare_nearby_assertion(
+                &nearby_name,
+                storage_policy,
+                worker_cancellation.clone(),
+                move || {
+                    invitation_tx.send(NearbyWorkerEvent::InvitationShown).ok();
+                },
+            );
+            let outcome = match prepared {
+                Ok(prepared) => match nearby_race.claim(ApprovalRoute::Nearby) {
+                    ClaimOutcome::Claimed => {
+                        worker_cancellation.finish();
+                        native_cancellation.cancel();
+                        match prepared.commit() {
+                            Ok(assertion) => NearbyWorkerOutcome::Committed(assertion),
+                            Err(error) => NearbyWorkerOutcome::CommitFailed(error),
+                        }
+                    }
+                    ClaimOutcome::Lost => {
+                        prepared.supersede();
+                        worker_cancellation.retire_superseded_url();
+                        NearbyWorkerOutcome::SupersededByNative
+                    }
+                },
+                Err(error) => NearbyWorkerOutcome::Failed(error),
+            };
+            nearby_tx.send(NearbyWorkerEvent::Finished(outcome)).ok();
+        })
+        .unwrap_or_else(|error| die(&format!("could not start nearby approval: {error}")));
+
+    // Do not open the native sheet until stderr contains the complete URL an
+    // unattended agent can forward. Local setup failures are retained while
+    // the still-usable native route proceeds.
+    let nearby_startup = match nearby_rx.recv() {
+        Ok(NearbyWorkerEvent::InvitationShown) => NearbyStartup::InvitationShown,
+        Ok(NearbyWorkerEvent::Finished(outcome)) => NearbyStartup::Finished(outcome),
+        Err(_) => NearbyStartup::Finished(NearbyWorkerOutcome::Failed(
+            "nearby approval stopped before showing its URL".into(),
+        )),
+    };
+    let native_outcome = native_operation.run();
+    let native_failure = match native_outcome {
+        keytap_macos::AssertionOutcome::Success {
+            prf_output,
+            credential_id,
+        } => match Assertion::native(prf_output, credential_id) {
+            Ok(assertion) => match native_authority.prepare(&assertion.credential_id) {
+                Ok(prepared) => match race.claim(ApprovalRoute::Native) {
+                    ClaimOutcome::Claimed => {
+                        if let Err(error) = prepared.commit() {
+                            nearby_cancellation.supersede();
+                            die(&format!(
+                                "native approval won, but its local passkey record could not be committed: {error}"
+                            ));
+                        }
+                        nearby_cancellation.supersede();
+                        match &nearby_startup {
+                            NearbyStartup::Finished(NearbyWorkerOutcome::Failed(error)) => {
+                                note(&format!("Nearby approval was unavailable ({error})."));
+                                note("Approved on this Mac.");
+                            }
+                            NearbyStartup::InvitationShown
+                            | NearbyStartup::Finished(
+                                NearbyWorkerOutcome::Committed(_)
+                                | NearbyWorkerOutcome::CommitFailed(_)
+                                | NearbyWorkerOutcome::SupersededByNative,
+                            ) => {
+                                note("Approved on this Mac; closed the nearby approval request.");
+                            }
+                        }
+                        return assertion;
+                    }
+                    ClaimOutcome::Lost => {
+                        "native approval finished after nearby approval had already won".to_string()
+                    }
+                },
+                Err(error) => error,
+            },
+            Err(error) => error,
+        },
+        keytap_macos::AssertionOutcome::Cancelled => {
+            note("Native approval closed; waiting for nearby approval.");
+            "native approval was cancelled".to_string()
+        }
+        keytap_macos::AssertionOutcome::Error(error) => {
+            note(&format!(
+                "Native approval ended ({error}); nearby approval is still available."
+            ));
+            format!("native approval failed: {error}")
+        }
+    };
+
+    let nearby_outcome = match nearby_startup {
+        NearbyStartup::Finished(outcome) => outcome,
+        NearbyStartup::InvitationShown => loop {
+            match nearby_rx.recv() {
+                Ok(NearbyWorkerEvent::InvitationShown) => continue,
+                Ok(NearbyWorkerEvent::Finished(outcome)) => break outcome,
+                Err(_) => {
+                    break NearbyWorkerOutcome::Failed(
+                        "nearby approval stopped unexpectedly".into(),
+                    )
+                }
+            }
+        },
+    };
+    match nearby_outcome {
+        NearbyWorkerOutcome::Committed(assertion) => {
+            note("Approved on the nearby device; closed the native approval prompt.");
+            Assertion::nearby(assertion)
+        }
+        NearbyWorkerOutcome::CommitFailed(error) => die(&format!(
+            "nearby approval won but could not be committed: {error}"
+        )),
+        NearbyWorkerOutcome::Failed(error) => die(&format!(
+            "{native_failure}; nearby approval failed: {error}"
+        )),
+        NearbyWorkerOutcome::SupersededByNative => die(&format!(
+            "{native_failure}; nearby approval was superseded without an accepted native result"
+        )),
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn authenticate(name: &str, storage_policy: nearby::StoragePolicy) -> Assertion {
+    Assertion::nearby(nearby::authenticate_nearby(name, storage_policy))
 }
 
 fn derive_key(prf_output: &[u8]) -> Zeroizing<Vec<u8>> {
@@ -225,12 +414,12 @@ fn derive_key(prf_output: &[u8]) -> Zeroizing<Vec<u8>> {
     }))
 }
 
-#[cfg(feature = "native-passkey")]
+#[cfg(target_os = "macos")]
 fn register(
     pending_init: nearby_identity::PendingInit,
-    ceremony: Ceremony,
+    route: RegistrationRoute,
 ) -> nearby_identity::PersistedInit {
-    if let Ceremony::Nearby = ceremony {
+    if let RegistrationRoute::Nearby = route {
         return nearby::register_nearby(pending_init);
     }
     match keytap_macos::register() {
@@ -241,33 +430,30 @@ fn register(
                     registration
                 }
                 Err(nearby_identity::InitCommitError::NotPublished(error)) => die(&format!(
-                    "passkey was created, but its nearby identity anchor could not be stored: {error}"
+                    "passkey was created, but its local credential record could not be stored: {error}"
                 )),
                 Err(nearby_identity::InitCommitError::PublishedButNotDurable(error)) => {
                     remember::after_init();
                     die(&format!(
-                        "passkey was created and its nearby identity anchor is visible, but durable storage could not be confirmed: {error}. Init is indeterminate; rerun `keytap init --force` before relying on it"
+                        "passkey was created and its local credential record is visible, but durable storage could not be confirmed: {error}. Rerun `keytap init --force` before relying on it"
                     ))
                 }
             }
         }
-        keytap_macos::RegistrationOutcome::Error(msg) if msg == "cancelled" => {
-            die(&msg);
-        }
-        keytap_macos::RegistrationOutcome::Error(msg) => {
-            eprintln!("Couldn't open native passkey flow: {msg}");
-            nearby::register_nearby(pending_init)
-        }
+        keytap_macos::RegistrationOutcome::Cancelled => die("cancelled"),
+        keytap_macos::RegistrationOutcome::Error(msg) => die(&format!(
+            "native passkey registration failed: {msg}. Registration will not switch authenticators automatically because the native provider may already have created a credential; retry explicitly with `keytap init --nearby` if no credential was created"
+        )),
     }
 }
 
-#[cfg(not(feature = "native-passkey"))]
+#[cfg(not(target_os = "macos"))]
 fn register(
     pending_init: nearby_identity::PendingInit,
-    ceremony: Ceremony,
+    route: RegistrationRoute,
 ) -> nearby_identity::PersistedInit {
-    match ceremony {
-        Ceremony::Automatic | Ceremony::Nearby => nearby::register_nearby(pending_init),
+    match route {
+        RegistrationRoute::Nearby => nearby::register_nearby(pending_init),
     }
 }
 
@@ -278,8 +464,8 @@ fn emit_private_key(raw_key: &[u8], format: keytap_cli_spec::Format) {
     }
 }
 
-fn emit_public_key(raw_key: &[u8], format: keytap_cli_spec::PublicFormat, name: &str) {
-    match keytap_core::format_public_key_display(raw_key, format.into(), name) {
+fn emit_public_key(raw_key: &[u8], format: keytap_cli_spec::Format, name: &str) {
+    match keytap_core::format_public_key_display(raw_key, format.public_key_format(name)) {
         Ok(s) => print!("{s}"),
         Err(e) => die(&format!("format error: {e}")),
     }
@@ -296,4 +482,35 @@ pub(crate) fn die(msg: &str) -> ! {
 pub(crate) fn note(line: &str) {
     use std::io::Write;
     let _ = writeln!(std::io::stderr(), "{line}");
+}
+
+#[cfg(test)]
+mod registration_route_tests {
+    use super::{registration_route, RegistrationRoute};
+
+    #[test]
+    fn explicit_nearby_registration_always_selects_nearby() {
+        assert!(matches!(
+            registration_route(true),
+            RegistrationRoute::Nearby
+        ));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn native_build_defaults_registration_to_native() {
+        assert!(matches!(
+            registration_route(false),
+            RegistrationRoute::Native
+        ));
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn nearby_only_build_has_only_the_nearby_registration_route() {
+        assert!(matches!(
+            registration_route(false),
+            RegistrationRoute::Nearby
+        ));
+    }
 }

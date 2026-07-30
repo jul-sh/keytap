@@ -1,6 +1,6 @@
 //! Human-verifiable binding for a first nearby connection.
 //!
-//! The CLI commits to fresh randomness before the phone contributes its own.
+//! The CLI commits to fresh randomness before the approver contributes its own.
 //! Only then does the CLI reveal its nonce. This ordering prevents a peer that
 //! controls two different WebRTC sessions from grinding either transcript
 //! until the short authentication strings collide.
@@ -17,10 +17,12 @@ const COMMIT_DOMAIN: &[u8] = b"keytap:nearby-sas-commit:v1\0";
 const DIGEST_DOMAIN: &[u8] = b"keytap:nearby-sas-digest:v1\0";
 const CONTEXT_DOMAIN: &[u8] = b"keytap:nearby-sas-context:v1\0";
 const CLI_ROLE: &[u8] = b"cli\0";
-const PHONE_ROLE: &[u8] = b"phone\0";
+const APPROVER_ROLE: &[u8] = b"approver\0";
 const WORDS: &str = include_str!("../../web/nearby-sas-words.txt");
 const WORD_COUNT: usize = 2048;
 const TERMINAL_CONFIRM_TIMEOUT: Duration = Duration::from_secs(120);
+#[cfg(unix)]
+const CANCELLATION_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 #[derive(Clone, Copy)]
 pub struct Context([u8; 32]);
@@ -33,14 +35,14 @@ pub struct InitiatorCommitment {
 }
 
 /// The state reached only after both peers have fixed their nonce commitments.
-pub struct AwaitingPhoneReveal {
+pub struct AwaitingApproverReveal {
     context: [u8; 32],
     cli_nonce: Zeroizing<[u8; 32]>,
     cli_commitment: [u8; 32],
-    phone_commitment: [u8; 32],
+    approver_commitment: [u8; 32],
 }
 
-/// The state reached only after the phone's commitment has been opened.
+/// The state reached only after the approver's commitment has been opened.
 pub struct Comparison {
     digest: [u8; 32],
     phrase: Phrase,
@@ -82,18 +84,21 @@ impl InitiatorCommitment {
         &self.commitment
     }
 
-    pub fn accept_phone_commitment(self, phone_commitment: [u8; 32]) -> AwaitingPhoneReveal {
-        AwaitingPhoneReveal {
+    pub fn accept_approver_commitment(
+        self,
+        approver_commitment: [u8; 32],
+    ) -> AwaitingApproverReveal {
+        AwaitingApproverReveal {
             context: self.context,
             cli_nonce: self.cli_nonce,
             cli_commitment: self.commitment,
-            phone_commitment,
+            approver_commitment,
         }
     }
 }
 
 impl Context {
-    /// Freeze both the WebRTC transcript and the exact request that the phone
+    /// Freeze both the WebRTC transcript and the exact request that the approver
     /// will execute before the CLI buffers its result for terminal confirmation.
     pub fn bind(session_binding: &[u8; 32], canonical_request: &[u8]) -> Self {
         let mut digest = Sha256::new();
@@ -110,22 +115,22 @@ impl Context {
     }
 }
 
-impl AwaitingPhoneReveal {
+impl AwaitingApproverReveal {
     pub fn cli_nonce(&self) -> &[u8; 32] {
         &self.cli_nonce
     }
 
-    pub fn accept_phone_nonce(self, phone_nonce: [u8; 32]) -> Result<Comparison, String> {
-        let opened = commitment_digest(PHONE_ROLE, &self.context, &phone_nonce);
-        if !constant_time_equal(&opened, &self.phone_commitment) {
-            return Err("the phone did not open its pairing commitment".to_string());
+    pub fn accept_approver_nonce(self, approver_nonce: [u8; 32]) -> Result<Comparison, String> {
+        let opened = commitment_digest(APPROVER_ROLE, &self.context, &approver_nonce);
+        if !constant_time_equal(&opened, &self.approver_commitment) {
+            return Err("the nearby device did not open its pairing commitment".to_string());
         }
         let digest = sas_digest(
             &self.context,
             &self.cli_commitment,
-            &self.phone_commitment,
+            &self.approver_commitment,
             &self.cli_nonce,
-            &phone_nonce,
+            &approver_nonce,
         );
         Ok(Comparison {
             digest,
@@ -146,8 +151,20 @@ impl Comparison {
 
 impl BufferedResultComparison {
     pub fn confirm_with_tty(self) -> Result<ConfirmedComparison, String> {
+        self.confirm_with_tty_while(|| Ok(()))
+    }
+
+    /// Wait for local SAS confirmation while allowing a competing approval
+    /// route to supersede this ceremony. The callback is polled even when the
+    /// terminal has no input, so cancellation never waits for the full prompt
+    /// timeout.
+    pub fn confirm_with_tty_while(
+        self,
+        mut ensure_active: impl FnMut() -> Result<(), String>,
+    ) -> Result<ConfirmedComparison, String> {
         #[cfg(unix)]
         {
+            ensure_active()?;
             let mut terminal = std::fs::OpenOptions::new()
                 .read(true)
                 .write(true)
@@ -160,12 +177,18 @@ impl BufferedResultComparison {
                 .map_err(|error| format!("could not read pairing confirmation: {error}"))?;
             discard_pending_terminal_input(&reader_handle)?;
             self.write_prompt(&mut terminal)?;
-            wait_for_terminal_input(&reader_handle, TERMINAL_CONFIRM_TIMEOUT)?;
+            wait_for_terminal_input_while(
+                &reader_handle,
+                TERMINAL_CONFIRM_TIMEOUT,
+                &mut ensure_active,
+            )?;
+            ensure_active()?;
             let mut reader = std::io::BufReader::new(reader_handle);
             self.read_confirmation(&mut reader)
         }
         #[cfg(not(unix))]
         {
+            let _ = &mut ensure_active;
             Err("pairing confirmation is not supported on this platform".to_string())
         }
     }
@@ -183,7 +206,7 @@ impl BufferedResultComparison {
     fn write_prompt(&self, writer: &mut impl Write) -> Result<(), String> {
         write!(
             writer,
-            "\nResult received but not accepted. Did your phone show exactly \"{}\"? [y/N, 2 minute timeout] ",
+            "\nResult received but not accepted. Did your nearby device show exactly \"{}\"? [y/N, 2 minute timeout] ",
             self.0.phrase
         )
         .map_err(|error| format!("could not write pairing confirmation: {error}"))?;
@@ -224,7 +247,11 @@ fn discard_pending_terminal_input(file: &std::fs::File) -> Result<(), String> {
 }
 
 #[cfg(unix)]
-fn wait_for_terminal_input(file: &std::fs::File, timeout: Duration) -> Result<(), String> {
+fn wait_for_terminal_input_while(
+    file: &std::fs::File,
+    timeout: Duration,
+    ensure_active: &mut impl FnMut() -> Result<(), String>,
+) -> Result<(), String> {
     use std::os::fd::AsRawFd;
     let mut descriptor = libc::pollfd {
         fd: file.as_raw_fd(),
@@ -233,16 +260,18 @@ fn wait_for_terminal_input(file: &std::fs::File, timeout: Duration) -> Result<()
     };
     let deadline = Instant::now() + timeout;
     loop {
+        ensure_active()?;
         let remaining = deadline
             .checked_duration_since(Instant::now())
             .ok_or_else(|| "pairing confirmation timed out; no key was accepted".to_string())?;
-        let timeout_ms = i32::try_from(remaining.as_millis().max(1)).unwrap_or(i32::MAX);
+        let interval = remaining.min(CANCELLATION_POLL_INTERVAL);
+        let timeout_ms = i32::try_from(interval.as_millis().max(1)).unwrap_or(i32::MAX);
         let result = unsafe { libc::poll(&mut descriptor, 1, timeout_ms) };
         if result > 0 {
             return Ok(());
         }
         if result == 0 {
-            return Err("pairing confirmation timed out; no key was accepted".to_string());
+            continue;
         }
         let error = std::io::Error::last_os_error();
         if error.kind() != std::io::ErrorKind::Interrupted {
@@ -287,17 +316,17 @@ fn commitment_digest(role: &[u8], context: &[u8; 32], nonce: &[u8; 32]) -> [u8; 
 fn sas_digest(
     context: &[u8; 32],
     cli_commitment: &[u8; 32],
-    phone_commitment: &[u8; 32],
+    approver_commitment: &[u8; 32],
     cli_nonce: &[u8; 32],
-    phone_nonce: &[u8; 32],
+    approver_nonce: &[u8; 32],
 ) -> [u8; 32] {
     let mut digest = Sha256::new();
     digest.update(DIGEST_DOMAIN);
     digest.update(context);
     digest.update(cli_commitment);
-    digest.update(phone_commitment);
+    digest.update(approver_commitment);
     digest.update(cli_nonce);
-    digest.update(phone_nonce);
+    digest.update(approver_nonce);
     digest.finalize().into()
 }
 
@@ -388,15 +417,19 @@ mod tests {
             URL_SAFE_NO_PAD.encode(pending.commitment()),
             "cvH8dRwfyO39Y_o_PCBXIQPtJ2CgNAF2dCLBJs4YldA"
         );
-        let phone_commitment = commitment_digest(PHONE_ROLE, &[0x42; 32], &[0x22; 32]);
-        let reveal = pending.accept_phone_commitment(phone_commitment);
+        let approver_commitment = commitment_digest(APPROVER_ROLE, &[0x42; 32], &[0x22; 32]);
+        assert_eq!(
+            URL_SAFE_NO_PAD.encode(approver_commitment),
+            "uGxkhyyB5CuiWLzkx3yVbtuDET2YFspXyFU24H71YLg"
+        );
+        let reveal = pending.accept_approver_commitment(approver_commitment);
         assert_eq!(reveal.cli_nonce(), &[0x11; 32]);
-        let comparison = reveal.accept_phone_nonce([0x22; 32]).unwrap();
+        let comparison = reveal.accept_approver_nonce([0x22; 32]).unwrap();
         assert_eq!(
             URL_SAFE_NO_PAD.encode(comparison.digest),
-            "5ZQGmH1q3mt_ppkjl_U99IdhuExmijw475WdClYiSR0"
+            "IAUUgyGRkm-JJ34IUOnGhGCkfqDHlzCZxNtMQFsVQ8w"
         );
-        assert_eq!(comparison.phrase().to_string(), "tortoise parent");
+        assert_eq!(comparison.phrase().to_string(), "cactus chunk");
     }
 
     #[test]
@@ -425,10 +458,10 @@ mod tests {
     }
 
     #[test]
-    fn a_false_phone_opening_is_rejected() {
+    fn a_false_approver_opening_is_rejected() {
         let pending = InitiatorCommitment::from_nonce([1; 32], Zeroizing::new([2; 32]));
-        let reveal = pending.accept_phone_commitment([3; 32]);
-        assert!(reveal.accept_phone_nonce([4; 32]).is_err());
+        let reveal = pending.accept_approver_commitment([3; 32]);
+        assert!(reveal.accept_approver_nonce([4; 32]).is_err());
     }
 
     #[test]
@@ -474,7 +507,7 @@ mod tests {
 
         let (mut master, slave) = pseudo_terminal();
         master.write_all(b"yes\n").unwrap();
-        wait_for_terminal_input(&slave, Duration::from_secs(1)).unwrap();
+        wait_for_terminal_input_while(&slave, Duration::from_secs(1), &mut || Ok(())).unwrap();
 
         discard_pending_terminal_input(&slave).unwrap();
 
@@ -485,6 +518,24 @@ mod tests {
         };
         let result = unsafe { libc::poll(&mut descriptor, 1, 0) };
         assert_eq!(result, 0, "discarded confirmation remained readable");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn terminal_wait_observes_competing_approval_cancellation() {
+        let (_master, slave) = pseudo_terminal();
+        let started = Instant::now();
+        let mut checks = 0;
+        let error = wait_for_terminal_input_while(&slave, Duration::from_secs(5), &mut || {
+            checks += 1;
+            match checks {
+                1 => Ok(()),
+                _ => Err("nearby approval was superseded".to_string()),
+            }
+        })
+        .unwrap_err();
+        assert_eq!(error, "nearby approval was superseded");
+        assert!(started.elapsed() < Duration::from_secs(1));
     }
 
     #[cfg(unix)]

@@ -59,7 +59,7 @@ jobs:
       - name: Build
         id: package
         run: |
-          cargo build --release -p keytap --no-default-features
+          cargo build --release -p keytap
           TAG="${GITHUB_REF#refs/tags/}"
           ZIP_NAME="keytap-${TAG}-linux-x86_64.zip"
           zip "$ZIP_NAME" -j target/release/keytap

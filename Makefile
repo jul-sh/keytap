@@ -4,7 +4,7 @@ BIN = $(BUNDLE)/Contents/MacOS/keytap
 IDENTITY ?= $(shell security find-identity -v -p codesigning 2>/dev/null | grep -q "Developer ID Application" && echo "Developer ID Application" || echo "-")
 PROVISIONING_PROFILE ?=
 
-.PHONY: all build build-wasm sign notarize setup-signing install verify package test test-core test-cli clean
+.PHONY: all build build-wasm sign notarize setup-signing install verify package test test-core test-spec test-cli test-wasm test-web clean
 
 all: build sign notarize
 
@@ -21,7 +21,9 @@ setup-signing:
 build:
 	cargo build --release -p keytap
 	@mkdir -p $(BUNDLE)/Contents/MacOS $(BUNDLE)/Contents/Resources
-	@cp macos/Info.plist $(BUNDLE)/Contents/Info.plist
+	@VERSION=$$(cargo metadata --no-deps --format-version 1 | \
+		python3 -c 'import json, sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "keytap"))') && \
+		sed "s/@VERSION@/$$VERSION/g" macos/Info.plist.in > $(BUNDLE)/Contents/Info.plist
 	@xcrun actool macos/keytap.icon --compile $(BUNDLE)/Contents/Resources \
 		--platform macosx --minimum-deployment-target 15.0 \
 		--app-icon keytap --include-all-app-icons \
@@ -66,14 +68,24 @@ verify:
 build-wasm:
 	wasm-pack build --target web web/wasm --out-dir ../pkg --out-name keytap_web
 
-test: test-core test-cli
+test: test-core test-spec test-cli test-wasm test-web
 	@echo "All tests passed."
 
 test-core:
 	cargo test -p keytap-core
 
+test-spec:
+	cargo test -p keytap-cli-spec
+
 test-cli:
-	cargo test -p keytap --no-default-features --bins --test env_keys --test init_guard
+	cargo test -p keytap
+
+test-wasm:
+	cargo test -p keytap-web
+	wasm-pack test --node web/wasm
+
+test-web:
+	npm --prefix web test
 
 clean:
 	cargo clean

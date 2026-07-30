@@ -41,9 +41,10 @@ export function webAuthnAvailable() {
   return Boolean(window.PublicKeyCredential && navigator.credentials);
 }
 
-/// Whether a credential ID from an earlier ceremony is stored here; i.e.
-/// this browser has, at some point, seen `keytap init` or an assertion.
-export function hasStoredCredential() {
+/// Whether a credential ID from an earlier ceremony is stored here. Its
+/// absence says nothing about passkeys available through sync or a security
+/// key; it only means this browser has no preferred credential ID to send.
+export function hasStoredCredentialId() {
   return loadCredentialId() !== null;
 }
 

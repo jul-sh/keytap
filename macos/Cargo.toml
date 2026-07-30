@@ -1,10 +1,7 @@
 [package]
 name = "keytap-macos"
-version = "0.1.0"
+version.workspace = true
 edition = "2021"
-
-[dependencies]
-sha2 = "0.10"
 
 [build-dependencies]
 swift-rs = { version = "1.0", features = ["build"] }

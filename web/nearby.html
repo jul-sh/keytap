@@ -3,32 +3,27 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; connect-src 'self' https://keytap-relay.julsh.workers.dev wss://keytap-relay.julsh.workers.dev; form-action 'none'; frame-ancestors 'none'; base-uri 'none'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; font-src 'self'; connect-src 'self' https://keytap-signal.julsh.workers.dev wss://keytap-signal.julsh.workers.dev; form-action 'none'; frame-ancestors 'none'; base-uri 'none'">
   <meta name="theme-color" content="#000066">
   <title>keytap</title>
   <link rel="stylesheet" href="./theme.css">
   <link rel="stylesheet" href="./nearby.css">
-  <script defer src="./nearby.js"></script>
+  <script type="module" src="./nearby.js"></script>
 </head>
 <body>
   <main class="shell">
     <p class="eyebrow">keytap</p>
     <h1 id="title">Loading…</h1>
     <p class="summary" id="summary"></p>
-    <p class="summary" id="explainer">Approve with this device to send the derived key back to your waiting CLI.</p>
-    <section class="host-key" id="host-key" hidden>
-      <h2>One-time host public key</h2>
-      <code id="host-public-key"></code>
-      <p>Before approving, compare this value with the one in the host terminal. If they differ, close this page.</p>
-    </section>
+    <p class="summary" id="explainer">Approve with this device to complete the passkey request from your waiting CLI.</p>
     <details class="details" id="details">
       <summary>How is this request protected?</summary>
-      <p>The public key in this QR authenticates your CLI’s WebRTC offer. WebRTC encrypts the data channel end to end, including through TURN. On first use, finish the phone’s passkey step and confirm the two words only in the terminal.</p>
+      <p>The public key in this approval link authenticates your CLI’s WebRTC offer. WebRTC encrypts the data channel end to end, including through TURN. On first use, finish the passkey step on this device and confirm the two words only in the terminal.</p>
     </details>
     <section class="pairing" id="pairing" hidden>
       <h2 id="pairing-heading" tabindex="-1">Pairing words</h2>
       <output class="pairing-words" id="pairing-words" aria-label="Pairing words" aria-live="polite" tabindex="-1"></output>
-      <p id="pairing-copy">Finish the passkey step here. The result is sent to the CLI, which buffers it until you compare both words, in order, and confirm them once in the terminal that displayed the QR code.</p>
+      <p id="pairing-copy">Follow the passkey instructions here, then compare both words, in order, and confirm them once in the terminal that displayed this approval link.</p>
     </section>
     <section class="offer" id="offer" aria-labelledby="offer-heading" hidden>
       <h2 id="offer-heading" tabindex="-1">Remember on that machine?</h2>

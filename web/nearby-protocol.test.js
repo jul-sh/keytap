@@ -1,26 +1,46 @@
 import assert from 'node:assert/strict';
+import { createPrivateKey, createPublicKey } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 
 import {
   ProtocolError,
+  TURN_IDENTITY_PRF_SALT,
   createCliOfferVerifier,
   createNearbyIdentityProof,
   createNearbySessionBinding,
   createSasCommitment,
   createSasContext,
   createSasDigest,
+  createTurnPasskeyAuthorizationProof,
   decodeBase64URL,
   encodeBase64URL,
   filterCloudflareIceServers,
+  importEd25519SigningKey,
   nearbyIdentityProofMessage,
   nearbySasRequestBytes,
   parseSasWordList,
   sasPhrase,
+  turnPasskeyAuthorizationMessage,
   verifySasCommitment,
-} from './nearby-v2-protocol.js';
+} from './nearby-protocol.js';
 
-test('verifies the Rust-signed CLI offer and compact public-key QR vector', async () => {
+const ED25519_PKCS8_SEED_PREFIX = Buffer.from(
+  '302e020100300506032b657004220420',
+  'hex',
+);
+
+async function deriveEd25519PublicKeyForTest(seed) {
+  const privateKey = createPrivateKey({
+    key: Buffer.concat([ED25519_PKCS8_SEED_PREFIX, Buffer.from(seed)]),
+    format: 'der',
+    type: 'pkcs8',
+  });
+  const spki = createPublicKey(privateKey).export({ format: 'der', type: 'spki' });
+  return new Uint8Array(spki.subarray(spki.length - 32));
+}
+
+test('verifies the Rust-signed CLI offer and compact approval-link key vector', async () => {
   const cliPublicKey = decodeBase64URL('6kpsY-KcUgq-9VB7Ey7F-ZVHdq6-vnuSQh7qaRRG0iw');
   assert.equal(
     encodeBase64URL(cliPublicKey).length,
@@ -29,28 +49,39 @@ test('verifies the Rust-signed CLI offer and compact public-key QR vector', asyn
   const verifier = await createCliOfferVerifier(cliPublicKey);
   assert.equal(
     verifier.rendezvousId,
-    'MFHH-4Il-dVD-AwsB7c-4kdD25EFZ_aGEczf569GW8U',
+    'kEJcshyj36SyT3e3fov2QqlBFMMRquKV0hgfhlqLIeI',
   );
   const envelope = {
-    v: 3,
+    v: 1,
     from: 'cli',
     seq: 0,
     kind: 'offer',
     body: encodeBase64URL(new TextEncoder().encode('{"type":"offer"}')),
-    signature: 'U2k9m3s7XkIf9QF0ShT4TNY-FzYYAfoF4RX9zLBWoo5TYwS5-oblqKqQdK7mQVxO92UWDTidykN6Nm3vXeWPDg',
+    signature: 'VqMHWBIykqAxKHsKgukMdrF99Jq18DxWgwCvaTCMRYN_nuqUYAuk94tKYrxD_tBaOGRUrl71OeRxlnCCoM8qBw',
   };
   assert.deepEqual(envelope, {
-    v: 3,
+    v: 1,
     from: 'cli',
     seq: 0,
     kind: 'offer',
     body: 'eyJ0eXBlIjoib2ZmZXIifQ',
-    signature: 'U2k9m3s7XkIf9QF0ShT4TNY-FzYYAfoF4RX9zLBWoo5TYwS5-oblqKqQdK7mQVxO92UWDTidykN6Nm3vXeWPDg',
+    signature: 'VqMHWBIykqAxKHsKgukMdrF99Jq18DxWgwCvaTCMRYN_nuqUYAuk94tKYrxD_tBaOGRUrl71OeRxlnCCoM8qBw',
   });
   assert.equal(
     new TextDecoder().decode(await verifier.verifyOffer(envelope)),
     '{"type":"offer"}',
   );
+  const retry = {
+    ...envelope,
+    seq: 1,
+    signature: 'TgDrSC1EhIxT5cQKGF7JyM4UZpOc7i0TLgYkpYWHbaVFoJXKlvsZaeJoHvAVFyI_8ZAl1EcMragWSbbeHkaGCw',
+  };
+  assert.equal(
+    new TextDecoder().decode(await verifier.verifyOffer(retry, 1)),
+    '{"type":"offer"}',
+  );
+  await assert.rejects(verifier.verifyOffer(retry), /unexpected signaling state/);
+  await assert.rejects(verifier.verifyOffer({ ...retry, seq: 2 }, 2), /unexpected signaling state/);
 });
 
 test('derives a stable Ed25519 identity and signs the exact nearby result', async () => {
@@ -62,7 +93,7 @@ test('derives a stable Ed25519 identity and signs the exact nearby result', asyn
   );
   assert.equal(
     encodeBase64URL(sessionBinding),
-    '4onRCvmREapRgbR1UvtUZ_AJ0aCKjDR0Q1fWTksrzJY',
+    'MiMn0rHSnUJlFMpIE5sBrbshnEo2rHruqNEWOYp_9pk',
   );
   const fields = {
     binding: { kind: 'bootstrap-sas', digest: new Uint8Array(32).fill(0x42) },
@@ -73,12 +104,16 @@ test('derives a stable Ed25519 identity and signs the exact nearby result', asyn
     disposition: 'once',
   };
   const identitySeed = new Uint8Array(32).fill(7);
-  const proof = await createNearbyIdentityProof(fields, identitySeed);
+  const proof = await createNearbyIdentityProof(
+    fields,
+    identitySeed,
+    deriveEd25519PublicKeyForTest,
+  );
 
   assert.equal(encodeBase64URL(proof.publicKey), '6kpsY-KcUgq-9VB7Ey7F-ZVHdq6-vnuSQh7qaRRG0iw');
   assert.equal(
     encodeBase64URL(proof.signature),
-    'IX4VUH_eU2LO8p6PHiv4TGTPuJeR2py11D2rz97nt7hCCQFAjALLRkIHXq9viryIPfek-zGZmgfFoG6cNcUJAg',
+    'FI5i8E_aJfYVyMSx4mLpyNlkxeShIynByHP6uw_Ynw7E6qMidgretZF9y-lDgXep-ulV4cxDeNBYTwlkdWX6BQ',
   );
   const message = nearbyIdentityProofMessage({ ...fields, publicKey: proof.publicKey });
   const publicKey = await crypto.subtle.importKey(
@@ -105,19 +140,63 @@ test('derives a stable Ed25519 identity and signs the exact nearby result', asyn
   assert.equal(await crypto.subtle.verify('Ed25519', publicKey, proof.signature, changedDisposition), false);
 });
 
+test('matches the passkey TURN authorization interop vector', async () => {
+  assert.equal(
+    Buffer.from(TURN_IDENTITY_PRF_SALT).toString('hex'),
+    '0e77b3886c1dfd2ce68782dc0fa4b6872e75a18dfe28799aab9414b5fd8e249e',
+  );
+  const fields = {
+    rendezvousId: 'A'.repeat(43),
+    challenge: decodeBase64URL('ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8'),
+    expiresAt: 2_000_000_000_000,
+    credentialId: decodeBase64URL('Y3JlZGVudGlhbC1vd25lcg'),
+  };
+  const proof = await createTurnPasskeyAuthorizationProof(
+    fields,
+    Uint8Array.from({ length: 32 }, (_, index) => index),
+    deriveEd25519PublicKeyForTest,
+  );
+  assert.equal(
+    encodeBase64URL(proof.publicKey),
+    'A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg',
+  );
+  assert.equal(
+    encodeBase64URL(proof.signature),
+    'Kq7yBsYegNIr5povtDGDpkwPryLT8KFBFKaBZ3Py_y1YaUBO7TGRq7yIrOUB6QWB0BYnU_XsGfCS59a8xRTLBg',
+  );
+  const verificationKey = await crypto.subtle.importKey(
+    'raw', proof.publicKey, { name: 'Ed25519' }, false, ['verify'],
+  );
+  assert.equal(await crypto.subtle.verify(
+    'Ed25519',
+    verificationKey,
+    proof.signature,
+    turnPasskeyAuthorizationMessage({ ...fields, publicKey: proof.publicKey }),
+  ), true);
+});
+
+test('identity signing keys are non-extractable', async () => {
+  const signingKey = await importEd25519SigningKey(new Uint8Array(32).fill(7));
+  assert.equal(signingKey.extractable, false);
+  await assert.rejects(
+    crypto.subtle.exportKey('jwk', signingKey),
+    error => error?.name === 'InvalidAccessException',
+  );
+});
+
 test('matches the Rust commit–reveal SAS vector and pinned word list', async () => {
   const context = new Uint8Array(32).fill(0x42);
   const cliNonce = new Uint8Array(32).fill(0x11);
-  const phoneNonce = new Uint8Array(32).fill(0x22);
+  const approverNonce = new Uint8Array(32).fill(0x22);
   const cliCommitment = await createSasCommitment('cli', context, cliNonce);
-  const phoneCommitment = await createSasCommitment('phone', context, phoneNonce);
+  const approverCommitment = await createSasCommitment('approver', context, approverNonce);
   assert.equal(
     encodeBase64URL(cliCommitment),
     'cvH8dRwfyO39Y_o_PCBXIQPtJ2CgNAF2dCLBJs4YldA',
   );
   assert.equal(
-    encodeBase64URL(phoneCommitment),
-    '-uZ7M59bEXt4cV1iqI2FbkKRwgznmHmb79X7bqcHUtk',
+    encodeBase64URL(approverCommitment),
+    'uGxkhyyB5CuiWLzkx3yVbtuDET2YFspXyFU24H71YLg',
   );
   assert.equal(await verifySasCommitment('cli', context, cliNonce, cliCommitment), true);
   const changed = cliCommitment.slice();
@@ -127,18 +206,18 @@ test('matches the Rust commit–reveal SAS vector and pinned word list', async (
   const digest = await createSasDigest(
     context,
     cliCommitment,
-    phoneCommitment,
+    approverCommitment,
     cliNonce,
-    phoneNonce,
+    approverNonce,
   );
   assert.equal(
     encodeBase64URL(digest),
-    '5ZQGmH1q3mt_ppkjl_U99IdhuExmijw475WdClYiSR0',
+    'IAUUgyGRkm-JJ34IUOnGhGCkfqDHlzCZxNtMQFsVQ8w',
   );
   const words = await parseSasWordList(
     new Uint8Array(await readFile(new URL('./nearby-sas-words.txt', import.meta.url))),
   );
-  assert.equal(sasPhrase(digest, words), 'tortoise parent');
+  assert.equal(sasPhrase(digest, words), 'cactus chunk');
 });
 
 test('canonically binds the exact pairing request', async () => {
@@ -174,15 +253,15 @@ test('binds CLI offer authentication to key, version, state, and body', async ()
     decodeBase64URL('6kpsY-KcUgq-9VB7Ey7F-ZVHdq6-vnuSQh7qaRRG0iw'),
   );
   const envelope = {
-    v: 3,
+    v: 1,
     from: 'cli',
     seq: 0,
     kind: 'offer',
     body: 'eyJ0eXBlIjoib2ZmZXIifQ',
-    signature: 'U2k9m3s7XkIf9QF0ShT4TNY-FzYYAfoF4RX9zLBWoo5TYwS5-oblqKqQdK7mQVxO92UWDTidykN6Nm3vXeWPDg',
+    signature: 'VqMHWBIykqAxKHsKgukMdrF99Jq18DxWgwCvaTCMRYN_nuqUYAuk94tKYrxD_tBaOGRUrl71OeRxlnCCoM8qBw',
   };
   await assert.rejects(
-    verifier.verifyOffer({ ...envelope, v: 2 }),
+    verifier.verifyOffer({ ...envelope, v: 0 }),
     ProtocolError,
   );
   await assert.rejects(
@@ -190,14 +269,14 @@ test('binds CLI offer authentication to key, version, state, and body', async ()
     ProtocolError,
   );
   await assert.rejects(
-    verifier.verifyOffer({ ...envelope, from: 'phone' }),
+    verifier.verifyOffer({ ...envelope, from: 'approver' }),
     ProtocolError,
   );
   await assert.rejects(
     verifier.verifyOffer({ ...envelope, body: encodeBase64URL(new TextEncoder().encode('changed')) }),
     /authentication failed/,
   );
-  await assert.rejects(verifier.verifyOffer({ ...envelope, mac: 'legacy' }), /invalid signaling envelope/);
+  await assert.rejects(verifier.verifyOffer({ ...envelope, extra: true }), /invalid signaling envelope/);
 });
 
 test('accepts canonical base64url only', () => {
@@ -234,7 +313,7 @@ test('rejects TURN responses without bounded string credentials', () => {
   );
 });
 
-test('the phone has no word-match confirmation control', async () => {
+test('the approval page has no word-match confirmation control', async () => {
   const html = await readFile(new URL('./nearby.html', import.meta.url), 'utf8');
   const pairing = html.match(/<section class="pairing"[\s\S]*?<\/section>/)?.[0];
   assert.ok(pairing, 'pairing section must exist');

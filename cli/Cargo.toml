@@ -7,14 +7,9 @@ edition = "2021"
 name = "keytap"
 path = "src/main.rs"
 
-[features]
-default = ["native-passkey"]
-native-passkey = ["keytap-macos"]
-
 [dependencies]
-keytap-core = { path = "../core", features = ["encrypt"] }
+keytap-core = { path = "../core" }
 keytap-cli-spec = { path = "spec" }
-keytap-macos = { path = "../macos", optional = true }
 serde_json = "1"
 serde = { version = "1", features = ["derive"] }
 base64 = "0.22"
@@ -22,9 +17,9 @@ sha2 = "0.10"
 hex = "0.4"
 qr2term = "0.3"
 tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
-rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 getrandom = "0.2"
-ureq = "3"
+ureq = { version = "3", default-features = false, features = ["rustls"] }
 zeroize = "1"
 subtle = "2"
 ed25519-dalek = { version = "2", default-features = false }
@@ -36,13 +31,12 @@ webrtc = "=0.17.2"
 # The encrypt_roundtrip integration test exercises age directly.
 age = { version = "0.11", default-features = false }
 
-# Remembered keys live in the OS keychain: the macOS Keychain via the
-# Security framework, and the freedesktop Secret Service (GNOME Keyring,
-# KWallet, …) on Linux. These are target dependencies (not tied to the
-# `native-passkey` feature) so the nearby-phone fallback build still gets
-# keychain support. `vendored` builds libdbus from source so release builds
-# don't depend on system dev packages.
+# Platform integrations are target dependencies: native passkeys and Keychain
+# on macOS, and Secret Service (GNOME Keyring, KWallet, …) on Linux. `vendored`
+# builds libdbus from source so release builds need no system development
+# packages.
 [target.'cfg(target_os = "macos")'.dependencies]
+keytap-macos = { path = "../macos" }
 security-framework = "3"
 
 [target.'cfg(target_os = "linux")'.dependencies]

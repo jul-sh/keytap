@@ -1,9 +1,10 @@
 const encoder = new TextEncoder();
 
-const RID_DOMAIN = encoder.encode('keytap:rendezvous:v3\0');
-const OFFER_SIGNATURE_DOMAIN = encoder.encode('keytap:signal-offer:v3\0');
-const IDENTITY_SESSION_DOMAIN = encoder.encode('keytap:nearby-identity-session:v2\0');
-const IDENTITY_PROOF_DOMAIN = encoder.encode('keytap:nearby-identity-proof:v3\0');
+const RID_DOMAIN = encoder.encode('keytap:rendezvous:v1\0');
+const OFFER_SIGNATURE_DOMAIN = encoder.encode('keytap:signal-offer:v1\0');
+const IDENTITY_SESSION_DOMAIN = encoder.encode('keytap:nearby-identity-session:v1\0');
+const IDENTITY_PROOF_DOMAIN = encoder.encode('keytap:nearby-identity-proof:v1\0');
+const TURN_PASSKEY_AUTHORIZATION_DOMAIN = encoder.encode('keytap:turn-passkey-authorization:v1\0');
 const SAS_CONTEXT_DOMAIN = encoder.encode('keytap:nearby-sas-context:v1\0');
 const SAS_COMMIT_DOMAIN = encoder.encode('keytap:nearby-sas-commit:v1\0');
 const SAS_DIGEST_DOMAIN = encoder.encode('keytap:nearby-sas-digest:v1\0');
@@ -17,6 +18,16 @@ const SAS_WORD_LIST_SHA256 = Uint8Array.from([
 const ED25519_PKCS8_SEED_PREFIX = Uint8Array.from([
   0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06,
   0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04, 0x20,
+]);
+
+// SHA-256("keytap:nearby-identity-prf:v1"). Asking the PRF for this fixed
+// input derives the same nearby identity that the CLI pins after pairing.
+// This value is public; the authenticator's PRF output is the secret.
+export const TURN_IDENTITY_PRF_SALT = Uint8Array.from([
+  0x0e, 0x77, 0xb3, 0x88, 0x6c, 0x1d, 0xfd, 0x2c,
+  0xe6, 0x87, 0x82, 0xdc, 0x0f, 0xa4, 0xb6, 0x87,
+  0x2e, 0x75, 0xa1, 0x8d, 0xfe, 0x28, 0x79, 0x9a,
+  0xab, 0x94, 0x14, 0xb5, 0xfd, 0x8e, 0x24, 0x9e,
 ]);
 
 export class ProtocolError extends Error {
@@ -96,6 +107,38 @@ function u32(value) {
 
 function lengthPrefixed(value) {
   return concatBytes(u32(value.length), value);
+}
+
+/**
+ * Canonical room-bound bytes signed by the passkey-derived nearby identity.
+ * The TURN-authorization purpose is in the domain separator; the rendezvous
+ * ID and fresh challenge prevent authorization from moving between rooms.
+ */
+export function turnPasskeyAuthorizationMessage({
+  rendezvousId,
+  challenge,
+  expiresAt,
+  credentialId,
+  publicKey,
+}) {
+  if (typeof rendezvousId !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(rendezvousId)) {
+    throw new ProtocolError('invalid TURN rendezvous ID');
+  }
+  if (!(challenge instanceof Uint8Array) || challenge.length !== 32
+      || !Number.isSafeInteger(expiresAt) || expiresAt < 0
+      || !(credentialId instanceof Uint8Array)
+      || credentialId.length < 1 || credentialId.length > 1024
+      || !(publicKey instanceof Uint8Array) || publicKey.length !== 32) {
+    throw new ProtocolError('invalid TURN passkey proof field');
+  }
+  return concatBytes(
+    TURN_PASSKEY_AUTHORIZATION_DOMAIN,
+    lengthPrefixed(encoder.encode(rendezvousId)),
+    lengthPrefixed(challenge),
+    u64(expiresAt),
+    lengthPrefixed(credentialId),
+    lengthPrefixed(publicKey),
+  );
 }
 
 export async function createNearbySessionBinding(
@@ -187,7 +230,7 @@ export async function createSasContext(
 
 function sasRole(role) {
   if (role === 'cli') return encoder.encode('cli\0');
-  if (role === 'phone') return encoder.encode('phone\0');
+  if (role === 'approver') return encoder.encode('approver\0');
   throw new ProtocolError('invalid SAS role');
 }
 
@@ -226,11 +269,11 @@ export async function verifySasCommitment(
 export async function createSasDigest(
   context,
   cliCommitment,
-  phoneCommitment,
+  approverCommitment,
   cliNonce,
-  phoneNonce,
+  approverNonce,
 ) {
-  const values = [context, cliCommitment, phoneCommitment, cliNonce, phoneNonce];
+  const values = [context, cliCommitment, approverCommitment, cliNonce, approverNonce];
   if (values.some(value => !(value instanceof Uint8Array) || value.length !== 32)) {
     throw new ProtocolError('invalid SAS digest input');
   }
@@ -277,8 +320,8 @@ export async function parseSasWordList(bytes) {
 
 /**
  * Canonical bytes signed by the passkey-derived nearby identity. The proof is
- * bound to the fresh QR session and to the exact credential, named PRF result,
- * key name, requested storage disposition, and submitted public identity.
+ * bound to the fresh approval-link session and to the exact credential, named
+ * PRF result, key name, requested storage disposition, and public identity.
  */
 export function nearbyIdentityProofMessage({
   binding,
@@ -319,28 +362,47 @@ export function nearbyIdentityProofMessage({
   );
 }
 
-/** Derive and use the stable Ed25519 identity from WebAuthn PRF's second output. */
-export async function createNearbyIdentityProof(fields, prfSecond) {
-  if (!(prfSecond instanceof Uint8Array) || prfSecond.length !== 32) {
+/** Import a signing-only Ed25519 key without ever making it extractable. */
+export async function importEd25519SigningKey(identitySeed) {
+  if (!(identitySeed instanceof Uint8Array) || identitySeed.length !== 32) {
     throw new ProtocolError('invalid identity PRF output');
   }
   if (!webCrypto?.subtle) throw new ProtocolError('WebCrypto is unavailable');
 
-  const pkcs8 = concatBytes(ED25519_PKCS8_SEED_PREFIX, prfSecond);
+  const pkcs8 = concatBytes(ED25519_PKCS8_SEED_PREFIX, identitySeed);
   try {
-    const privateKey = await webCrypto.subtle.importKey(
+    return await webCrypto.subtle.importKey(
       'pkcs8',
       pkcs8,
       { name: 'Ed25519' },
-      true,
+      false,
       ['sign'],
     );
-    const jwk = await webCrypto.subtle.exportKey('jwk', privateKey);
-    if (jwk.kty !== 'OKP' || jwk.crv !== 'Ed25519' || typeof jwk.x !== 'string') {
-      throw new ProtocolError('browser returned an invalid Ed25519 identity');
-    }
-    const publicKey = decodeBase64URL(jwk.x);
-    if (publicKey.length !== 32) throw new ProtocolError('browser returned an invalid Ed25519 identity');
+  } finally {
+    pkcs8.fill(0);
+  }
+}
+
+async function deriveIdentityPublicKey(identitySeed, publicKeyDeriver) {
+  if (typeof publicKeyDeriver !== 'function') {
+    throw new ProtocolError('Ed25519 public-key derivation is unavailable');
+  }
+  const derived = await publicKeyDeriver(identitySeed);
+  if (!(derived instanceof Uint8Array) || derived.length !== 32) {
+    throw new ProtocolError('browser returned an invalid Ed25519 identity');
+  }
+  return derived.slice();
+}
+
+/** Derive and use the stable Ed25519 identity from WebAuthn PRF's second output. */
+export async function createNearbyIdentityProof(fields, prfSecond, publicKeyDeriver) {
+  if (!(prfSecond instanceof Uint8Array) || prfSecond.length !== 32) {
+    throw new ProtocolError('invalid identity PRF output');
+  }
+
+  try {
+    const privateKey = await importEd25519SigningKey(prfSecond);
+    const publicKey = await deriveIdentityPublicKey(prfSecond, publicKeyDeriver);
     const message = nearbyIdentityProofMessage({ ...fields, publicKey });
     const signature = new Uint8Array(
       await webCrypto.subtle.sign('Ed25519', privateKey, message),
@@ -350,15 +412,40 @@ export async function createNearbyIdentityProof(fields, prfSecond) {
   } catch (error) {
     if (error instanceof ProtocolError) throw error;
     throw new ProtocolError('this browser cannot create the nearby Ed25519 identity proof');
-  } finally {
-    pkcs8.fill(0);
+  }
+}
+
+/** Sign a TURN room challenge without exposing the identity PRF output. */
+export async function createTurnPasskeyAuthorizationProof(
+  fields,
+  identitySeed,
+  publicKeyDeriver,
+) {
+  if (!(identitySeed instanceof Uint8Array) || identitySeed.length !== 32) {
+    throw new ProtocolError('invalid identity PRF output');
+  }
+
+  try {
+    const privateKey = await importEd25519SigningKey(identitySeed);
+    const publicKey = await deriveIdentityPublicKey(identitySeed, publicKeyDeriver);
+    const message = turnPasskeyAuthorizationMessage({ ...fields, publicKey });
+    const signature = new Uint8Array(
+      await webCrypto.subtle.sign('Ed25519', privateKey, message),
+    );
+    if (signature.length !== 64) {
+      throw new ProtocolError('browser returned an invalid identity signature');
+    }
+    return { publicKey, signature };
+  } catch (error) {
+    if (error instanceof ProtocolError) throw error;
+    throw new ProtocolError('this browser cannot create the TURN identity proof');
   }
 }
 
 function offerSignatureMessage(seq, body) {
   return concatBytes(
     OFFER_SIGNATURE_DOMAIN,
-    new Uint8Array([3]),
+    new Uint8Array([1]),
     encoder.encode('cli\0'),
     u64(seq),
     encoder.encode('offer\0'),
@@ -368,7 +455,7 @@ function offerSignatureMessage(seq, body) {
 }
 
 /**
- * Build a verifier for the one-time CLI public key carried in the QR fragment.
+ * Build a verifier for the one-time CLI public key in the approval-link fragment.
  * A valid offer signature authenticates the offer's DTLS fingerprint, which
  * in turn authenticates every later data-channel message from the CLI.
  *
@@ -401,12 +488,13 @@ export async function createCliOfferVerifier(cliPublicKeyBytes) {
     rendezvousId: encodeBase64URL(rendezvous),
     cliPublicKey,
 
-    /** Verify exact state and signature before returning the offer bytes. */
-    async verifyOffer(envelope) {
-      if (!envelope || typeof envelope !== 'object' || Array.isArray(envelope)
-          || envelope.v !== 3
+    /** Verify the exact direct (0) or TURN-retry (1) transcript position. */
+    async verifyOffer(envelope, expectedSequence = 0) {
+      if ((expectedSequence !== 0 && expectedSequence !== 1)
+          || !envelope || typeof envelope !== 'object' || Array.isArray(envelope)
+          || envelope.v !== 1
           || envelope.from !== 'cli'
-          || envelope.seq !== 0
+          || envelope.seq !== expectedSequence
           || envelope.kind !== 'offer') {
         throw new ProtocolError('unexpected signaling state');
       }
@@ -423,7 +511,7 @@ export async function createCliOfferVerifier(cliPublicKeyBytes) {
         'Ed25519',
         verificationKey,
         signature,
-        offerSignatureMessage(envelope.seq, body),
+        offerSignatureMessage(expectedSequence, body),
       );
       if (!valid) throw new ProtocolError('signaling authentication failed');
       return body;

@@ -1,7 +1,7 @@
 //! Authentication for the nearby WebRTC signaling transcript.
 //!
 //! The QR fragment contains a fresh Ed25519 public key. The CLI signs its
-//! complete WebRTC offer, including the DTLS fingerprint, so a phone that
+//! complete WebRTC offer, including the DTLS fingerprint, so an approver that
 //! scanned the QR can authenticate the peer before it runs WebAuthn. The
 //! signaling service receives only a hash-derived rendezvous identifier.
 
@@ -12,10 +12,29 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
-const RID_DOMAIN: &[u8] = b"keytap:rendezvous:v3\0";
-const OFFER_SIGNATURE_DOMAIN: &[u8] = b"keytap:signal-offer:v3\0";
-const IDENTITY_SESSION_DOMAIN: &[u8] = b"keytap:nearby-identity-session:v2\0";
-const SIGNAL_VERSION: u8 = 3;
+const RID_DOMAIN: &[u8] = b"keytap:rendezvous:v1\0";
+const OFFER_SIGNATURE_DOMAIN: &[u8] = b"keytap:signal-offer:v1\0";
+const COMPLETION_SIGNATURE_DOMAIN: &[u8] = b"keytap:signal-completion:v1\0";
+const IDENTITY_SESSION_DOMAIN: &[u8] = b"keytap:nearby-identity-session:v1\0";
+const SIGNAL_VERSION: u8 = 1;
+
+/// The signaling transcript has at most two offers. Keeping the wire sequence
+/// behind this enum prevents callers from accepting an arbitrary or stale
+/// answer when a direct connection is retried with TURN.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SignalAttempt {
+    Direct,
+    TurnRetry,
+}
+
+impl SignalAttempt {
+    fn sequence(self) -> u64 {
+        match self {
+            Self::Direct => 0,
+            Self::TurnRetry => 1,
+        }
+    }
+}
 
 /// The one-time CLI authentication key whose public half is carried by QR.
 pub struct CliSessionKey {
@@ -41,7 +60,7 @@ impl CliSessionKey {
         }
     }
 
-    /// The QR value is public, fixed-width, and remains 43 base64url chars.
+    /// The QR value is public, fixed-width, and 43 base64url characters long.
     pub fn fragment_value(&self) -> String {
         URL_SAFE_NO_PAD.encode(self.public_key)
     }
@@ -50,16 +69,35 @@ impl CliSessionKey {
         URL_SAFE_NO_PAD.encode(self.rendezvous)
     }
 
-    pub fn sign_offer(&self, body: &[u8]) -> SignedCliOffer {
+    pub fn sign_offer(&self, attempt: SignalAttempt, body: &[u8]) -> SignedCliOffer {
+        let sequence = attempt.sequence();
         let signature = SigningKey::from_bytes(&self.seed)
-            .sign(&offer_signature_message(0, body))
+            .sign(&offer_signature_message(attempt, body))
             .to_bytes();
         SignedCliOffer {
             version: SIGNAL_VERSION,
             from: CliRole::Cli,
-            seq: 0,
+            seq: sequence,
             kind: OfferKind::Offer,
             body: URL_SAFE_NO_PAD.encode(body),
+            signature: URL_SAFE_NO_PAD.encode(signature),
+        }
+    }
+
+    /// Authenticate the terminal transition independently of the live
+    /// signaling socket. This lets the native winner retire a room while the
+    /// worker thread is blocked in ICE setup, without exposing a cancellation
+    /// capability in the forwarded URL.
+    pub fn sign_completion(&self) -> SignedCliCompletion {
+        let rendezvous_id = self.rendezvous_id();
+        let signature = SigningKey::from_bytes(&self.seed)
+            .sign(&completion_signature_message(&rendezvous_id))
+            .to_bytes();
+        SignedCliCompletion {
+            version: SIGNAL_VERSION,
+            from: CliRole::Cli,
+            kind: CompletionKind::CompletedElsewhere,
+            public_key: URL_SAFE_NO_PAD.encode(self.public_key),
             signature: URL_SAFE_NO_PAD.encode(signature),
         }
     }
@@ -84,15 +122,27 @@ fn rendezvous_for(public_key: &[u8; 32]) -> [u8; 32] {
     digest.finalize().into()
 }
 
-fn offer_signature_message(seq: u64, body: &[u8]) -> Vec<u8> {
+fn offer_signature_message(attempt: SignalAttempt, body: &[u8]) -> Vec<u8> {
+    let sequence = attempt.sequence();
     let mut message = Vec::with_capacity(OFFER_SIGNATURE_DOMAIN.len() + body.len() + 25);
     message.extend_from_slice(OFFER_SIGNATURE_DOMAIN);
     message.push(SIGNAL_VERSION);
     message.extend_from_slice(b"cli\0");
-    message.extend_from_slice(&seq.to_be_bytes());
+    message.extend_from_slice(&sequence.to_be_bytes());
     message.extend_from_slice(b"offer\0");
     message.extend_from_slice(&(body.len() as u64).to_be_bytes());
     message.extend_from_slice(body);
+    message
+}
+
+fn completion_signature_message(rendezvous_id: &str) -> Vec<u8> {
+    let rendezvous_id = rendezvous_id.as_bytes();
+    let mut message = Vec::with_capacity(
+        COMPLETION_SIGNATURE_DOMAIN.len() + std::mem::size_of::<u32>() + rendezvous_id.len(),
+    );
+    message.extend_from_slice(COMPLETION_SIGNATURE_DOMAIN);
+    message.extend_from_slice(&(rendezvous_id.len() as u32).to_be_bytes());
+    message.extend_from_slice(rendezvous_id);
     message
 }
 
@@ -104,14 +154,20 @@ enum CliRole {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "lowercase")]
-enum PhoneRole {
-    Phone,
+enum ApproverRole {
+    Approver,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "lowercase")]
 enum OfferKind {
     Offer,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum CompletionKind {
+    CompletedElsewhere,
 }
 
 #[derive(Deserialize)]
@@ -132,28 +188,40 @@ pub struct SignedCliOffer {
     signature: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct PhoneAnswer {
+pub struct SignedCliCompletion {
     #[serde(rename = "v")]
     version: u8,
-    from: PhoneRole,
+    from: CliRole,
+    kind: CompletionKind,
+    #[serde(rename = "publicKey")]
+    public_key: String,
+    signature: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ApproverAnswer {
+    #[serde(rename = "v")]
+    version: u8,
+    from: ApproverRole,
     seq: u64,
     kind: AnswerKind,
     body: String,
 }
 
-impl PhoneAnswer {
-    pub fn decode(text: &str) -> Result<Vec<u8>, String> {
+impl ApproverAnswer {
+    pub fn decode(text: &str, expected_attempt: SignalAttempt) -> Result<Vec<u8>, String> {
         let Self {
             version,
-            from: PhoneRole::Phone,
+            from: ApproverRole::Approver,
             seq,
             kind: AnswerKind::Answer,
             body,
         } = serde_json::from_str(text)
-            .map_err(|_| "invalid phone signaling envelope".to_string())?;
-        if version != SIGNAL_VERSION || seq != 0 {
+            .map_err(|_| "invalid approver signaling envelope".to_string())?;
+        if version != SIGNAL_VERSION || seq != expected_attempt.sequence() {
             return Err("unexpected signaling state".into());
         }
         decode_canonical(&body, "signaling body")
@@ -189,42 +257,89 @@ mod tests {
         assert_eq!(key.fragment_value().len(), 43);
         assert_eq!(
             key.rendezvous_id(),
-            "MFHH-4Il-dVD-AwsB7c-4kdD25EFZ_aGEczf569GW8U"
+            "kEJcshyj36SyT3e3fov2QqlBFMMRquKV0hgfhlqLIeI"
         );
         assert_eq!(
             URL_SAFE_NO_PAD.encode(key.identity_session_binding(b"offer", b"answer")),
-            "4onRCvmREapRgbR1UvtUZ_AJ0aCKjDR0Q1fWTksrzJY"
+            "MiMn0rHSnUJlFMpIE5sBrbshnEo2rHruqNEWOYp_9pk"
         );
     }
 
     #[test]
     fn signed_offer_matches_the_browser_vector() {
         let key = fixed_key();
-        let offer = key.sign_offer(br#"{"type":"offer"}"#);
+        let offer = key.sign_offer(SignalAttempt::Direct, br#"{"type":"offer"}"#);
         assert_eq!(
             offer.signature,
-            "U2k9m3s7XkIf9QF0ShT4TNY-FzYYAfoF4RX9zLBWoo5TYwS5-oblqKqQdK7mQVxO92UWDTidykN6Nm3vXeWPDg"
+            "VqMHWBIykqAxKHsKgukMdrF99Jq18DxWgwCvaTCMRYN_nuqUYAuk94tKYrxD_tBaOGRUrl71OeRxlnCCoM8qBw"
         );
         assert_eq!(offer.body, URL_SAFE_NO_PAD.encode(br#"{"type":"offer"}"#));
     }
 
     #[test]
-    fn phone_answer_is_strict_and_canonical() {
+    fn turn_retry_uses_a_distinct_authenticated_sequence() {
+        let key = fixed_key();
+        let body = br#"{"type":"offer"}"#;
+        let direct = key.sign_offer(SignalAttempt::Direct, body);
+        let retry = key.sign_offer(SignalAttempt::TurnRetry, body);
+
+        assert_eq!(direct.seq, 0);
+        assert_eq!(retry.seq, 1);
+        assert_ne!(direct.signature, retry.signature);
         assert_eq!(
-            PhoneAnswer::decode(
-                r#"{"v":3,"from":"phone","seq":0,"kind":"answer","body":"YW5zd2Vy"}"#
+            retry.signature,
+            "TgDrSC1EhIxT5cQKGF7JyM4UZpOc7i0TLgYkpYWHbaVFoJXKlvsZaeJoHvAVFyI_8ZAl1EcMragWSbbeHkaGCw"
+        );
+    }
+
+    #[test]
+    fn signed_completion_is_bound_to_the_private_qr_key_and_room() {
+        let key = fixed_key();
+        assert_eq!(
+            serde_json::to_value(key.sign_completion()).unwrap(),
+            serde_json::json!({
+                "v": 1,
+                "from": "cli",
+                "kind": "completed-elsewhere",
+                "publicKey": "6kpsY-KcUgq-9VB7Ey7F-ZVHdq6-vnuSQh7qaRRG0iw",
+                "signature": "rAs3D7SL7tb5W4vSv_p8S0sMavfnGvFzCAahbjZ2cOz0Qo31MlsELG2Y0H00_HVh8iA-APlKKMHv9otvGLmiDQ"
+            })
+        );
+    }
+
+    #[test]
+    fn approver_answer_is_strict_and_canonical() {
+        assert_eq!(
+            ApproverAnswer::decode(
+                r#"{"v":1,"from":"approver","seq":0,"kind":"answer","body":"YW5zd2Vy"}"#,
+                SignalAttempt::Direct,
             )
             .unwrap(),
             b"answer"
         );
-        assert!(PhoneAnswer::decode(
-            r#"{"v":2,"from":"phone","seq":0,"kind":"answer","body":"YW5zd2Vy"}"#
+        assert!(ApproverAnswer::decode(
+            r#"{"v":0,"from":"approver","seq":0,"kind":"answer","body":"YW5zd2Vy"}"#,
+            SignalAttempt::Direct,
         )
         .is_err());
-        assert!(PhoneAnswer::decode(
-            r#"{"v":3,"from":"phone","seq":0,"kind":"answer","body":"YW5zd2Vy="}"#
+        assert!(ApproverAnswer::decode(
+            r#"{"v":1,"from":"approver","seq":0,"kind":"answer","body":"YW5zd2Vy="}"#,
+            SignalAttempt::Direct,
         )
         .is_err());
+        assert!(ApproverAnswer::decode(
+            r#"{"v":1,"from":"approver","seq":0,"kind":"answer","body":"YW5zd2Vy"}"#,
+            SignalAttempt::TurnRetry,
+        )
+        .is_err());
+        assert_eq!(
+            ApproverAnswer::decode(
+                r#"{"v":1,"from":"approver","seq":1,"kind":"answer","body":"YW5zd2Vy"}"#,
+                SignalAttempt::TurnRetry,
+            )
+            .unwrap(),
+            b"answer"
+        );
     }
 
     #[test]

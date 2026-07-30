@@ -2,7 +2,7 @@
 
 // The demo shell around the keytap CLI: tokenizer, pipelines, redirects, an
 // in-memory filesystem, and a few coreutils. Deliberately tiny; everything
-// keytap-shaped lives in the wasm build of the real CLI, not here.
+// keytap behavior lives in the shared WASM command runner, not here.
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder('utf-8', { fatal: false });

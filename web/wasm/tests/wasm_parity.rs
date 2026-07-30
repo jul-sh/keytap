@@ -30,8 +30,11 @@ fn formats_render() {
     let hex = keytap_core::format_private_key(&raw, keytap_core::PrivateKeyFormat::Hex).unwrap();
     assert_eq!(String::from_utf8(hex).unwrap(), "ab".repeat(32));
 
-    let age = keytap_core::format_private_key(&raw, keytap_core::PrivateKeyFormat::AgeSecretKey).unwrap();
-    assert!(String::from_utf8(age).unwrap().starts_with("AGE-SECRET-KEY-1"));
+    let age =
+        keytap_core::format_private_key(&raw, keytap_core::PrivateKeyFormat::AgeSecretKey).unwrap();
+    assert!(String::from_utf8(age)
+        .unwrap()
+        .starts_with("AGE-SECRET-KEY-1"));
 
     let ssh =
         keytap_core::format_private_key_display(&raw, keytap_core::PrivateKeyFormat::SshPrivateKey)
@@ -40,9 +43,13 @@ fn formats_render() {
     assert!(ssh.starts_with("-----BEGIN OPENSSH PRIVATE KEY-----"));
     assert!(ssh.ends_with("-----END OPENSSH PRIVATE KEY-----\n"));
 
-    let public =
-        keytap_core::format_public_key_display(&raw, keytap_core::PublicKeyFormat::SshPublicKey, "demo")
-            .unwrap();
+    let public = keytap_core::format_public_key_display(
+        &raw,
+        keytap_core::PublicKeyFormat::Ssh {
+            comment: Some("demo"),
+        },
+    )
+    .unwrap();
     assert!(public.starts_with("ssh-ed25519 "));
     assert!(public.ends_with(" keytap:demo\n"));
 }
@@ -57,12 +64,4 @@ fn age_roundtrip() {
     let mut plaintext = Vec::new();
     keytap_core::encrypt::decrypt_stream(&raw, &mut &ciphertext[..], &mut plaintext).unwrap();
     assert_eq!(plaintext, b"wasm parity");
-}
-
-#[wasm_bindgen_test]
-fn spec_parses_formats_by_clap_name() {
-    use std::str::FromStr;
-    let format = keytap_cli_spec::Format::from_str("ssh").unwrap();
-    assert_eq!(format.as_str(), "ssh");
-    assert!(keytap_cli_spec::Format::from_str("yaml").is_err());
 }

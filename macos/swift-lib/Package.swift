@@ -2,16 +2,15 @@
 import PackageDescription
 
 let package = Package(
-    name: "PasskeyBridge",
-    platforms: [.macOS(.v15)],
-    products: [
-        .library(name: "PasskeyBridge", type: .static, targets: ["PasskeyBridge"]),
-    ],
-    targets: [
-        .target(
-            name: "PasskeyBridge",
-            path: "Sources/PasskeyBridge",
-            swiftSettings: [.swiftLanguageMode(.v5)]
-        ),
-    ]
+  name: "PasskeyBridge",
+  platforms: [.macOS(.v15)],
+  products: [
+    .library(name: "PasskeyBridge", type: .static, targets: ["PasskeyBridge"])
+  ],
+  targets: [
+    .target(
+      name: "PasskeyBridge",
+      path: "Sources/PasskeyBridge"
+    )
+  ]
 )

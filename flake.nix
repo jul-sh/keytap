@@ -25,8 +25,7 @@
           };
         };
 
-        # The only version statement is the release tag inside the artifact
-        # URL, so the package version can never drift from what it ships.
+        # Derive the Nix package version from the downloaded release URL.
         versionFromUrl = url:
           builtins.head (builtins.match ".*/download/v([^/]+)/.*" url);
       in
@@ -61,9 +60,8 @@
             cargo
             rustfmt
             clippy
-            lld
             wasm-pack
-            wrangler
+            nodejs
           ];
 
           shellHook = if isDarwin then ''

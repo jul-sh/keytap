@@ -4,13 +4,12 @@ use wasm_bindgen::prelude::*;
 
 // ─── The CLI, compiled to wasm ───
 //
-// The web terminal funnels every `keytap …` line through `cliRun`, which
-// parses with the same keytap-cli-spec crate the native binary uses and then
-// executes the command right here, against keytap-core. JavaScript supplies
-// only the platform: passkey ceremonies, the shell's in-memory files, and a
-// stderr sink. There is no mirrored command enum, no restated format names,
-// and no execution logic on the JS side; a new subcommand fails this crate's
-// build instead of silently missing a case in a script.
+// The web terminal funnels every `keytap …` line through `cliRun`, which parses
+// with the same keytap-cli-spec crate the native binary uses and derives keys
+// with keytap-core. JavaScript supplies the browser platform: passkey
+// ceremonies, the shell's in-memory files, and a stderr sink. Machine storage,
+// nearby approval, and CI environment keys remain installed-CLI features. A
+// new subcommand fails this crate's build instead of silently missing a case.
 
 /// What the browser provides. Ceremony UX (the busy line, cancellation)
 /// lives inside these callbacks.
@@ -26,10 +25,11 @@ extern "C" {
     #[wasm_bindgen(method, catch)]
     async fn prf(this: &Host, name: &str) -> Result<JsValue, JsValue>;
 
-    /// Whether this browser already holds a keytap credential; drives init's
-    /// refusal to silently replace it.
-    #[wasm_bindgen(method, js_name = hasCredential)]
-    fn has_credential(this: &Host) -> bool;
+    /// Whether this browser has recorded a credential ID from an earlier
+    /// ceremony. This drives a conservative init guard; `false` does not mean
+    /// an existing synced or security-key passkey is unavailable.
+    #[wasm_bindgen(method, js_name = hasCredentialId)]
+    fn has_credential_id(this: &Host) -> bool;
 
     /// Read a file from the shell's filesystem; undefined when missing.
     #[wasm_bindgen(method, js_name = readFile)]
@@ -40,22 +40,32 @@ extern "C" {
     fn stderr(this: &Host, text: &str);
 }
 
-/// Commands that store state on "this machine" have no home in a page that
-/// deliberately keeps none.
-const STATELESS: &str = "this page stores nothing, so keys are never remembered here; \
-     install keytap on a machine for that: https://github.com/jul-sh/keytap";
+/// The browser shell has no machine key store. It may retain a credential ID
+/// for passkey selection, but never implements the installed CLI's named-key
+/// storage commands.
+const STATELESS: &str = "the web demo does not provide machine key storage; \
+     remember, forget, and remembered require the installed keytap CLI: \
+     https://github.com/jul-sh/keytap";
 
 /// What an argv amounts to before any ceremony: text the CLI would print
 /// without running anything, or a command to execute. Pure, so the front-end
 /// decisions stay natively testable.
 enum Plan {
-    Output { stdout: String, stderr: String, exit: i32 },
+    Output {
+        stdout: String,
+        stderr: String,
+        exit: i32,
+    },
     Run(Cli),
 }
 
 fn plan(argv: Vec<String>) -> Plan {
     match keytap_cli_spec::invoke(argv) {
-        Invocation::Overview(text) => Plan::Output { stdout: text, stderr: String::new(), exit: 0 },
+        Invocation::Overview(text) => Plan::Output {
+            stdout: text,
+            stderr: String::new(),
+            exit: 0,
+        },
         // Native keytap answers misuse via `die`: `error: …` on stderr, exit 1.
         Invocation::Misuse(msg) => Plan::Output {
             stdout: String::new(),
@@ -65,9 +75,17 @@ fn plan(argv: Vec<String>) -> Plan {
         Invocation::Parsed(Err(e)) => {
             let text = e.render().to_string();
             if e.use_stderr() {
-                Plan::Output { stdout: String::new(), stderr: text, exit: e.exit_code() }
+                Plan::Output {
+                    stdout: String::new(),
+                    stderr: text,
+                    exit: e.exit_code(),
+                }
             } else {
-                Plan::Output { stdout: text, stderr: String::new(), exit: 0 }
+                Plan::Output {
+                    stdout: text,
+                    stderr: String::new(),
+                    exit: 0,
+                }
             }
         }
         Invocation::Parsed(Ok(cli)) => Plan::Run(cli),
@@ -81,7 +99,11 @@ fn plan(argv: Vec<String>) -> Plan {
 #[wasm_bindgen(js_name = cliRun)]
 pub async fn cli_run(argv: Vec<String>, stdin: &[u8], host: Host) -> Result<JsValue, JsValue> {
     let cli = match plan(argv) {
-        Plan::Output { stdout, exit, stderr } => {
+        Plan::Output {
+            stdout,
+            exit,
+            stderr,
+        } => {
             if !stderr.is_empty() {
                 host.stderr(stderr.trim_end_matches('\n'));
             }
@@ -90,20 +112,27 @@ pub async fn cli_run(argv: Vec<String>, stdin: &[u8], host: Host) -> Result<JsVa
         Plan::Run(cli) => cli,
     };
 
-    if cli.nearby {
-        host.stderr("error: --nearby is only available in the installed keytap CLI");
-        return done(Vec::new(), 1, None);
-    }
-
     let command = cli.command;
     let stdout: Vec<u8> = match &command {
-        Command::Init { force } => {
-            if !force && host.has_credential() {
+        Command::Init { force, nearby } => {
+            if *nearby {
+                host.stderr("error: init --nearby is only available in the installed keytap CLI");
+                return done(Vec::new(), 1, None);
+            }
+            if !force && host.has_credential_id() {
                 return Err(fail(
-                    "a keytap passkey already exists in this browser. Running init again \
-                     creates a new one: keys derived from the current passkey can no longer \
-                     be re-derived. Pass --force to replace the passkey.",
+                    "this browser has a saved keytap credential ID. Running init creates a \
+                     different passkey and makes this demo select it, so existing named keys \
+                     would derive differently. Pass --force only if you intend to switch.",
                 ));
+            }
+            if !force {
+                host.stderr(
+                    "No credential ID is saved in this browser, but an existing keytap \
+                     passkey may still be available through sync or a security key. Init \
+                     creates a new passkey; cancel if you already use keytap and run the \
+                     command you need instead.",
+                );
             }
             host.register().await?;
             host.stderr("Passkey registered successfully.");
@@ -112,7 +141,7 @@ pub async fn cli_run(argv: Vec<String>, stdin: &[u8], host: Host) -> Result<JsVa
 
         Command::Public { name, format } => {
             let raw_key = obtain_key(&host, name).await?;
-            keytap_core::format_public_key_display(&raw_key, (*format).into(), name)
+            keytap_core::format_public_key_display(&raw_key, format.public_key_format(name))
                 .map_err(|e| fail(&format!("format error: {e}")))?
                 .into_bytes()
         }
@@ -123,7 +152,12 @@ pub async fn cli_run(argv: Vec<String>, stdin: &[u8], host: Host) -> Result<JsVa
                 .map_err(|e| fail(&format!("format error: {e}")))?
         }
 
-        Command::Encrypt { name, recipients, recipients_file, no_self } => {
+        Command::Encrypt {
+            name,
+            recipients,
+            recipients_file,
+            no_self,
+        } => {
             let mut files = Vec::new();
             for file in recipients_file {
                 let data = host.read_file(file);
@@ -190,7 +224,9 @@ fn done(stdout: Vec<u8>, exit: i32, ran: Option<&Command>) -> Result<JsValue, Js
 
 #[wasm_bindgen(js_name = registrationConfig)]
 pub fn registration_config() -> Result<JsValue, JsError> {
-    Ok(serde_wasm_bindgen::to_value(&keytap_core::registration_config())?)
+    Ok(serde_wasm_bindgen::to_value(
+        &keytap_core::registration_config(),
+    )?)
 }
 
 #[wasm_bindgen(js_name = assertionConfig)]
@@ -201,6 +237,17 @@ pub fn assertion_config(
     let config = keytap_core::assertion_config(key_name, preferred_credential_id)
         .map_err(|e| JsError::new(&e.to_string()))?;
     Ok(serde_wasm_bindgen::to_value(&config)?)
+}
+
+/// Derive only the public half of the stable nearby Ed25519 identity. Taking
+/// ownership lets us wipe wasm-bindgen's private seed copy before returning.
+#[wasm_bindgen(js_name = ed25519PublicKey)]
+pub fn ed25519_public_key(mut seed: Vec<u8>) -> Result<Vec<u8>, JsError> {
+    let public_key = keytap_core::ed25519_public_key(&seed)
+        .map(|public_key| public_key.to_vec())
+        .map_err(|error| JsError::new(&error.to_string()));
+    seed.fill(0);
+    public_key
 }
 
 // ─── Terminal chrome inputs ───
@@ -214,7 +261,9 @@ pub fn cli_version() -> String {
 /// from the same clap metadata as the help, so completion can't drift.
 #[wasm_bindgen(js_name = cliCompletions)]
 pub fn cli_completions() -> Result<JsValue, JsError> {
-    Ok(serde_wasm_bindgen::to_value(&keytap_cli_spec::completions())?)
+    Ok(serde_wasm_bindgen::to_value(
+        &keytap_cli_spec::completions(),
+    )?)
 }
 
 #[cfg(test)]
@@ -222,13 +271,20 @@ mod plan_tests {
     use super::*;
 
     fn argv(line: &str) -> Vec<String> {
-        std::iter::once("keytap").chain(line.split_whitespace()).map(String::from).collect()
+        std::iter::once("keytap")
+            .chain(line.split_whitespace())
+            .map(String::from)
+            .collect()
     }
 
     #[test]
     fn overview_goes_to_stdout_with_exit_zero() {
         match plan(argv("")) {
-            Plan::Output { stdout, stderr, exit } => {
+            Plan::Output {
+                stdout,
+                stderr,
+                exit,
+            } => {
                 assert!(stdout.contains("Usage: keytap <COMMAND>"));
                 assert!(stderr.is_empty());
                 assert_eq!(exit, 0);
@@ -240,7 +296,11 @@ mod plan_tests {
     #[test]
     fn usage_error_goes_to_stderr_with_exit_two() {
         match plan(argv("frobnicate")) {
-            Plan::Output { stdout, stderr, exit } => {
+            Plan::Output {
+                stdout,
+                stderr,
+                exit,
+            } => {
                 assert!(stdout.is_empty());
                 assert!(stderr.contains("frobnicate"));
                 assert_eq!(exit, 2);
@@ -263,13 +323,23 @@ mod plan_tests {
     #[test]
     fn reveal_parses_to_run() {
         match plan(argv("reveal github --as ssh")) {
-            Plan::Run(cli) => match cli.command {
-                Command::Reveal { name, format } => {
-                    assert_eq!(name, "github");
-                    assert_eq!(format.as_str(), "ssh");
+            Plan::Run(cli) => {
+                assert_eq!(
+                    serde_json::to_value(&cli.command).unwrap(),
+                    serde_json::json!({
+                        "cmd": "reveal",
+                        "name": "github",
+                        "format": "ssh",
+                    })
+                );
+                match cli.command {
+                    Command::Reveal { name, format } => {
+                        assert_eq!(name, "github");
+                        assert!(matches!(format, keytap_cli_spec::Format::Ssh));
+                    }
+                    _ => panic!("wrong command"),
                 }
-                _ => panic!("wrong command"),
-            },
+            }
             _ => panic!("expected run"),
         }
     }
@@ -277,16 +347,28 @@ mod plan_tests {
     #[test]
     fn init_parses_its_force_switch() {
         match plan(argv("init --force")) {
-            Plan::Run(cli) => assert!(matches!(cli.command, Command::Init { force: true })),
+            Plan::Run(cli) => {
+                assert!(matches!(
+                    cli.command,
+                    Command::Init {
+                        force: true,
+                        nearby: false
+                    }
+                ))
+            }
             _ => panic!("expected run"),
         }
     }
 
     #[test]
-    fn nearby_parses_for_the_installed_cli_surface() {
+    fn nearby_is_an_init_only_installed_cli_route() {
+        assert!(matches!(plan(argv("init --nearby")), Plan::Run(_)));
         match plan(argv("reveal --nearby")) {
-            Plan::Run(cli) => assert!(cli.nearby),
-            _ => panic!("expected run"),
+            Plan::Output { stderr, exit, .. } => {
+                assert!(stderr.contains("unexpected argument '--nearby'"));
+                assert_eq!(exit, 2);
+            }
+            _ => panic!("expected assertion --nearby to be rejected"),
         }
     }
 
@@ -316,10 +398,22 @@ mod plan_tests {
         let raw = vec![7u8; 32];
         let recipients = keytap_core::encrypt::recipients(Some(&raw), &[], &[]).unwrap();
         let mut ciphertext = Vec::new();
-        keytap_core::encrypt::encrypt_stream(&recipients, &mut &b"hello keytap"[..], &mut ciphertext)
-            .unwrap();
+        keytap_core::encrypt::encrypt_stream(
+            &recipients,
+            &mut &b"hello keytap"[..],
+            &mut ciphertext,
+        )
+        .unwrap();
         let mut plaintext = Vec::new();
         keytap_core::encrypt::decrypt_stream(&raw, &mut &ciphertext[..], &mut plaintext).unwrap();
         assert_eq!(plaintext, b"hello keytap");
+    }
+
+    #[test]
+    fn nearby_identity_public_key_matches_the_browser_vector() {
+        assert_eq!(
+            hex::encode(ed25519_public_key(vec![7; 32]).unwrap()),
+            "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c"
+        );
     }
 }

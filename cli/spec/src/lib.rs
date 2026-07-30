@@ -25,28 +25,19 @@ pub struct Cli {
     #[command(subcommand)]
     pub command: Command,
 
-    /// Use the QR-code nearby-phone flow instead of native passkey UI
-    #[arg(long, global = true)]
-    pub nearby: bool,
-
-    /// Run a passkey ceremony even under $CI (the QR code lands in the job log)
-    // With $CI set, a missing key fails fast instead of prompting — a prompt
-    // in a headless job is a hung runner, not a question. This is the
-    // override for the rare run where someone really is watching the log.
+    /// Allow passkey ceremonies under $CI (only affects commands that need one)
+    // With $CI set, a command that needs a ceremony fails fast instead of
+    // prompting — a prompt in a headless job is a hung runner, not a question.
+    // This is the override for the rare run where someone is watching the log.
     #[arg(long, global = true)]
     pub prompt: bool,
 }
 
-// The serde view mirrors nothing by hand: variant tags and field names come
-// from the same identifiers clap derives the CLI surface from.
-#[cfg_attr(
-    feature = "serde",
-    derive(serde::Serialize),
-    serde(tag = "cmd", rename_all = "camelCase", rename_all_fields = "camelCase")
-)]
-#[derive(Subcommand)]
+// Serialization and clap use the same variant and field definitions.
+#[derive(Subcommand, serde::Serialize)]
+#[serde(tag = "cmd", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum Command {
-    /// Create the passkey (only needed once)
+    /// Create a keytap passkey, if you do not already have one
     Init {
         /// Replace an already-registered passkey (every derived key changes)
         // Re-running init is destructive — the new passkey overwrites the old
@@ -54,6 +45,14 @@ pub enum Command {
         // reproducible. Each frontend refuses a detected re-init without this.
         #[arg(long)]
         force: bool,
+
+        /// Register the passkey on a nearby device instead of this machine
+        // Registration cannot safely race two authenticators: each successful
+        // ceremony can create a different credential and PRF root. Keep this
+        // route choice local to init; assertion commands always offer every
+        // available approval route concurrently.
+        #[arg(long)]
+        nearby: bool,
     },
 
     /// Output the public key
@@ -63,11 +62,8 @@ pub enum Command {
         name: String,
 
         /// Output format
-        // `--as` is the documented flag; `--format` stays as a hidden alias so
-        // existing scripts keep working. (`as` is a Rust keyword, hence the
-        // field is still named `format`.)
-        #[arg(long = "as", alias = "format", value_name = "FORMAT", default_value = "hex")]
-        format: PublicFormat,
+        #[arg(long = "as", value_name = "FORMAT", default_value = "hex")]
+        format: Format,
     },
 
     /// Reveal private key material
@@ -78,7 +74,7 @@ pub enum Command {
         name: String,
 
         /// Output format
-        #[arg(long = "as", alias = "format", value_name = "FORMAT", default_value = "hex")]
+        #[arg(long = "as", value_name = "FORMAT", default_value = "hex")]
         format: Format,
     },
 
@@ -131,7 +127,8 @@ pub enum Command {
     Remembered,
 }
 
-#[derive(Clone, Copy, ValueEnum)]
+#[derive(Clone, Copy, ValueEnum, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Format {
     Hex,
     Base64,
@@ -139,55 +136,18 @@ pub enum Format {
     Ssh,
 }
 
-#[derive(Clone, Copy, ValueEnum)]
-pub enum PublicFormat {
-    Hex,
-    Base64,
-    Age,
-    Ssh,
-}
-
 impl Format {
-    /// The CLI-facing name of this format — exactly what `--as` accepts.
-    pub fn as_str(self) -> String {
-        self.to_possible_value().unwrap().get_name().to_string()
-    }
-}
-
-impl PublicFormat {
-    /// The CLI-facing name of this format — exactly what `--as` accepts.
-    pub fn as_str(self) -> String {
-        self.to_possible_value().unwrap().get_name().to_string()
-    }
-}
-
-// `--as` names parse and print through clap's own value metadata, so a
-// rename in the derive is the single edit everywhere.
-impl std::str::FromStr for Format {
-    type Err = String;
-    fn from_str(s: &str) -> Result<Self, String> {
-        <Self as ValueEnum>::from_str(s, false)
-    }
-}
-
-impl std::str::FromStr for PublicFormat {
-    type Err = String;
-    fn from_str(s: &str) -> Result<Self, String> {
-        <Self as ValueEnum>::from_str(s, false)
-    }
-}
-
-#[cfg(feature = "serde")]
-impl serde::Serialize for Format {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(&self.as_str())
-    }
-}
-
-#[cfg(feature = "serde")]
-impl serde::Serialize for PublicFormat {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(&self.as_str())
+    /// Convert the parsed command at the execution boundary, co-locating the
+    /// key name with the only output format where it is meaningful as data.
+    pub fn public_key_format<'a>(self, key_name: &'a str) -> keytap_core::PublicKeyFormat<'a> {
+        match self {
+            Self::Hex => keytap_core::PublicKeyFormat::Hex,
+            Self::Base64 => keytap_core::PublicKeyFormat::Base64,
+            Self::Age => keytap_core::PublicKeyFormat::AgeRecipient,
+            Self::Ssh => keytap_core::PublicKeyFormat::Ssh {
+                comment: Some(key_name),
+            },
+        }
     }
 }
 
@@ -198,17 +158,6 @@ impl From<Format> for keytap_core::PrivateKeyFormat {
             Format::Base64 => keytap_core::PrivateKeyFormat::Base64,
             Format::Age => keytap_core::PrivateKeyFormat::AgeSecretKey,
             Format::Ssh => keytap_core::PrivateKeyFormat::SshPrivateKey,
-        }
-    }
-}
-
-impl From<PublicFormat> for keytap_core::PublicKeyFormat {
-    fn from(f: PublicFormat) -> Self {
-        match f {
-            PublicFormat::Hex => keytap_core::PublicKeyFormat::Hex,
-            PublicFormat::Base64 => keytap_core::PublicKeyFormat::Base64,
-            PublicFormat::Age => keytap_core::PublicKeyFormat::AgeRecipient,
-            PublicFormat::Ssh => keytap_core::PublicKeyFormat::SshPublicKey,
         }
     }
 }
@@ -300,13 +249,19 @@ mod tests {
     use super::*;
 
     fn argv(line: &str) -> Vec<String> {
-        std::iter::once("keytap").chain(line.split_whitespace()).map(String::from).collect()
+        std::iter::once("keytap")
+            .chain(line.split_whitespace())
+            .map(String::from)
+            .collect()
     }
 
     #[test]
     fn bare_and_help_tokens_yield_overview() {
         for line in ["", "-h", "--help", "help", "help reveal"] {
-            assert!(matches!(invoke(argv(line)), Invocation::Overview(_)), "argv: {line:?}");
+            assert!(
+                matches!(invoke(argv(line)), Invocation::Overview(_)),
+                "argv: {line:?}"
+            );
         }
     }
 
@@ -314,7 +269,10 @@ mod tests {
     fn bare_remember_is_misuse() {
         assert!(matches!(invoke(argv("remember")), Invocation::Misuse(_)));
         // With a name it parses normally.
-        assert!(matches!(invoke(argv("remember deploy")), Invocation::Parsed(Ok(_))));
+        assert!(matches!(
+            invoke(argv("remember deploy")),
+            Invocation::Parsed(Ok(_))
+        ));
     }
 
     #[test]
@@ -328,23 +286,47 @@ mod tests {
     #[test]
     fn parse_defaults() {
         match invoke(argv("reveal")) {
-            Invocation::Parsed(Ok(cli)) => {
-                assert!(!cli.nearby);
-                match cli.command {
-                    Command::Reveal { name, .. } => assert_eq!(name, "default"),
-                    _ => panic!("wrong command"),
-                }
-            }
+            Invocation::Parsed(Ok(cli)) => match cli.command {
+                Command::Reveal { name, .. } => assert_eq!(name, "default"),
+                _ => panic!("wrong command"),
+            },
             _ => panic!("expected parse"),
         }
     }
 
     #[test]
-    fn nearby_is_a_global_flow_override() {
-        for line in ["--nearby reveal", "reveal --nearby"] {
+    fn public_format_conversion_co_locates_the_ssh_comment() {
+        assert!(matches!(
+            Format::Hex.public_key_format("deploy"),
+            keytap_core::PublicKeyFormat::Hex
+        ));
+        assert!(matches!(
+            Format::Ssh.public_key_format("deploy"),
+            keytap_core::PublicKeyFormat::Ssh {
+                comment: Some("deploy")
+            }
+        ));
+    }
+
+    #[test]
+    fn nearby_is_only_an_init_registration_route() {
+        match invoke(argv("init --nearby")) {
+            Invocation::Parsed(Ok(cli)) => {
+                assert!(matches!(
+                    cli.command,
+                    Command::Init {
+                        force: false,
+                        nearby: true
+                    }
+                ))
+            }
+            _ => panic!("expected init --nearby to parse"),
+        }
+
+        for line in ["--nearby reveal", "reveal --nearby", "--nearby init"] {
             match invoke(argv(line)) {
-                Invocation::Parsed(Ok(cli)) => assert!(cli.nearby, "argv: {line:?}"),
-                _ => panic!("expected parse for {line:?}"),
+                Invocation::Parsed(Err(_)) => {}
+                _ => panic!("expected {line:?} to reject the init-only flag"),
             }
         }
     }
@@ -352,11 +334,27 @@ mod tests {
     #[test]
     fn init_requires_an_explicit_force() {
         match invoke(argv("init")) {
-            Invocation::Parsed(Ok(cli)) => assert!(matches!(cli.command, Command::Init { force: false })),
+            Invocation::Parsed(Ok(cli)) => {
+                assert!(matches!(
+                    cli.command,
+                    Command::Init {
+                        force: false,
+                        nearby: false
+                    }
+                ))
+            }
             _ => panic!("expected parse"),
         }
         match invoke(argv("init --force")) {
-            Invocation::Parsed(Ok(cli)) => assert!(matches!(cli.command, Command::Init { force: true })),
+            Invocation::Parsed(Ok(cli)) => {
+                assert!(matches!(
+                    cli.command,
+                    Command::Init {
+                        force: true,
+                        nearby: false
+                    }
+                ))
+            }
             _ => panic!("expected parse"),
         }
     }
@@ -367,6 +365,22 @@ mod tests {
         for cmd in completions() {
             assert!(text.contains(&cmd.0), "overview missing {}", cmd.0);
         }
-        assert!(text.contains("--nearby"));
+        assert!(text.contains("init [--nearby]"));
+        assert!(!text.contains("Options\n  --nearby"));
+    }
+
+    #[test]
+    fn completions_scope_nearby_to_init() {
+        let completions = completions();
+        let flags_for = |command: &str| {
+            completions
+                .iter()
+                .find(|(name, _)| name == command)
+                .map(|(_, flags)| flags.as_slice())
+                .expect("command should have completions")
+        };
+
+        assert!(flags_for("init").iter().any(|flag| flag == "--nearby"));
+        assert!(!flags_for("reveal").iter().any(|flag| flag == "--nearby"));
     }
 }

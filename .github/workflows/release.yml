@@ -53,7 +53,7 @@ jobs:
       - name: Build
         id: package
         run: |
-          cargo build --release -p keytap --no-default-features
+          cargo build --release -p keytap
           SHA="${GITHUB_SHA::7}"
           ZIP_NAME="keytap-${SHA}-linux-x86_64.zip"
           zip "$ZIP_NAME" -j target/release/keytap

@@ -14,6 +14,10 @@ By default, no derived key is stored.
 
 Try it without installing at [keytap.jul.sh](https://keytap.jul.sh).
 
+The web demo shares the CLI parser and key-derivation code. Machine key
+storage, nearby approval, and CI environment-key behavior require the
+installed CLI.
+
 <!--HELP:BEGIN-->
 ```
 Derive keys and encrypt files from a passkey.
@@ -21,7 +25,7 @@ Derive keys and encrypt files from a passkey.
 Usage: keytap <COMMAND> [ARGS]
 
 Commands
-  init                                Create the passkey (only needed once)
+  init [--nearby]                     Create a keytap passkey, if you do not already have one
   public [NAME] [--as VAL]            Output the public key
   reveal [NAME] [--as VAL]            Reveal private key material
   encrypt [NAME] [--to VAL] [-R VAL]  Encrypt stdin to stdout with the derived age identity
@@ -31,6 +35,7 @@ Commands
   remembered                          List keys remembered on this machine (never prints key material)
 
 Arguments & options
+  --nearby  Register the passkey on a nearby device instead of this machine
   NAME      Key name for domain separation  [default: default]
   --as VAL  Output format  (hex | base64 | age | ssh)  [default: hex]
   --to VAL  Additional age recipient (can be repeated)
@@ -38,8 +43,7 @@ Arguments & options
   --all     Forget every remembered key, including ones from previous passkeys
 
 Options
-  --nearby  Use the QR-code nearby-phone flow instead of native passkey UI
-  --prompt  Run a passkey ceremony even under $CI (the QR code lands in the job log)
+  --prompt  Allow passkey ceremonies under $CI (only affects commands that need one)
 
 Skip repeated prompts for a key: `keytap remember NAME` (see `keytap remember --help`).
 Holds that expire instead (ssh-agent, TTLs): see `keytap reveal --help`.
@@ -59,30 +63,51 @@ Use names such as `github`, `backup`, or `deploy` for domain separation. Run
 the same command on another machine with the same passkey to reproduce the key.
 Use `keytap remember NAME` when you prefer local storage to repeated prompts.
 
-## Platform model
+## Approval routes
 
-- **macOS:** native WebAuthn, normally approved with Touch ID or the system
-  passkey UI.
-- **Other platforms:** scan a QR code to use a nearby phone. The QR authenticates
-  an encrypted WebRTC connection; Cloudflare TURN relays it when direct ICE
-  fails. On first use, confirm the same two words in the terminal. Later uses
-  authenticate the pinned passkey identity without another comparison.
+- **Using an existing passkey on macOS:** keytap opens the native passkey
+  prompt and prints a forwardable approval URL at the same time. The first
+  verified approval wins; keytap closes the other route.
+- **Registration on macOS:** `keytap init` uses the native prompt;
+  `keytap init --nearby` uses a nearby device. Registration has one route so
+  two successful attempts cannot create different passkeys.
+- **Other platforms:** passkey ceremonies use a QR code and approval URL on a
+  nearby device.
 
-Pass `--nearby` to any installed command that needs a ceremony to request the
-phone flow explicitly.
+Nearby approval authenticates an end-to-end encrypted WebRTC connection. It
+tries direct peer-to-peer connectivity first. If that fails, an allowlisted
+passkey identity can authorize the managed relay; an identity outside the
+allowlist gets a specific error explaining why relay access is unavailable.
+Registration and nearby identity pairing are separate. `init --nearby` has a
+terminal word comparison, and the first later key request approved through the
+nearby route has one too. Complete that first nearby key request while someone
+is at the terminal. Afterward, approval URLs can be forwarded and approved
+remotely with nobody at the Mac.
+
+On macOS, direct P2P can trigger Local Network privacy once per user; signing
+does not remove that prompt. A stable Developer ID release normally avoids the
+repeated Application Firewall prompts caused by rebuilding an ad-hoc-signed
+debug binary. “Find and connect to devices on your local network” is the Local
+Network alert; “accept incoming network connections” is the Application
+Firewall alert.
 
 ## Install
 
 ```bash
+case "$(uname -s)/$(uname -m)" in
+  Darwin/arm64) ASSET='arm64.zip' ;;
+  Linux/x86_64) ASSET='linux-x86_64.zip' ;;
+  *) echo 'Keytap has no release for this platform.' >&2; exit 1 ;;
+esac
 URL=$(curl -fsSL https://api.github.com/repos/jul-sh/keytap/releases/latest \
   | grep -o '"browser_download_url": *"[^"]*"' | cut -d '"' -f 4 \
-  | grep "$([ "$(uname -s)" = Darwin ] && echo arm64 || echo linux)") \
+  | grep "$ASSET$") \
   && curl -fLO "$URL" && mkdir -p ~/.local/bin \
   && if [ "$(uname -s)" = Darwin ]; then
        mkdir -p ~/.local/share/keytap && unzip -o keytap-*-arm64.zip -d ~/.local/share/keytap \
        && ln -sf ~/.local/share/keytap/Keytap.app/Contents/MacOS/keytap ~/.local/bin/keytap
      else
-       unzip -o keytap-*-linux*.zip keytap -d ~/.local/bin
+       unzip -o keytap-*-linux-x86_64.zip keytap -d ~/.local/bin
      fi
 ```
 
@@ -96,6 +121,7 @@ gh attestation verify keytap-*.zip -R jul-sh/keytap
 ## Guides
 
 - [Share an encrypted `.env` through Git with multiple developers](docs/team-env.md)
+- [Deploy Cloudflare signaling and allowlisted TURN](docs/turn.md)
 
 ## Security
 
@@ -114,14 +140,13 @@ as [FIDO2 SSH keys](https://developers.yubico.com/SSH/Securing_git_with_SSH_and_
 [`age-keygen`](https://github.com/FiloSottile/age), or
 [`age-plugin-yubikey`](https://github.com/str4d/age-plugin-yubikey).
 
-### Auth via nearby phone (fallback)
+### Nearby approval
 
-- **Trust the scanned QR.** It identifies the receiving CLI. A substituted QR
-  sends the approved PRF result to an attacker; terminal word comparison cannot
-  undo that disclosure. Scan directly from the terminal running `keytap`.
-- **Trust the phone web page.** It sees the PRF outputs and nearby identity seed.
-- The QR is public. Someone who reads it can race the phone, observe request
-  metadata, or deny service, but cannot forge the CLI's signed offer.
+- **Protect the nearby link when forwarding it.** A substituted URL can send
+  the approved result to a different CLI. Anyone who sees the real link can
+  observe request metadata, race the intended approver, or deny service. The
+  link alone cannot forge the waiting CLI or authorize relay access.
+- **Trust the approval page.** It sees the PRF outputs and nearby identity seed.
 
 ## Skipping repeated prompts
 
@@ -141,9 +166,9 @@ Otherwise it writes an owner-only file at
 not encrypted; treat it like an SSH private key. Any process running as you may
 be able to use remembered keys without another ceremony.
 
-Nearby auth offers the same option before approval. Choose **Use once** to store
-nothing, or **Use and remember** to store the key on the CLI machine using that
-same passkey approval.
+Nearby auth offers the same option before approval. Choose **Use once** not to
+store the named derived key, or **Use and remember** to store it on the CLI
+machine using that same passkey approval.
 
 For an expiring SSH hold, use `ssh-agent`:
 
@@ -188,24 +213,8 @@ steps:
 - A leaked value compromises that name permanently; retire the name. It does
   not reveal the passkey root or keys under other names.
 
-Use `--prompt` only for an attended CI run.
-
-## Cloudflare TURN deployment (maintainers)
-
-Create a Realtime TURN key, then install its **Turn Token ID** and **API Token**
-as Worker secrets. Never commit or send the API token to a client. See the
-[TURN credential guide](https://developers.cloudflare.com/realtime/turn/generate-credentials/).
-
-```bash
-cd web/relay
-nix run nixpkgs#wrangler -- secret put TURN_KEY_ID
-nix run nixpkgs#wrangler -- secret put TURN_KEY_API_TOKEN
-nix run nixpkgs#wrangler -- deploy
-```
-
-Authenticate Wrangler with `CLOUDFLARE_API_TOKEN`; the account ID is in
-`wrangler.toml`. TURN credentials are public, short-lived, and not persisted.
-There is no account-level authorization or quota protection.
+Use `--prompt` only when someone will approve either the native prompt or the
+forwarded nearby URL.
 
 ## Tips
 
