@@ -1,7 +1,7 @@
 /* ─── keytap — shared identity ───
    One palette and one type system for every page: the BSOD-brutalist blue,
    Pixelify Sans for display, Iosevka Charon for everything else. Fonts are
-   self-hosted: these pages claim nothing leaves them, so nothing may. */
+   self-hosted so the pages never need third-party font or asset requests. */
 
 @font-face {
   font-family: "Pixelify Sans";

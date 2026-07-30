@@ -75,9 +75,10 @@ pub fn encrypt_stream(
     reader: &mut dyn Read,
     writer: &mut dyn Write,
 ) -> Result<(), KeytapError> {
-    let encryptor =
-        age::Encryptor::with_recipients(recipients.iter().map(|r| r.as_ref() as &dyn age::Recipient))
-            .map_err(|e| crypto_err(format!("failed to create encryptor: {e}")))?;
+    let encryptor = age::Encryptor::with_recipients(
+        recipients.iter().map(|r| r.as_ref() as &dyn age::Recipient),
+    )
+    .map_err(|e| crypto_err(format!("failed to create encryptor: {e}")))?;
 
     let mut age_writer = encryptor
         .wrap_output(writer)

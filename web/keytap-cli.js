@@ -1,12 +1,17 @@
 'use strict';
 
-// The `keytap` command of the web terminal. Parsing, help, and execution all
-// happen inside the wasm build of the real CLI (cliRun); this module is the
-// platform: WebAuthn ceremonies, the shell's files, stderr, and the muted
-// follow-up hints the page prints as chrome.
+// The `keytap` command of the web terminal. Parsing and help come from the
+// shared CLI spec, and derivation comes from keytap-core, all through cliRun.
+// This module supplies the browser platform: WebAuthn ceremonies, the shell's
+// files, stderr, and the muted follow-up hints the page prints as chrome.
 
 import { cliRun } from './pkg/keytap_web.js';
-import { register, assertPrf, webAuthnAvailable, hasStoredCredential } from './webauthn.js';
+import {
+  register,
+  assertPrf,
+  webAuthnAvailable,
+  hasStoredCredentialId,
+} from './webauthn.js';
 
 const empty = new Uint8Array(0);
 
@@ -48,7 +53,7 @@ export function createKeytapCommand(ceremony, ui) {
           ceremony.end();
         }
       },
-      hasCredential: () => hasStoredCredential(),
+      hasCredentialId: () => hasStoredCredentialId(),
       readFile: (name) => fs.get(name),
       stderr: (text) => err(text),
     };
@@ -58,24 +63,32 @@ export function createKeytapCommand(ceremony, ui) {
   function followUp(argv, ran) {
     if (ran === null) {
       // The bare `keytap` reference ends on a long command list; leave a
-      // tappable next step so mobile visitors aren't stranded at the bottom.
+      // pair of honest next steps without treating this browser's local
+      // credential-ID cache as proof that an existing passkey does not exist.
       if (argv.length === 1) {
-        return () => ui.hintCmd('next: ', hasStoredCredential() ? NEXT_REVEAL : 'keytap init', '');
+        return () => {
+          ui.hintCmd('already have a keytap passkey? try ', NEXT_REVEAL, ' and choose it.');
+          ui.hintCmd('new to keytap? ', 'keytap init', ' creates a new passkey.');
+        };
       }
       return undefined;
     }
     if (ran.cmd === 'init') {
-      return () =>
+      return () => {
+        ui.hint(
+          'make sure this passkey is available on another device or has a recovery path; keytap cannot recover derived keys without it'
+        );
         ui.hintCmd(
-          "this passkey syncs across your devices; that's the backup. next: ",
+          'next: ',
           NEXT_REVEAL,
           ' (it asks again; every reveal does)'
         );
+      };
     }
     if (ran.cmd === 'reveal') {
       return () => {
         ui.hint(
-          `derived, not stored, not sent; same passkey + name '${ran.name}' reproduces this exact key on any device`
+          `this named derived key was not persisted or sent over the network; same passkey + name '${ran.name}' reproduces it wherever that passkey is available`
         );
         if (ran.format === 'ssh') {
           ui.hintCmd('the public half: ', `keytap public ${ran.name} --as ssh`, '');
@@ -103,10 +116,10 @@ export function createKeytapCommand(ceremony, ui) {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       err(`error: ${message}`);
-      // A dismissed prompt in a browser that has never completed a ceremony
-      // usually means there is no passkey to pick; offer the fix, one tap.
-      if (message === 'cancelled' && argv[1] !== 'init' && !hasStoredCredential()) {
-        ui.hintCmd('no passkey in this browser yet; ', 'keytap init', ' creates one.');
+      if (message === 'cancelled' && argv[1] !== 'init') {
+        ui.hint(
+          'approval cancelled. an existing synced or security-key passkey may still be available even if this browser has not seen it before; retry and choose it. run keytap init only to create a new passkey.'
+        );
       }
       return { stdout: empty, code: 1 };
     }

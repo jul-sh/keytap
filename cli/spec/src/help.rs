@@ -28,10 +28,7 @@ pub fn overview(cli: &Command) -> String {
         .filter(|c| c.get_name() != "help")
         .map(|c| {
             let usage = command_usage(c);
-            let about = c
-                .get_about()
-                .map(|a| a.to_string())
-                .unwrap_or_default();
+            let about = c.get_about().map(|a| a.to_string()).unwrap_or_default();
             (c, usage, about)
         })
         .collect();
@@ -54,7 +51,10 @@ pub fn overview(cli: &Command) -> String {
         .get_arguments()
         .filter(|arg| in_overview(arg))
         .map(|arg| {
-            let description = arg.get_help().map(|help| help.to_string()).unwrap_or_default();
+            let description = arg
+                .get_help()
+                .map(|help| help.to_string())
+                .unwrap_or_default();
             (legend_key(arg), description)
         })
         .collect();
@@ -75,18 +75,17 @@ pub fn overview(cli: &Command) -> String {
 }
 
 /// Reuse-without-re-auth guidance, shown by `keytap reveal --help`. By default
-/// keytap derives on demand and stores nothing; `keytap remember` is the
-/// built-in opt-in hold (no TTL; OS keychain or a plain file, see REMEMBER).
-/// The agent/variable patterns remain the recommended *bounded* holds — they
-/// expire, remembered keys don't — so they are presented as deliberate
-/// alternatives, not leftovers.
-pub(crate) const REUSE: &str = "Reusing a key without re-authenticating each time\n  By default keytap derives on demand and stores nothing. The built-in way to\n  stop repeated prompts is to remember the key on this machine (no expiry \u{2014}\n  see `keytap remember --help` for where it lands and the exact trade-off):\n\n    keytap remember deploy    # one ceremony; 'deploy' stops prompting on this machine\n    keytap forget deploy      # back to prompting (or `keytap forget --all`)\n\n  Prefer a hold that expires on its own? Hand the key to a standard holder:\n\n  SSH (many connections, one prompt, self-expiring):\n    eval \"$(ssh-agent -s)\"\n    keytap reveal ha --as ssh | ssh-add -t 900 -    # 15-min hold, then gone\n\n  A secret reused within one script (bounded to the process):\n    KEY=$(keytap reveal deploy --as hex); use \"$KEY\"; unset KEY\n\n  A secret another tool reads from the OS keychain: remember it, then let the\n  tool call keytap \u{2014} `keytap reveal deploy` no longer prompts once remembered.\n\n  CI and other headless jobs ($CI set): keytap never prompts there (--prompt\n  overrides); it reads the derived key from $KEYTAP_KEY_<NAME> instead \u{2014} the\n  key name uppercased, everything outside A-Z0-9 flattened to _ (my-app ->\n  KEYTAP_KEY_MY_APP). The value is exactly the age encoding below \u{2014} its\n  checksum makes a mangled secret fail loudly instead of deriving a different\n  key. A set variable beats remembered keys and ceremonies. If it leaks, that\n  name is burned: derivation is deterministic, so retire the name.\n    keytap reveal ci --as age | gh secret set KEYTAP_KEY_CI   # once, locally\n    # job env: KEYTAP_KEY_CI=<that secret>, then `keytap decrypt ci` just works\n\n  Whatever holds the key\u{2014}keychain entry, agent, variable\u{2014}must be trusted accordingly.";
+/// keytap does not retain a named derived key; `keytap remember`
+/// is the built-in opt-in hold (no TTL; OS keychain or a plain file, see
+/// REMEMBER). Agent and variable patterns are bounded alternatives: they
+/// expire, while remembered keys do not.
+pub(crate) const REUSE: &str = "Reusing a key without re-authenticating each time\n  By default keytap derives on demand and does not retain the named derived\n  key. The built-in way to stop repeated prompts is to remember the key on\n  this machine (no expiry \u{2014} see `keytap remember --help` for where it lands\n  and the exact trade-off):\n\n    keytap remember deploy    # one ceremony; 'deploy' stops prompting on this machine\n    keytap forget deploy      # back to prompting (or `keytap forget --all`)\n\n  Prefer a hold that expires on its own? Hand the key to a standard holder:\n\n  SSH (many connections, one prompt, self-expiring):\n    eval \"$(ssh-agent -s)\"\n    keytap reveal ha --as ssh | ssh-add -t 900 -    # 15-min hold, then gone\n\n  A secret reused within one script (bounded to the process):\n    KEY=$(keytap reveal deploy --as hex); use \"$KEY\"; unset KEY\n\n  A secret another tool reads from the OS keychain: remember it, then let the\n  tool call keytap \u{2014} `keytap reveal deploy` no longer prompts once remembered.\n\n  CI and other headless jobs ($CI set): a command that would need a passkey\n  ceremony fails instead (`--prompt` permits that ceremony). It can read the\n  derived key from $KEYTAP_KEY_<NAME> \u{2014} the key name uppercased, everything\n  outside A-Z0-9 flattened to _ (my-app -> KEYTAP_KEY_MY_APP). The value is\n  exactly the age encoding below \u{2014} its checksum makes a mangled secret fail\n  loudly instead of deriving a different key. A set variable beats remembered\n  keys and ceremonies. If it leaks, that name is burned: derivation is\n  deterministic, so retire the name.\n    keytap reveal ci --as age | gh secret set KEYTAP_KEY_CI   # once, locally\n    # job env: KEYTAP_KEY_CI=<that secret>, then `keytap decrypt ci` just works\n\n  Whatever holds the key\u{2014}keychain entry, agent, variable\u{2014}must be trusted accordingly.";
 
 /// The remembered-keys contract, shown by `keytap remember --help`. States
 /// plainly what is stored, where, for how long, and what the trade-off is, so
 /// the one command that breaks keytap's statelessness is also the one place
 /// that documents it.
-pub(crate) const REMEMBER: &str = "What remembering means\n  `keytap remember NAME` runs one passkey ceremony, then stores the derived raw\n  key on this machine. From then on, keytap commands for NAME use the stored\n  key without prompting. Nothing is ever stored unless you opt in: run\n  `remember`, or choose \u{2018}Use and remember\u{2019} on the phone before approving a\n  QR-code request. Either path uses one passkey ceremony. Key material is not\n  printed.\n\n  Where the key lives\n    A plain file: ~/.local/state/keytap/remembered.json (0600, honors\n    $XDG_STATE_HOME), NOT encrypted at rest. On machines with an OS keychain\n    (macOS Keychain; Secret Service on desktop Linux), remember upgrades to it\n    automatically: service `keytap`, account `remember:<root>:<name>`,\n    encrypted at rest by the keychain. The success message says which one was\n    used; lookups check the keychain first, then the file.\n\n  Scope & lifetime\n    - No TTL: the key stays until `keytap forget NAME`, `keytap forget --all`,\n      or you replace the passkey (`keytap init` wipes all remembered keys).\n    - Machine-local: remembering here does not affect your other machines.\n    - Passkey-bound: keys remembered under a replaced passkey are never used.\n\n  Security trade-off\n    Any process running as your user may be able to invoke keytap and use a\n    remembered key without a ceremony. In the plain file (no OS keychain),\n    anyone who can read your files (root, backups, disk images) can also use\n    the key: treat it like an unencrypted SSH private key. When you want a\n    hold that expires instead, use an agent:\n    `keytap reveal ha --as ssh | ssh-add -t 900 -` (see `keytap reveal --help`).";
+pub(crate) const REMEMBER: &str = "What remembering means\n  `keytap remember NAME` runs one passkey ceremony, then stores the derived raw\n  key on this machine. From then on, keytap commands for NAME use the stored\n  key without prompting. Derived key material is stored only when you opt in:\n  run `remember`, or choose \u{2018}Use and remember\u{2019} on the nearby device before\n  approving a nearby request. Either path uses one passkey ceremony. Key\n  material is not printed.\n\n  Where the key lives\n    A plain file: ~/.local/state/keytap/remembered.json (0600, honors\n    $XDG_STATE_HOME), NOT encrypted at rest. On machines with an OS keychain\n    (macOS Keychain; Secret Service on desktop Linux), remember upgrades to it\n    automatically: service `keytap`, account `remember:<root>:<name>`,\n    encrypted at rest by the keychain. The success message says which one was\n    used; lookups check the keychain first, then the file.\n\n  Scope & lifetime\n    - No TTL: the key stays until `keytap forget NAME`, `keytap forget --all`,\n      or you replace the passkey (`keytap init` wipes all remembered keys).\n    - Machine-local: remembering here does not affect your other machines.\n    - Passkey-bound: keys remembered under a replaced passkey are never used.\n\n  Security trade-off\n    Any process running as your user may be able to invoke keytap and use a\n    remembered key without a ceremony. In the plain file (no OS keychain),\n    anyone who can read your files (root, backups, disk images) can also use\n    the key: treat it like an unencrypted SSH private key. When you want a\n    hold that expires instead, use an agent:\n    `keytap reveal ha --as ssh | ssh-add -t 900 -` (see `keytap reveal --help`).";
 
 /// Arguments intentionally kept out of the at-a-glance overview (still shown by
 /// each subcommand's own `--help`). Niche switches that would only add noise;
@@ -155,7 +154,10 @@ fn build_legend(commands: &[(&Command, String, String)]) -> String {
             let key = legend_key(arg);
             if !order.contains(&key) {
                 order.push(key.clone());
-                help.insert(key.clone(), arg.get_help().map(|h| h.to_string()).unwrap_or_default());
+                help.insert(
+                    key.clone(),
+                    arg.get_help().map(|h| h.to_string()).unwrap_or_default(),
+                );
                 default.insert(key.clone(), default_value(arg));
             }
 
@@ -241,7 +243,13 @@ fn default_value(arg: &Arg) -> Option<String> {
     if defaults.is_empty() {
         None
     } else {
-        Some(defaults.iter().map(|s| s.to_string_lossy()).collect::<Vec<_>>().join(", "))
+        Some(
+            defaults
+                .iter()
+                .map(|s| s.to_string_lossy())
+                .collect::<Vec<_>>()
+                .join(", "),
+        )
     }
 }
 

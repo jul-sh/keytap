@@ -54,7 +54,11 @@ fn wait_or_kill(mut child: Child) -> Output {
 }
 
 fn stdout(out: &Output) -> String {
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     String::from_utf8(out.stdout.clone()).unwrap()
 }
 
@@ -70,14 +74,21 @@ fn env_key_round_trips_every_output_format() {
     let hex = keytap(envs, &["reveal", "ci", "--as", "hex"], b"");
     assert_eq!(stdout(&hex).trim(), hex::encode(RAW));
     // The note names the variable, so job logs show the passkey wasn't used.
-    assert!(stderr(&hex).contains("$KEYTAP_KEY_CI"), "stderr: {}", stderr(&hex));
+    assert!(
+        stderr(&hex).contains("$KEYTAP_KEY_CI"),
+        "stderr: {}",
+        stderr(&hex)
+    );
 
     let age = keytap(envs, &["reveal", "ci", "--as", "age"], b"");
-    assert_eq!(stdout(&age).trim(), key, "env → reveal --as age must echo the key");
+    assert_eq!(
+        stdout(&age).trim(),
+        key,
+        "env → reveal --as age must echo the key"
+    );
 
     let expected_public =
-        keytap_core::format_public_key(&RAW, keytap_core::PublicKeyFormat::AgeRecipient, None)
-            .unwrap();
+        keytap_core::format_public_key(&RAW, keytap_core::PublicKeyFormat::AgeRecipient).unwrap();
     let public = keytap(envs, &["public", "ci", "--as", "age"], b"");
     assert_eq!(stdout(&public).trim(), expected_public);
 }
@@ -85,7 +96,11 @@ fn env_key_round_trips_every_output_format() {
 #[test]
 fn env_key_accepts_lowercase_encoding() {
     let key = age_encoding(&RAW).to_lowercase();
-    let out = keytap(&[("KEYTAP_KEY_CI", &key)], &["reveal", "ci", "--as", "hex"], b"");
+    let out = keytap(
+        &[("KEYTAP_KEY_CI", &key)],
+        &["reveal", "ci", "--as", "hex"],
+        b"",
+    );
     assert_eq!(stdout(&out).trim(), hex::encode(RAW));
 }
 
@@ -110,8 +125,11 @@ fn env_key_encrypt_decrypt_round_trip() {
 #[test]
 fn env_var_name_flattens_punctuation() {
     let key = age_encoding(&RAW);
-    let out =
-        keytap(&[("KEYTAP_KEY_MY_APP_PROD", &key)], &["reveal", "my-app.prod", "--as", "hex"], b"");
+    let out = keytap(
+        &[("KEYTAP_KEY_MY_APP_PROD", &key)],
+        &["reveal", "my-app.prod", "--as", "hex"],
+        b"",
+    );
     assert_eq!(stdout(&out).trim(), hex::encode(RAW));
 }
 
@@ -126,8 +144,16 @@ fn empty_value_is_an_error_not_a_fall_through() {
 fn malformed_value_dies_with_the_expected_format() {
     let out = keytap(&[("KEYTAP_KEY_CI", "not-a-key")], &["reveal", "ci"], b"");
     assert!(!out.status.success());
-    assert!(stderr(&out).contains("age secret key"), "stderr: {}", stderr(&out));
-    assert!(stderr(&out).contains("keytap reveal ci --as age"), "stderr: {}", stderr(&out));
+    assert!(
+        stderr(&out).contains("age secret key"),
+        "stderr: {}",
+        stderr(&out)
+    );
+    assert!(
+        stderr(&out).contains("keytap reveal ci --as age"),
+        "stderr: {}",
+        stderr(&out)
+    );
 }
 
 #[test]
@@ -137,7 +163,11 @@ fn other_encodings_of_the_key_are_refused() {
     let hex_key = hex::encode(RAW);
     let out = keytap(&[("KEYTAP_KEY_CI", &hex_key)], &["reveal", "ci"], b"");
     assert!(!out.status.success());
-    assert!(stderr(&out).contains("--as age"), "stderr: {}", stderr(&out));
+    assert!(
+        stderr(&out).contains("--as age"),
+        "stderr: {}",
+        stderr(&out)
+    );
 }
 
 #[test]
@@ -150,6 +180,25 @@ fn bare_keytap_key_gets_guidance() {
         "the error must name the per-name variable; stderr: {}",
         stderr(&out)
     );
+}
+
+#[test]
+fn invalid_key_name_is_rejected_before_environment_resolution() {
+    let key = age_encoding(&RAW);
+    let out = keytap(
+        &[("KEYTAP_KEY_K_Y", &key)],
+        &["reveal", "kéy", "--as", "hex"],
+        b"",
+    );
+
+    assert!(!out.status.success());
+    assert!(out.stdout.is_empty());
+    assert!(
+        stderr(&out).contains("invalid key name: key name must be ASCII-only"),
+        "stderr: {}",
+        stderr(&out)
+    );
+    assert!(!stderr(&out).contains("passkey not consulted"));
 }
 
 /// The refusal rung: under $CI with no env key (and nothing remembered),
@@ -173,6 +222,10 @@ fn ci_refuses_init_and_remember_without_prompt() {
     for args in [vec!["init"], vec!["remember", "deploy"]] {
         let out = keytap(&[], &args, b"");
         assert!(!out.status.success(), "{args:?} must refuse under $CI");
-        assert!(stderr(&out).contains("--prompt"), "stderr: {}", stderr(&out));
+        assert!(
+            stderr(&out).contains("--prompt"),
+            "stderr: {}",
+            stderr(&out)
+        );
     }
 }

@@ -1,0 +1,27 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "keytap-relay",
+  "main": "src/index.js",
+  "compatibility_date": "2026-07-30",
+  "account_id": "28fb983f1661b4931e2ceec7f9a0b8c2",
+  "durable_objects": {
+    "bindings": [
+      { "name": "RELAY_ROOM", "class_name": "RelayRoom" }
+    ]
+  },
+  "ratelimits": [
+    {
+      "name": "ROOM_UPGRADE_RATE_LIMITER",
+      "namespace_id": "7001",
+      "simple": { "limit": 20, "period": 60 }
+    }
+  ],
+  "exports": {
+    "RelayRoom": { "type": "durable-object", "storage": "sqlite" },
+    "RelaySession": { "type": "durable-object", "state": "deleted" },
+    "SignalSession": { "type": "durable-object", "state": "deleted" }
+  },
+  "observability": {
+    "enabled": true
+  }
+}

@@ -50,7 +50,7 @@ fn initialized_state_dir(tag: &str) -> std::path::PathBuf {
     std::fs::create_dir_all(dir.join("keytap")).unwrap();
     std::fs::write(
         dir.join("keytap/nearby-identity.json"),
-        r#"{"format":"keytap-nearby-identity-v2","identity":{"kind":"credential","credentialId":"ABEiM0RVZneImaq7zN3u_w"}}"#,
+        r#"{"format":"keytap-nearby-identity-v3","identity":{"kind":"credential","credentialId":"ABEiM0RVZneImaq7zN3u_w"}}"#,
     )
     .unwrap();
     dir
@@ -83,5 +83,9 @@ fn reinit_is_refused_without_force() {
 fn force_does_not_bypass_the_ci_guard() {
     let out = keytap(&[], &["init", "--force"]);
     assert!(!out.status.success());
-    assert!(stderr(&out).contains("--prompt"), "stderr: {}", stderr(&out));
+    assert!(
+        stderr(&out).contains("--prompt"),
+        "stderr: {}",
+        stderr(&out)
+    );
 }

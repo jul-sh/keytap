@@ -16,14 +16,14 @@ const PROMPT = '$ ';
 
 // Chrome-authored literal commands; what they do is decided by the CLI.
 const SUGGESTIONS = [
-  { cmd: 'keytap init', note: 'start here · create your passkey' },
-  { cmd: 'keytap reveal demo --as ssh', note: 'then derive a demo SSH key' },
+  { cmd: 'keytap reveal demo --as ssh', note: 'already have a passkey? try it here' },
+  { cmd: 'keytap init', note: 'new to keytap · create a new passkey' },
   { cmd: 'keytap', note: 'see every command' },
 ];
 
-const HELP = `keytap web terminal; the real CLI, compiled to WebAssembly.
+const HELP = `keytap web terminal; shared CLI parser, help, and derivation code.
 
-  keytap …                      the actual keytap CLI (start with \`keytap\`)
+  keytap …                      the shared keytap command surface
   ls · cat · echo · rm · xxd    a tiny in-memory filesystem
   pipes and redirects           echo hi | keytap encrypt > hi.age
   clear (or ctrl+l)             wipe the screen
@@ -32,9 +32,11 @@ tab key completes · ↑ ↓ history · ctrl+c or esc cancels a passkey prompt
 shift+tab moves focus out of the terminal.
 
 how keys derive: WebAuthn PRF; your authenticator releases a per-name secret
-after Touch ID, and keys are HKDF-derived from it. same input, same key. the
-installed tool reaches the same passkey for this domain, so web and cli derive
-identical keys (how: the install keytap readme).
+after passkey user verification, such as Touch ID, and keys are HKDF-derived
+from it. same input, same key wherever the same passkey is available.
+demo limits: machine key storage, nearby approval, and CI environment keys
+require the installed CLI. this browser persists only the credential ID used
+to select a passkey, not derived key material.
 network: locked down by the CSP meta tag (view-source); static page, no
 server code, no analytics.
 printed output is readable by your browser and its extensions; don't reuse
@@ -597,9 +599,9 @@ async function main() {
   commands.keytap = createKeytapCommand(ceremony, io);
 
   io.out(`keytap ${cliVersion()} · one passkey becomes reproducible SSH keys, age identities, and app secrets.`);
-  io.out('same passkey + same name = the same key, on any device. by default, nothing is stored and nothing leaves this page.');
+  io.out('same passkey + same name = the same key wherever that passkey is available. no derived key material is persisted; the browser keeps only the credential ID used to select the passkey.');
   writeLinkLine(
-    'this page runs the CLI compiled to WebAssembly as a demo; install on your machine ',
+    'this demo shares the CLI parser and key derivation code. machine storage, nearby approval, and CI environment keys require the installed CLI: ',
     'https://github.com/jul-sh/keytap#install',
     'here',
     '.',

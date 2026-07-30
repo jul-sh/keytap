@@ -67,6 +67,19 @@ fn test_derive_raw_key_wrong_length() {
 }
 
 #[test]
+fn test_ed25519_public_key_from_identity_seed() {
+    let public_key = ed25519_public_key(&[7; 32]).unwrap();
+    assert_eq!(
+        hex::encode(public_key),
+        "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c"
+    );
+    assert!(matches!(
+        ed25519_public_key(&[7; 31]),
+        Err(KeytapError::InvalidPrfOutputLength { actual: 31 })
+    ));
+}
+
+#[test]
 fn test_derive_raw_key_deterministic() {
     let prf = [0x42u8; 32];
     let key1 = derive_raw_key(&prf).unwrap();
@@ -102,13 +115,6 @@ fn test_format_private_key_age() {
 }
 
 #[test]
-fn test_format_private_key_raw() {
-    let raw = [0x42u8; 32];
-    let result = format_private_key(&raw, PrivateKeyFormat::Raw).unwrap();
-    assert_eq!(result, vec![0x42u8; 32]);
-}
-
-#[test]
 fn test_format_private_key_ssh() {
     let raw = [0u8; 32];
     let result = format_private_key(&raw, PrivateKeyFormat::SshPrivateKey).unwrap();
@@ -120,7 +126,7 @@ fn test_format_private_key_ssh() {
 #[test]
 fn test_format_public_key_ssh() {
     let raw = [0u8; 32];
-    let result = format_public_key(&raw, PublicKeyFormat::SshPublicKey, None).unwrap();
+    let result = format_public_key(&raw, PublicKeyFormat::Ssh { comment: None }).unwrap();
     assert!(result.starts_with("ssh-ed25519 "));
     assert!(result.ends_with(" keytap"));
 }
@@ -128,11 +134,17 @@ fn test_format_public_key_ssh() {
 #[test]
 fn test_format_public_key_ssh_with_name() {
     let raw = [0u8; 32];
-    let result = format_public_key(&raw, PublicKeyFormat::SshPublicKey, Some("foo")).unwrap();
+    let result = format_public_key(
+        &raw,
+        PublicKeyFormat::Ssh {
+            comment: Some("foo"),
+        },
+    )
+    .unwrap();
     assert!(result.starts_with("ssh-ed25519 "));
     assert!(result.ends_with(" keytap:foo"));
     // The key body must be unaffected by the comment.
-    let unnamed = format_public_key(&raw, PublicKeyFormat::SshPublicKey, None).unwrap();
+    let unnamed = format_public_key(&raw, PublicKeyFormat::Ssh { comment: None }).unwrap();
     assert_eq!(
         result.rsplit_once(' ').unwrap().0,
         unnamed.rsplit_once(' ').unwrap().0,
@@ -142,7 +154,7 @@ fn test_format_public_key_ssh_with_name() {
 #[test]
 fn test_format_public_key_age() {
     let raw = [0u8; 32];
-    let result = format_public_key(&raw, PublicKeyFormat::AgeRecipient, None).unwrap();
+    let result = format_public_key(&raw, PublicKeyFormat::AgeRecipient).unwrap();
     assert!(result.starts_with("age1"));
 }
 
@@ -240,28 +252,28 @@ fn test_golden_vectors() {
         // Verify public key formats
         let public_formats = vector["public"].as_object().unwrap();
 
-        let hex_pub = format_public_key(&raw_key, PublicKeyFormat::Hex, None).unwrap();
+        let hex_pub = format_public_key(&raw_key, PublicKeyFormat::Hex).unwrap();
         assert_eq!(
             hex_pub,
             public_formats["hex"].as_str().unwrap(),
             "hex public key mismatch"
         );
 
-        let b64_pub = format_public_key(&raw_key, PublicKeyFormat::Base64, None).unwrap();
+        let b64_pub = format_public_key(&raw_key, PublicKeyFormat::Base64).unwrap();
         assert_eq!(
             b64_pub,
             public_formats["base64"].as_str().unwrap(),
             "base64 public key mismatch"
         );
 
-        let age_pub = format_public_key(&raw_key, PublicKeyFormat::AgeRecipient, None).unwrap();
+        let age_pub = format_public_key(&raw_key, PublicKeyFormat::AgeRecipient).unwrap();
         assert_eq!(
             age_pub,
             public_formats["age"].as_str().unwrap(),
             "age public key mismatch"
         );
 
-        let ssh_pub = format_public_key(&raw_key, PublicKeyFormat::SshPublicKey, None).unwrap();
+        let ssh_pub = format_public_key(&raw_key, PublicKeyFormat::Ssh { comment: None }).unwrap();
         assert_eq!(
             ssh_pub,
             public_formats["ssh"].as_str().unwrap(),
@@ -273,23 +285,24 @@ fn test_golden_vectors() {
 #[test]
 fn test_parse_age_secret_key_round_trips() {
     for raw in [[0u8; 32], [7u8; 32], [0xFF; 32]] {
-        let encoded = String::from_utf8(
-            format_private_key(&raw, PrivateKeyFormat::AgeSecretKey).unwrap(),
-        )
-        .unwrap();
+        let encoded =
+            String::from_utf8(format_private_key(&raw, PrivateKeyFormat::AgeSecretKey).unwrap())
+                .unwrap();
         assert_eq!(parse_age_secret_key(&encoded).unwrap(), raw.to_vec());
         // bech32 permits either case as long as it's uniform; keytap emits
         // uppercase, but a lowercased copy must parse to the same key.
-        assert_eq!(parse_age_secret_key(&encoded.to_lowercase()).unwrap(), raw.to_vec());
+        assert_eq!(
+            parse_age_secret_key(&encoded.to_lowercase()).unwrap(),
+            raw.to_vec()
+        );
     }
 }
 
 #[test]
 fn test_parse_age_secret_key_rejects_bad_input() {
-    let valid = String::from_utf8(
-        format_private_key(&[7u8; 32], PrivateKeyFormat::AgeSecretKey).unwrap(),
-    )
-    .unwrap();
+    let valid =
+        String::from_utf8(format_private_key(&[7u8; 32], PrivateKeyFormat::AgeSecretKey).unwrap())
+            .unwrap();
 
     // Not bech32 at all.
     assert!(matches!(
@@ -298,7 +311,8 @@ fn test_parse_age_secret_key_rejects_bad_input() {
     ));
     // Other lossless encodings of the same key are deliberately refused:
     // the env contract is one format, not autodetection.
-    let hex = String::from_utf8(format_private_key(&[7u8; 32], PrivateKeyFormat::Hex).unwrap()).unwrap();
+    let hex =
+        String::from_utf8(format_private_key(&[7u8; 32], PrivateKeyFormat::Hex).unwrap()).unwrap();
     assert!(parse_age_secret_key(&hex).is_err());
     // Wrong prefix, valid bech32.
     let wrong_hrp = bech32_encode("age", &[7u8; 32]);

@@ -1,210 +1,656 @@
 import AppKit
 import AuthenticationServices
-import CryptoKit
 
-// MARK: - FFI callback type
+// MARK: - Rust callback ABI
 
-/// Called from Swift into Rust when an auth operation completes.
-///   context:   opaque pointer passed through from Rust
-///   status:    0 = success, 1 = error
-///   data/len:  credential_id (success) or UTF-8 error message (error)
-///   extra/len: prf_output bytes (assertion success only), otherwise NULL/0
-typealias Callback = @convention(c) (
-    UInt64,                     // context
-    Int32,                      // status
-    UnsafePointer<UInt8>?,      // data
-    UInt,                       // data_len
-    UnsafePointer<UInt8>?,      // extra
-    UInt                        // extra_len
-) -> Void
+/// Signals that the process's assertion controller is retained and cancellable.
+typealias ControllerReadyCallback = @convention(c) (UnsafeMutableRawPointer?) -> Void
+
+/// Delivers the one terminal result for a bridge entry point.
+///
+/// The Rust context is opaque to Swift. Data pointers are borrowed only for the
+/// duration of this call, so Rust must copy them before returning.
+typealias CompletionCallback =
+  @convention(c) (
+    UnsafeMutableRawPointer?,
+    Int32,
+    UnsafePointer<UInt8>?,
+    UInt,
+    UnsafePointer<UInt8>?,
+    UInt
+  ) -> Void
+
+private let statusSuccess: Int32 = 0
+private let statusError: Int32 = 1
+private let statusCancelled: Int32 = 2
+private let credentialDiscoverable: Int32 = 0
+private let credentialConstrained: Int32 = 1
+
+private let requiredSaltLength: UInt = 32
+private let maximumCredentialIDLength: UInt = 1_024
+
+/// `ASAuthorizationController` holds its delegates weakly. This main-actor slot
+/// is therefore the strong owner for the whole ceremony. `NSApplication.run()`
+/// and `stop(_:)` are process-global, so two native ceremonies cannot safely be
+/// driven concurrently in one process.
+@MainActor private var activeOperation: PasskeyOperation?
 
 // MARK: - Exported functions
 
+/// Synchronous FFI contract:
+///
+/// - This function blocks until it invokes `callback` exactly once.
+/// - The callback is invoked before this function returns.
+/// - No callback can occur after this function returns.
+/// - Rust must keep `context` valid for this call's full duration.
 @_cdecl("keytap_register")
-func keytapRegister(context: UInt64, callback: Callback) {
-    let (app, window) = setupApp()
-    let delegate = PasskeyDelegate(window: window, context: context, callback: callback)
-
-    let provider = ASAuthorizationPlatformPublicKeyCredentialProvider(relyingPartyIdentifier: "keytap.jul.sh")
-    let request = provider.createCredentialRegistrationRequest(
-        challenge: randomChallenge(), name: "keytap", userID: Data("keytap-user".utf8)
+func keytapRegister(
+  context: sending UnsafeMutableRawPointer?,
+  callback: sending CompletionCallback
+) {
+  guard Thread.isMainThread else {
+    deliverDirectError(
+      "native passkey operations must run on the process main thread",
+      context: context,
+      callback: callback
     )
-    request.prf = .checkForSupport
+    return
+  }
 
-    let controller = ASAuthorizationController(authorizationRequests: [request])
-    controller.delegate = delegate
-    controller.presentationContextProvider = delegate
-    delegate.retainController(controller)
-    controller.performRequests()
-    activateAfterDelay()
-
-    app.run()
+  MainActor.assumeIsolated {
+    registerPasskey(context: context, callback: callback)
+  }
 }
 
+/// Synchronous FFI contract:
+///
+/// - This function blocks until it invokes `callback` exactly once.
+/// - The callback is invoked before this function returns.
+/// - No callback can occur after this function returns.
+/// - Rust must keep `context`, `saltPtr`, and `credentialIDPtr` valid until the
+///   bridge has synchronously copied the input bytes.
 @_cdecl("keytap_assert")
 func keytapAssert(
-    saltPtr: UnsafePointer<UInt8>, saltLen: UInt,
-    context: UInt64, callback: Callback
+  saltPtr: UnsafePointer<UInt8>?,
+  saltLen: UInt,
+  credentialMode: Int32,
+  credentialIDPtr: UnsafePointer<UInt8>?,
+  credentialIDLen: UInt,
+  context: sending UnsafeMutableRawPointer?,
+  controllerReady: sending ControllerReadyCallback,
+  callback: sending CompletionCallback
 ) {
-    let (app, window) = setupApp()
-    let delegate = PasskeyDelegate(window: window, context: context, callback: callback)
+  guard Thread.isMainThread else {
+    deliverDirectError(
+      "native passkey operations must run on the process main thread",
+      context: context,
+      callback: callback
+    )
+    return
+  }
+  guard saltLen == requiredSaltLength, let saltPtr else {
+    deliverDirectError(
+      "native assertion PRF salt must contain exactly 32 bytes",
+      context: context,
+      callback: callback
+    )
+    return
+  }
+  // Copy all Rust-owned input before entering the AppKit run loop.
+  let salt = Data(bytes: saltPtr, count: Int(saltLen))
+  let credential: AssertionCredential
+  switch credentialMode {
+  case credentialDiscoverable:
+    guard credentialIDPtr == nil, credentialIDLen == 0 else {
+      deliverDirectError(
+        "discoverable native assertion included a credential ID",
+        context: context,
+        callback: callback
+      )
+      return
+    }
+    credential = .discoverable
+  case credentialConstrained:
+    guard
+      (1...maximumCredentialIDLength).contains(credentialIDLen),
+      let credentialIDPtr
+    else {
+      deliverDirectError(
+        "constrained native assertion has an invalid credential ID",
+        context: context,
+        callback: callback
+      )
+      return
+    }
+    credential = .constrained(
+      credentialID: Data(bytes: credentialIDPtr, count: Int(credentialIDLen))
+    )
+  default:
+    deliverDirectError(
+      "native assertion has an unknown credential mode",
+      context: context,
+      callback: callback
+    )
+    return
+  }
 
-    let salt = Data(bytes: saltPtr, count: Int(saltLen))
-    let provider = ASAuthorizationPlatformPublicKeyCredentialProvider(relyingPartyIdentifier: "keytap.jul.sh")
-    let request = provider.createCredentialAssertionRequest(challenge: randomChallenge())
-
-    let inputValues = ASAuthorizationPublicKeyCredentialPRFAssertionInput.InputValues.saltInput1(salt)
-    request.prf = .inputValues(inputValues)
-
-    let controller = ASAuthorizationController(authorizationRequests: [request])
-    controller.delegate = delegate
-    controller.presentationContextProvider = delegate
-    delegate.retainController(controller)
-
-    controller.performRequests()
-    activateAfterDelay()
-
-    app.run()
+  MainActor.assumeIsolated {
+    assertPasskey(
+      salt: salt,
+      credential: credential,
+      context: context,
+      controllerReady: controllerReady,
+      callback: callback
+    )
+  }
 }
 
-// MARK: - Delegate
+/// Thread-safe assertion cancellation entry point. Delivery is enqueued on the
+/// main actor so a cancellation requested by `controllerReady` cannot run until
+/// `performRequests()` has installed the authorization request.
+@_cdecl("keytap_cancel")
+func keytapCancel() {
+  Task { @MainActor in
+    activeOperation?.requestAssertionCancellation()
+  }
+}
 
-private class PasskeyDelegate: NSObject, ASAuthorizationControllerDelegate,
-    ASAuthorizationControllerPresentationContextProviding
+// MARK: - Ceremony setup
+
+@MainActor
+private func registerPasskey(
+  context: UnsafeMutableRawPointer?,
+  callback: CompletionCallback
+) {
+  guard ensureOperationSlotAvailable(context: context, callback: callback) else {
+    return
+  }
+
+  let (application, window) = prepareApplication()
+  let provider = ASAuthorizationPlatformPublicKeyCredentialProvider(
+    relyingPartyIdentifier: "keytap.jul.sh"
+  )
+  let request = provider.createCredentialRegistrationRequest(
+    challenge: randomChallenge(),
+    name: "keytap",
+    userID: Data("keytap-user".utf8)
+  )
+  request.prf = .checkForSupport
+
+  let controller = ASAuthorizationController(authorizationRequests: [request])
+  runOperation(
+    expectedCeremony: .registration,
+    context: context,
+    callback: callback,
+    application: application,
+    window: window,
+    controller: controller
+  )
+}
+
+@MainActor
+private func assertPasskey(
+  salt: Data,
+  credential: AssertionCredential,
+  context: UnsafeMutableRawPointer?,
+  controllerReady: ControllerReadyCallback,
+  callback: CompletionCallback
+) {
+  guard ensureOperationSlotAvailable(context: context, callback: callback) else {
+    return
+  }
+
+  let (application, window) = prepareApplication()
+  let provider = ASAuthorizationPlatformPublicKeyCredentialProvider(
+    relyingPartyIdentifier: "keytap.jul.sh"
+  )
+  let request = provider.createCredentialAssertionRequest(challenge: randomChallenge())
+  switch credential {
+  case .discoverable:
+    break
+  case .constrained(let credentialID):
+    request.allowedCredentials = [
+      ASAuthorizationPlatformPublicKeyCredentialDescriptor(credentialID: credentialID)
+    ]
+  }
+  let inputValues = ASAuthorizationPublicKeyCredentialPRFAssertionInput.InputValues.saltInput1(
+    salt
+  )
+  request.prf = .inputValues(inputValues)
+
+  let controller = ASAuthorizationController(authorizationRequests: [request])
+  runOperation(
+    expectedCeremony: .assertion(controllerReady: controllerReady),
+    context: context,
+    callback: callback,
+    application: application,
+    window: window,
+    controller: controller
+  )
+}
+
+@MainActor
+private func ensureOperationSlotAvailable(
+  context: UnsafeMutableRawPointer?,
+  callback: CompletionCallback
+) -> Bool {
+  switch activeOperation {
+  case .none:
+    return true
+  case .some:
+    deliverDirectError(
+      "another native passkey operation is already running",
+      context: context,
+      callback: callback
+    )
+    return false
+  }
+}
+
+@MainActor
+private func runOperation(
+  expectedCeremony: ExpectedCeremony,
+  context: UnsafeMutableRawPointer?,
+  callback: CompletionCallback,
+  application: NSApplication,
+  window: NSWindow,
+  controller: ASAuthorizationController
+) {
+  let operation = PasskeyOperation(
+    expectedCeremony: expectedCeremony,
+    controller: controller,
+    window: window,
+    context: context,
+    callback: callback
+  )
+  controller.delegate = operation
+  controller.presentationContextProvider = operation
+  activeOperation = operation
+
+  operation.announceControllerReadiness()
+  controller.performRequests()
+  operation.scheduleDelayedActivation()
+  operation.blockUntilTerminalCallback(application: application)
+}
+
+// MARK: - Typed operation state
+
+private enum ExpectedCeremony {
+  case registration
+  case assertion(controllerReady: ControllerReadyCallback)
+}
+
+private enum AssertionCredential {
+  case discoverable
+  case constrained(credentialID: Data)
+}
+
+private enum OperationLifecycle {
+  case prepared(controller: ASAuthorizationController)
+  case awaitingResult(
+    controller: ASAuthorizationController,
+    delayedActivation: Task<Void, Never>
+  )
+  case cancellationRequested(controller: ASAuthorizationController)
+  case finished
+}
+
+private enum TerminalCompletion {
+  case registration(credentialID: Data)
+  case assertion(credentialID: Data, prfOutput: Data)
+  case cancelled
+  case failure(message: String)
+}
+
+// MARK: - Authorization delegate
+
+@MainActor
+private final class PasskeyOperation: NSObject, ASAuthorizationControllerDelegate,
+  ASAuthorizationControllerPresentationContextProviding
 {
-    let window: NSWindow
-    let context: UInt64
-    let cb: Callback
-    var controller: ASAuthorizationController?
+  private let expectedCeremony: ExpectedCeremony
+  private let window: NSWindow
+  private let context: UnsafeMutableRawPointer?
+  private let callback: CompletionCallback
+  private var lifecycle: OperationLifecycle
 
-    init(window: NSWindow, context: UInt64, callback: Callback) {
-        self.window = window
-        self.context = context
-        self.cb = callback
+  init(
+    expectedCeremony: ExpectedCeremony,
+    controller: ASAuthorizationController,
+    window: NSWindow,
+    context: UnsafeMutableRawPointer?,
+    callback: CompletionCallback
+  ) {
+    self.expectedCeremony = expectedCeremony
+    self.window = window
+    self.context = context
+    self.callback = callback
+    lifecycle = .prepared(controller: controller)
+  }
+
+  func presentationAnchor(for _: ASAuthorizationController) -> ASPresentationAnchor {
+    window
+  }
+
+  func announceControllerReadiness() {
+    switch expectedCeremony {
+    case .registration:
+      break
+    case .assertion(let controllerReady):
+      controllerReady(context)
     }
+  }
 
-    func retainController(_ c: ASAuthorizationController) { controller = c }
-
-    func presentationAnchor(for _: ASAuthorizationController) -> ASPresentationAnchor { window }
-
-    func authorizationController(controller _: ASAuthorizationController,
-                                 didCompleteWithAuthorization authorization: ASAuthorization)
-    {
-        if let reg = authorization.credential as? ASAuthorizationPlatformPublicKeyCredentialRegistration {
-            guard let prf = reg.prf, prf.isSupported else {
-                fail("passkey created but PRF is not supported by this authenticator")
-                return
-            }
-            succeed(data: reg.credentialID)
-        } else if let assertion = authorization.credential as? ASAuthorizationPlatformPublicKeyCredentialAssertion {
-            guard let prfResult = assertion.prf else {
-                fail("PRF output not available. Your passkey may not support the PRF extension.")
-                return
-            }
-            let prfData = prfResult.first.withUnsafeBytes { Data($0) }
-            succeed(data: assertion.credentialID, extra: prfData)
-        } else {
-            fail("unexpected credential type")
+  func scheduleDelayedActivation() {
+    switch lifecycle {
+    case .prepared(let controller):
+      let task = Task { @MainActor [weak self] in
+        do {
+          try await Task.sleep(for: .milliseconds(300))
+        } catch {
+          return
         }
+        self?.performDelayedActivation()
+      }
+      lifecycle = .awaitingResult(
+        controller: controller,
+        delayedActivation: task
+      )
+    case .awaitingResult, .cancellationRequested, .finished:
+      break
+    }
+  }
+
+  func requestAssertionCancellation() {
+    switch expectedCeremony {
+    case .registration:
+      return
+    case .assertion:
+      break
     }
 
-    func authorizationController(controller _: ASAuthorizationController, didCompleteWithError error: Error) {
-        let nsError = error as NSError
-        switch nsError.code {
-        case 1001: fail("cancelled")
-        case 1004: fail("authentication failed — ensure your passkey provider is available")
-        default: fail(nsError.localizedDescription)
-        }
+    switch lifecycle {
+    case .prepared(let controller):
+      lifecycle = .cancellationRequested(controller: controller)
+      controller.cancel()
+    case .awaitingResult(let controller, let delayedActivation):
+      delayedActivation.cancel()
+      lifecycle = .cancellationRequested(controller: controller)
+      controller.cancel()
+    case .cancellationRequested, .finished:
+      break
+    }
+  }
+
+  func blockUntilTerminalCallback(application: NSApplication) {
+    switch lifecycle {
+    case .finished:
+      return
+    case .prepared, .awaitingResult, .cancellationRequested:
+      application.run()
     }
 
-    private func succeed(data: Data, extra: Data? = nil) {
-        data.withUnsafeBytes { dataPtr in
-            if let extra {
-                extra.withUnsafeBytes { extraPtr in
-                    cb(context, 0,
-                       dataPtr.baseAddress?.assumingMemoryBound(to: UInt8.self), UInt(data.count),
-                       extraPtr.baseAddress?.assumingMemoryBound(to: UInt8.self), UInt(extra.count))
-                }
-            } else {
-                cb(context, 0,
-                   dataPtr.baseAddress?.assumingMemoryBound(to: UInt8.self), UInt(data.count),
-                   nil, 0)
-            }
-        }
-        stopRunLoop()
-    }
-
-    private func fail(_ message: String) {
-        let bytes = Array(message.utf8)
-        bytes.withUnsafeBufferPointer { buf in
-            cb(context, 1, buf.baseAddress, UInt(buf.count), nil, 0)
-        }
-        stopRunLoop()
-    }
-
-    private func stopRunLoop() {
-        let app = NSApplication.shared
-        app.stop(nil)
-        // NSApplication.stop(_:) sets a flag but doesn't unblock the run loop
-        // immediately. Post a dummy event so the loop wakes up and exits.
-        let event = NSEvent.otherEvent(
-            with: .applicationDefined,
-            location: .zero,
-            modifierFlags: [],
-            timestamp: 0,
-            windowNumber: 0,
-            context: nil,
-            subtype: 0,
-            data1: 0,
-            data2: 0
+    // A normal success, error, or cancellation invokes the terminal
+    // callback before waking `application.run()`. Fail closed if an
+    // unrelated process-global event ever causes the loop to return.
+    switch lifecycle {
+    case .finished:
+      return
+    case .prepared(let controller),
+      .awaitingResult(let controller, _),
+      .cancellationRequested(let controller):
+      finish(
+        .failure(
+          message: "native passkey application run loop stopped before authorization completed"
         )
-        if let event { app.postEvent(event, atStart: true) }
+      )
+      controller.cancel()
     }
+  }
+
+  func authorizationController(
+    controller _: ASAuthorizationController,
+    didCompleteWithAuthorization authorization: ASAuthorization
+  ) {
+    switch expectedCeremony {
+    case .registration:
+      guard
+        let registration = authorization.credential
+          as? ASAuthorizationPlatformPublicKeyCredentialRegistration
+      else {
+        finish(
+          .failure(
+            message: "registration completed with an unexpected credential type"
+          )
+        )
+        return
+      }
+      guard let prf = registration.prf, prf.isSupported else {
+        finish(
+          .failure(
+            message: "passkey created but PRF is not supported by this authenticator"
+          )
+        )
+        return
+      }
+      finish(.registration(credentialID: registration.credentialID))
+
+    case .assertion:
+      guard
+        let assertion = authorization.credential
+          as? ASAuthorizationPlatformPublicKeyCredentialAssertion
+      else {
+        finish(
+          .failure(
+            message: "assertion completed with an unexpected credential type"
+          )
+        )
+        return
+      }
+      guard let prfResult = assertion.prf else {
+        finish(
+          .failure(
+            message: "PRF output not available. Your passkey may not support the PRF extension."
+          )
+        )
+        return
+      }
+      let prfOutput = prfResult.first.withUnsafeBytes { Data($0) }
+      finish(
+        .assertion(
+          credentialID: assertion.credentialID,
+          prfOutput: prfOutput
+        )
+      )
+    }
+  }
+
+  func authorizationController(
+    controller _: ASAuthorizationController,
+    didCompleteWithError error: Error
+  ) {
+    let nsError = error as NSError
+    guard nsError.domain == ASAuthorizationError.errorDomain else {
+      finish(.failure(message: nsError.localizedDescription))
+      return
+    }
+    guard let code = ASAuthorizationError.Code(rawValue: nsError.code) else {
+      finish(.failure(message: nsError.localizedDescription))
+      return
+    }
+
+    switch code {
+    case .canceled:
+      finish(.cancelled)
+    case .failed:
+      finish(.failure(message: "authentication failed: \(nsError.localizedDescription)"))
+    default:
+      finish(.failure(message: nsError.localizedDescription))
+    }
+  }
+
+  private func performDelayedActivation() {
+    switch lifecycle {
+    case .prepared, .cancellationRequested, .finished:
+      return
+    case .awaitingResult:
+      activateApplication()
+      for visibleWindow in NSApplication.shared.windows where visibleWindow.isVisible {
+        visibleWindow.makeKeyAndOrderFront(nil)
+      }
+    }
+  }
+
+  private func finish(_ completion: TerminalCompletion) {
+    switch lifecycle {
+    case .finished:
+      return
+    case .prepared:
+      lifecycle = .finished
+    case .awaitingResult(_, let delayedActivation):
+      delayedActivation.cancel()
+      lifecycle = .finished
+    case .cancellationRequested:
+      lifecycle = .finished
+    }
+
+    activeOperation = nil
+    window.orderOut(nil)
+    window.close()
+    deliver(completion)
+    stopApplicationRunLoop()
+  }
+
+  private func deliver(_ completion: TerminalCompletion) {
+    switch completion {
+    case .registration(let credentialID):
+      withBorrowedBytes(credentialID) { credentialPointer, credentialLength in
+        callback(
+          context,
+          statusSuccess,
+          credentialPointer,
+          credentialLength,
+          nil,
+          0
+        )
+      }
+
+    case .assertion(let credentialID, let prfOutput):
+      withBorrowedBytes(credentialID) { credentialPointer, credentialLength in
+        withBorrowedBytes(prfOutput) { prfPointer, prfLength in
+          callback(
+            context,
+            statusSuccess,
+            credentialPointer,
+            credentialLength,
+            prfPointer,
+            prfLength
+          )
+        }
+      }
+
+    case .cancelled:
+      callback(context, statusCancelled, nil, 0, nil, 0)
+
+    case .failure(let message):
+      withBorrowedBytes(Data(message.utf8)) { messagePointer, messageLength in
+        callback(
+          context,
+          statusError,
+          messagePointer,
+          messageLength,
+          nil,
+          0
+        )
+      }
+    }
+  }
 }
 
 // MARK: - Helpers
 
-private func setupApp() -> (NSApplication, NSWindow) {
-    let app = NSApplication.shared
-    app.setActivationPolicy(.regular)
-    let window = NSWindow(
-        contentRect: NSRect(x: 0, y: 0, width: 1, height: 1),
-        styleMask: [], backing: .buffered, defer: true
+private func deliverDirectError(
+  _ message: String,
+  context: UnsafeMutableRawPointer?,
+  callback: CompletionCallback
+) {
+  withBorrowedBytes(Data(message.utf8)) { pointer, length in
+    callback(context, statusError, pointer, length, nil, 0)
+  }
+}
+
+private func withBorrowedBytes(
+  _ data: Data,
+  _ body: (UnsafePointer<UInt8>?, UInt) -> Void
+) {
+  data.withUnsafeBytes { rawBuffer in
+    body(
+      rawBuffer.baseAddress?.assumingMemoryBound(to: UInt8.self),
+      UInt(data.count)
     )
-    window.center()
-    window.makeKeyAndOrderFront(nil)
-    forceActivate()
-
-    // Pump the run loop briefly so NSApplication and the authorization
-    // framework finish lazy initialization before we issue a passkey
-    // request.  Without this, the first invocation in a fresh process
-    // can fail with error 1004 ("passkey provider not available").
-    let deadline = Date(timeIntervalSinceNow: 0.2)
-    while Date() < deadline {
-        app.nextEvent(matching: .any, until: deadline, inMode: .default, dequeue: true)
-    }
-
-    return (app, window)
+  }
 }
 
-/// Force the app to the foreground using NSRunningApplication, which is
-/// more reliable than NSApplication.activate() for CLI-spawned processes.
-private func forceActivate() {
-    let app = NSRunningApplication.current
-    app.activate(options: [.activateIgnoringOtherApps])
+@MainActor
+private func stopApplicationRunLoop() {
+  let application = NSApplication.shared
+  application.stop(nil)
+
+  // `stop(_:)` only flips a flag. Wake the loop so `run()` can observe it and
+  // return to the synchronous FFI entry point.
+  let event = NSEvent.otherEvent(
+    with: .applicationDefined,
+    location: .zero,
+    modifierFlags: [],
+    timestamp: 0,
+    windowNumber: 0,
+    context: nil,
+    subtype: 0,
+    data1: 0,
+    data2: 0
+  )
+  if let event {
+    application.postEvent(event, atStart: true)
+  }
 }
 
-/// Re-activate the app after the authorization UI has been presented,
-/// ensuring the TouchID dialog is focused and the sensor engages.
-private func activateAfterDelay() {
-    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-        forceActivate()
-        for window in NSApplication.shared.windows where window.isVisible {
-            window.makeKeyAndOrderFront(nil)
-        }
+@MainActor
+private func prepareApplication() -> (NSApplication, NSWindow) {
+  let application = NSApplication.shared
+  application.setActivationPolicy(.regular)
+  let window = NSWindow(
+    contentRect: NSRect(x: 0, y: 0, width: 1, height: 1),
+    styleMask: [],
+    backing: .buffered,
+    defer: true
+  )
+  window.center()
+  window.makeKeyAndOrderFront(nil)
+  activateApplication()
+
+  // Warm AppKit and AuthenticationServices before the first request. Any
+  // event dequeued here must still be dispatched; silently discarding it can
+  // lose focus or lifecycle events.
+  let deadline = Date(timeIntervalSinceNow: 0.2)
+  while Date() < deadline {
+    if let event = application.nextEvent(
+      matching: .any,
+      until: deadline,
+      inMode: .default,
+      dequeue: true
+    ) {
+      application.sendEvent(event)
     }
+  }
+
+  return (application, window)
+}
+
+@MainActor
+private func activateApplication() {
+  NSRunningApplication.current.activate(options: [])
 }
 
 private func randomChallenge() -> Data {
-    Data((0..<32).map { _ in UInt8.random(in: 0...255) })
+  Data((0..<32).map { _ in UInt8.random(in: 0...255) })
 }
