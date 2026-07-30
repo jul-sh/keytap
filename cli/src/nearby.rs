@@ -104,7 +104,29 @@ impl NearbyCancellation {
         }
     }
 
-    #[cfg(target_os = "macos")]
+    /// Serialize presentation with native supersession so a dead invitation
+    /// cannot begin printing after local approval has won.
+    fn present_invitation(
+        &self,
+        present: impl FnOnce() -> Result<(), String>,
+    ) -> Result<(), String> {
+        let state = self
+            .inner
+            .lock()
+            .expect("nearby cancellation lock poisoned");
+        match &*state {
+            NearbyCancellationState::Active(_) => present(),
+            NearbyCancellationState::Superseded => Err(SUPERSEDED_ERROR.to_string()),
+            NearbyCancellationState::Preparing => {
+                Err("nearby approval connection was not ready".to_string())
+            }
+            NearbyCancellationState::Finished => {
+                Err("nearby approval session already finished".to_string())
+            }
+        }
+    }
+
+    #[cfg(any(target_os = "macos", test))]
     pub(crate) fn supersede(&self) {
         let mut state = self
             .inner
@@ -166,7 +188,6 @@ pub fn authenticate_nearby(name: &str, storage_policy: StoragePolicy) -> NearbyA
         storage_policy,
         cancellation.clone(),
         InvitationPresentation::QrAndUrl,
-        || {},
     )
     .unwrap_or_else(|error| crate::die(&error));
     cancellation.finish();
@@ -178,14 +199,12 @@ pub(crate) fn prepare_nearby_assertion(
     name: &str,
     storage_policy: StoragePolicy,
     cancellation: NearbyCancellation,
-    invitation_ready: impl FnOnce(),
 ) -> Result<PreparedNearbyAssertion, String> {
     prepare_nearby_assertion_with_presentation(
         name,
         storage_policy,
         cancellation,
         InvitationPresentation::ForwardableUrl,
-        invitation_ready,
     )
 }
 
@@ -319,7 +338,6 @@ fn connect_nearby(
     operation: Operation<'_>,
     cancellation: Option<&NearbyCancellation>,
     presentation: InvitationPresentation,
-    invitation_ready: impl FnOnce(),
 ) -> Result<ConnectedNearby, String> {
     rustls::crypto::ring::default_provider()
         .install_default()
@@ -336,12 +354,19 @@ fn connect_nearby(
     }
 
     let url = format!("{PAGE_URL}#key={}", handshake.fragment_value());
-    match presentation {
-        InvitationPresentation::QrAndUrl => print_qr(&url)?,
-        #[cfg(target_os = "macos")]
-        InvitationPresentation::ForwardableUrl => print_forwardable_url(&url)?,
+    let present = || {
+        match presentation {
+            InvitationPresentation::QrAndUrl => print_qr(&url)?,
+            #[cfg(target_os = "macos")]
+            InvitationPresentation::ForwardableUrl => print_forwardable_url(&url)?,
+        }
+        Ok(())
+    };
+    if let Some(cancellation) = cancellation {
+        cancellation.present_invitation(present)?;
+    } else {
+        present()?;
     }
-    invitation_ready();
     if let Some(cancellation) = cancellation {
         cancellation.ensure_active()?;
     }
@@ -361,7 +386,6 @@ fn prepare_nearby_assertion_with_presentation(
     storage_policy: StoragePolicy,
     cancellation: NearbyCancellation,
     presentation: InvitationPresentation,
-    invitation_ready: impl FnOnce(),
 ) -> Result<PreparedNearbyAssertion, String> {
     let result = (|| {
         let ConnectedNearby {
@@ -375,7 +399,6 @@ fn prepare_nearby_assertion_with_presentation(
             },
             Some(&cancellation),
             presentation,
-            invitation_ready,
         )?;
         let FlowPlan::Assertion { assertion, route } = plan else {
             return Err("nearby protocol prepared registration for an assertion".to_string());
@@ -460,7 +483,6 @@ fn run_nearby_registration(
         Operation::Register { pending_init },
         None,
         InvitationPresentation::QrAndUrl,
-        || {},
     )?;
     let FlowPlan::Registration {
         request,
@@ -1268,6 +1290,29 @@ fn identity_error_message(error: IdentityVerificationError) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn superseding_during_relay_setup_is_sticky() {
+        let cancellation = NearbyCancellation::new();
+
+        cancellation.supersede();
+        assert_eq!(cancellation.ensure_active().unwrap_err(), SUPERSEDED_ERROR);
+
+        let mut presented = false;
+        assert_eq!(
+            cancellation
+                .present_invitation(|| {
+                    presented = true;
+                    Ok(())
+                })
+                .unwrap_err(),
+            SUPERSEDED_ERROR
+        );
+        assert!(!presented);
+
+        cancellation.finish();
+        assert_eq!(cancellation.ensure_active().unwrap_err(), SUPERSEDED_ERROR);
+    }
 
     #[test]
     fn relay_setup_returns_a_result_before_deadline() {

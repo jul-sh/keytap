@@ -10,8 +10,10 @@ mod nearby_sas;
 mod remember;
 
 use keytap_cli_spec::{Command, Invocation};
+#[cfg(any(target_os = "macos", test))]
+use std::sync::mpsc;
 #[cfg(target_os = "macos")]
-use std::sync::{mpsc, Arc};
+use std::sync::Arc;
 use zeroize::Zeroizing;
 
 fn main() {
@@ -229,6 +231,59 @@ mod assertion_candidate_tests {
     }
 }
 
+/// Start nearby approval in the background, then enter the native operation
+/// immediately on the calling thread. Native passkey UI must run on the macOS
+/// main thread and must never wait for network setup.
+#[cfg(any(target_os = "macos", test))]
+fn run_native_while_nearby_starts<T: Send + 'static, N>(
+    nearby: impl FnOnce() -> T + Send + 'static,
+    native: impl FnOnce() -> N,
+) -> Result<(N, mpsc::Receiver<T>), String> {
+    let (nearby_tx, nearby_rx) = mpsc::sync_channel(1);
+    std::thread::Builder::new()
+        .name("keytap-nearby-approval".into())
+        .spawn(move || {
+            nearby_tx.send(nearby()).ok();
+        })
+        .map_err(|error| format!("could not start nearby approval: {error}"))?;
+    Ok((native(), nearby_rx))
+}
+
+#[cfg(test)]
+mod approval_startup_tests {
+    use super::run_native_while_nearby_starts;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    #[test]
+    fn native_starts_while_nearby_setup_is_pending() {
+        let (nearby_started_tx, nearby_started_rx) = mpsc::channel();
+        let (release_nearby_tx, release_nearby_rx) = mpsc::channel();
+
+        let (native, nearby_rx) = run_native_while_nearby_starts(
+            move || {
+                nearby_started_tx.send(()).unwrap();
+                release_nearby_rx
+                    .recv_timeout(Duration::from_secs(5))
+                    .is_ok()
+            },
+            move || {
+                nearby_started_rx
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("nearby setup should start in the background");
+                7
+            },
+        )
+        .unwrap();
+
+        assert_eq!(native, 7);
+        release_nearby_tx
+            .send(())
+            .expect("native operation should return before nearby setup finishes");
+        assert!(nearby_rx.recv_timeout(Duration::from_secs(5)).unwrap());
+    }
+}
+
 /// Authenticate with a passkey ceremony.
 #[cfg(target_os = "macos")]
 fn authenticate(name: &str, storage_policy: nearby::StoragePolicy) -> Assertion {
@@ -239,16 +294,6 @@ fn authenticate(name: &str, storage_policy: nearby::StoragePolicy) -> Assertion 
         CommitFailed(String),
         Failed(String),
         SupersededByNative,
-    }
-
-    enum NearbyWorkerEvent {
-        InvitationShown,
-        Finished(NearbyWorkerOutcome),
-    }
-
-    enum NearbyStartup {
-        InvitationShown,
-        Finished(NearbyWorkerOutcome),
     }
 
     let native_authority = nearby_identity::native_assertion_authority()
@@ -272,23 +317,17 @@ fn authenticate(name: &str, storage_policy: nearby::StoragePolicy) -> Assertion 
     let native_operation =
         keytap_macos::AssertionOperation::new(native_prf_salt, native_credential);
     let native_cancellation = native_operation.cancellation_handle();
-    let (nearby_tx, nearby_rx) = mpsc::sync_channel(1);
     let nearby_name = name.to_string();
     let nearby_race = Arc::clone(&race);
     let worker_cancellation = nearby_cancellation.clone();
-    std::thread::Builder::new()
-        .name("keytap-nearby-approval".into())
-        .spawn(move || {
-            let invitation_tx = nearby_tx.clone();
+    let (native_outcome, nearby_rx) = run_native_while_nearby_starts(
+        move || {
             let prepared = nearby::prepare_nearby_assertion(
                 &nearby_name,
                 storage_policy,
                 worker_cancellation.clone(),
-                move || {
-                    invitation_tx.send(NearbyWorkerEvent::InvitationShown).ok();
-                },
             );
-            let outcome = match prepared {
+            match prepared {
                 Ok(prepared) => match nearby_race.claim(ApprovalRoute::Nearby) {
                     ClaimOutcome::Claimed => {
                         worker_cancellation.finish();
@@ -304,22 +343,11 @@ fn authenticate(name: &str, storage_policy: nearby::StoragePolicy) -> Assertion 
                     }
                 },
                 Err(error) => NearbyWorkerOutcome::Failed(error),
-            };
-            nearby_tx.send(NearbyWorkerEvent::Finished(outcome)).ok();
-        })
-        .unwrap_or_else(|error| die(&format!("could not start nearby approval: {error}")));
-
-    // Do not open the native sheet until stderr contains the complete URL an
-    // unattended agent can forward. Local setup failures are retained while
-    // the still-usable native route proceeds.
-    let nearby_startup = match nearby_rx.recv() {
-        Ok(NearbyWorkerEvent::InvitationShown) => NearbyStartup::InvitationShown,
-        Ok(NearbyWorkerEvent::Finished(outcome)) => NearbyStartup::Finished(outcome),
-        Err(_) => NearbyStartup::Finished(NearbyWorkerOutcome::Failed(
-            "nearby approval stopped before showing its URL".into(),
-        )),
-    };
-    let native_outcome = native_operation.run();
+            }
+        },
+        || native_operation.run(),
+    )
+    .unwrap_or_else(|error| die(&error));
     let native_failure = match native_outcome {
         keytap_macos::AssertionOutcome::Success {
             prf_output,
@@ -328,27 +356,13 @@ fn authenticate(name: &str, storage_policy: nearby::StoragePolicy) -> Assertion 
             Ok(assertion) => match native_authority.prepare(&assertion.credential_id) {
                 Ok(prepared) => match race.claim(ApprovalRoute::Native) {
                     ClaimOutcome::Claimed => {
+                        nearby_cancellation.supersede();
                         if let Err(error) = prepared.commit() {
-                            nearby_cancellation.supersede();
                             die(&format!(
                                 "native approval won, but its local passkey record could not be committed: {error}"
                             ));
                         }
-                        nearby_cancellation.supersede();
-                        match &nearby_startup {
-                            NearbyStartup::Finished(NearbyWorkerOutcome::Failed(error)) => {
-                                note(&format!("Nearby approval was unavailable ({error})."));
-                                note("Approved on this Mac.");
-                            }
-                            NearbyStartup::InvitationShown
-                            | NearbyStartup::Finished(
-                                NearbyWorkerOutcome::Committed(_)
-                                | NearbyWorkerOutcome::CommitFailed(_)
-                                | NearbyWorkerOutcome::SupersededByNative,
-                            ) => {
-                                note("Approved on this Mac; closed the nearby approval request.");
-                            }
-                        }
+                        note("Approved on this Mac; cancelled nearby approval.");
                         return assertion;
                     }
                     ClaimOutcome::Lost => {
@@ -365,26 +379,15 @@ fn authenticate(name: &str, storage_policy: nearby::StoragePolicy) -> Assertion 
         }
         keytap_macos::AssertionOutcome::Error(error) => {
             note(&format!(
-                "Native approval ended ({error}); nearby approval is still available."
+                "Native approval ended ({error}); waiting for nearby approval."
             ));
             format!("native approval failed: {error}")
         }
     };
 
-    let nearby_outcome = match nearby_startup {
-        NearbyStartup::Finished(outcome) => outcome,
-        NearbyStartup::InvitationShown => loop {
-            match nearby_rx.recv() {
-                Ok(NearbyWorkerEvent::InvitationShown) => continue,
-                Ok(NearbyWorkerEvent::Finished(outcome)) => break outcome,
-                Err(_) => {
-                    break NearbyWorkerOutcome::Failed(
-                        "nearby approval stopped unexpectedly".into(),
-                    )
-                }
-            }
-        },
-    };
+    let nearby_outcome = nearby_rx.recv().unwrap_or_else(|_| {
+        NearbyWorkerOutcome::Failed("nearby approval stopped unexpectedly".into())
+    });
     match nearby_outcome {
         NearbyWorkerOutcome::Committed(assertion) => {
             note("Approved on the nearby device; closed the native approval prompt.");
