@@ -3,10 +3,10 @@
 //! A nearby WebAuthn assertion asks the passkey PRF for two independent
 //! outputs in one prompt: the named key output and a fixed identity seed. The
 //! page derives an Ed25519 key from the latter and signs the exact nearby
-//! result. A short authentication string authenticates the first channel
-//! before this module pins the public identity and credential ID. A later
-//! nearby flow must match both and carry a valid, fresh signature over the
-//! returned key material and its one-time-versus-store disposition.
+//! result. A short authentication string establishes the first local pairing;
+//! later proofs are bound to the trusted one-use channel and exact request.
+//! This module pins the public identity and credential ID, then requires both
+//! to match a fresh signature over each returned key and storage disposition.
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
@@ -17,9 +17,10 @@ use std::path::{Path, PathBuf};
 
 use crate::nearby_sas::ConfirmedComparison;
 
-const FORMAT: &str = "keytap-nearby-identity-v2";
+const FORMAT: &str = "keytap-nearby-identity-v1";
 const PRF_SALT_CONTEXT: &[u8] = b"keytap:nearby-identity-prf:v1";
-const PROOF_DOMAIN: &[u8] = b"keytap:nearby-identity-proof:v3\0";
+const PROOF_DOMAIN: &[u8] = b"keytap:nearby-identity-proof:v1\0";
+const REGISTRATION_PROOF_DOMAIN: &[u8] = b"keytap:nearby-registration-identity-proof:v1\0";
 
 enum PairingState {
     FirstUse,
@@ -46,13 +47,36 @@ pub struct PinnedAnchor {
     public_key: [u8; 32],
 }
 
+/// A pairing proof whose credential, Ed25519 signature, and ceremony binding
+/// are valid, but whose identity pin has not been published yet. Approval races
+/// keep this prepared value inert until the nearby route wins.
+pub struct PreparedPairingPin {
+    anchor: PairingAnchor,
+    bytes: Vec<u8>,
+}
+
+/// A pinned-identity proof whose credential and Ed25519 signature are valid.
+/// The exact identity-file revision is rechecked only when the route commits,
+/// so a concurrent replacement cannot slip between verification and winner
+/// selection.
+pub struct PreparedPinnedAssertion {
+    anchor: PinnedAnchor,
+}
+
+/// A SAS-authenticated registration identity that has been verified but not
+/// published. The init revision remains authoritative until `commit`.
+pub struct PreparedRegistrationPin {
+    pending_init: PendingInit,
+    bytes: Vec<u8>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum Revision {
     Missing,
     Present(Vec<u8>),
 }
 
-/// An exact identity-file snapshot used to make the identity generation the
+/// An exact identity-file snapshot used to make the record revision the
 /// authority for remembered-key lookup.
 pub struct RememberAuthority {
     path: PathBuf,
@@ -60,8 +84,28 @@ pub struct RememberAuthority {
     credential_id: Vec<u8>,
 }
 
+/// The local identity snapshot that constrains a native assertion.
+///
+/// A machine with no record asks AuthenticationServices to discover a
+/// passkey. A machine with a record permits only that exact credential and
+/// identity-file revision.
+pub enum NativeAssertionAuthority {
+    New(PendingInit),
+    Existing(RememberAuthority),
+}
+
+/// A native result that is valid for the credential selected at ceremony
+/// start, but has not crossed the identity-file commit boundary yet.
+pub enum PreparedNativeAssertion {
+    New {
+        pending_init: PendingInit,
+        credential_id: Vec<u8>,
+    },
+    Existing(RememberAuthority),
+}
+
 /// A snapshot taken before an init ceremony. Consuming it is the only way to
-/// publish the new credential anchor, and publication fails if another
+/// publish the new identity record, and publication fails if another
 /// process changed the identity in the meantime.
 pub struct PendingInit {
     path: PathBuf,
@@ -74,7 +118,7 @@ pub enum InitMode {
     Replace,
 }
 
-/// Proof that the credential anchor was committed before init is acknowledged.
+/// Proof that the identity record was committed before init is acknowledged.
 pub struct PersistedInit;
 
 pub enum PairingConstraint<'a> {
@@ -96,8 +140,13 @@ pub struct ProofContext<'a> {
     pub disposition: AssertionDisposition,
 }
 
-/// The phone's choice for this exact assertion. It is part of the signed
-/// identity proof so signaling or data-channel message rewriting cannot turn
+pub struct RegistrationProofContext<'a> {
+    pub confirmation: &'a ConfirmedComparison,
+    pub challenge: &'a [u8],
+}
+
+/// The approver's choice for this exact assertion. It is part of the signed
+/// identity proof so an altered message cannot turn
 /// a one-time use into a local storage request.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "lowercase")]
@@ -108,11 +157,12 @@ pub enum AssertionDisposition {
 
 #[derive(Clone, Copy)]
 pub enum ProofBinding<'a> {
-    BootstrapSas {
+    FirstPairSas {
         confirmation: &'a ConfirmedComparison,
     },
-    PinnedSession {
-        digest: &'a [u8; 32],
+    PinnedIdentity {
+        session_binding: &'a [u8; 32],
+        request: &'a [u8],
     },
 }
 
@@ -131,13 +181,16 @@ impl std::fmt::Display for VerificationError {
                 f,
                 "the nearby passkey does not match the identity first trusted on this machine"
             ),
-            Self::InvalidProof => write!(f, "the phone returned an invalid passkey identity proof"),
+            Self::InvalidProof => write!(
+                f,
+                "the nearby device returned an invalid passkey identity proof"
+            ),
             Self::Store(message) => {
-                write!(f, "could not store the nearby passkey identity: {message}")
+                write!(f, "could not store the local passkey record: {message}")
             }
             Self::DurabilityUnknown(message) => write!(
                 f,
-                "the nearby passkey identity was published, but its durability is unknown: {message}"
+                "the local passkey record was published, but its durability is unknown: {message}"
             ),
         }
     }
@@ -153,13 +206,14 @@ pub enum InitCommitError {
 }
 
 #[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct StoredFile {
     format: String,
     identity: StoredIdentity,
 }
 
 #[derive(Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "kebab-case")]
+#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
 enum StoredIdentity {
     Credential {
         #[serde(rename = "credentialId")]
@@ -227,10 +281,10 @@ impl Anchor {
 
 fn parse_stored_file(path: &Path, bytes: &[u8]) -> Result<StoredFile, String> {
     let stored: StoredFile = serde_json::from_slice(bytes)
-        .map_err(|_| format!("{} is not a valid nearby identity file", path.display()))?;
+        .map_err(|_| format!("{} is not a valid passkey record", path.display()))?;
     if stored.format != FORMAT {
         return Err(format!(
-            "{} has an unknown nearby identity format",
+            "{} has an unknown passkey record format",
             path.display()
         ));
     }
@@ -247,15 +301,26 @@ impl PairingAnchor {
         }
     }
 
-    /// This method is intentionally available only on a pairing anchor. Its
-    /// caller must first complete the local SAS comparison represented by the
-    /// `BootstrapSas` proof binding.
-    pub fn verify_and_pin_after_sas(
+    /// Verify without publishing. Consuming the snapshot prevents callers
+    /// from accidentally validating one candidate and committing another.
+    pub fn prepare_pin(
+        self,
+        proof: &Proof,
+        context: &ProofContext<'_>,
+    ) -> Result<PreparedPairingPin, VerificationError> {
+        let bytes = self.verify_pin_candidate(proof, context)?;
+        Ok(PreparedPairingPin {
+            anchor: self,
+            bytes,
+        })
+    }
+
+    fn verify_pin_candidate(
         &self,
         proof: &Proof,
         context: &ProofContext<'_>,
-    ) -> Result<(), VerificationError> {
-        if !matches!(context.binding, ProofBinding::BootstrapSas { .. }) {
+    ) -> Result<Vec<u8>, VerificationError> {
+        if !matches!(context.binding, ProofBinding::FirstPairSas { .. }) {
             return Err(VerificationError::InvalidProof);
         }
         match &self.state {
@@ -267,14 +332,17 @@ impl PairingAnchor {
             PairingState::FirstUse | PairingState::Credential { .. } => {}
         }
         verify_proof(proof, context)?;
-        let bytes = verified_pin_bytes(proof).map_err(VerificationError::Store)?;
+        verified_pin_bytes(proof).map_err(VerificationError::Store)
+    }
+
+    fn publish_verified_pin(&self, bytes: &[u8]) -> Result<(), VerificationError> {
         let _lock = IdentityLock::acquire(&self.path).map_err(VerificationError::Store)?;
         let current = read_revision(&self.path).map_err(|error| {
             VerificationError::Store(format!("reading {}: {error}", self.path.display()))
         })?;
         match (&self.state, current) {
             (PairingState::FirstUse, Revision::Missing) => {
-                match write_private_new(&self.path, &bytes).map_err(verification_publish_error)? {
+                match write_private_new(&self.path, bytes).map_err(verification_publish_error)? {
                     NewFile::Created => Ok(()),
                     NewFile::AlreadyExists => Err(VerificationError::IdentityMismatch),
                 }
@@ -282,13 +350,20 @@ impl PairingAnchor {
             (PairingState::Credential { expected, .. }, Revision::Present(current))
                 if current == *expected =>
             {
-                write_private_replace(&self.path, &bytes).map_err(verification_publish_error)?;
+                write_private_replace(&self.path, bytes).map_err(verification_publish_error)?;
                 Ok(())
             }
             (PairingState::FirstUse | PairingState::Credential { .. }, _) => {
                 Err(VerificationError::IdentityMismatch)
             }
         }
+    }
+}
+
+impl PreparedPairingPin {
+    /// Publish only after the nearby approval route has atomically won.
+    pub fn commit(self) -> Result<(), VerificationError> {
+        self.anchor.publish_verified_pin(&self.bytes)
     }
 }
 
@@ -306,12 +381,23 @@ impl PinnedAnchor {
         &self.credential_id
     }
 
-    pub fn verify(
+    /// Verify the proof while delaying the mutable revision check until the
+    /// approval route has won.
+    pub fn prepare(
+        self,
+        proof: &Proof,
+        context: &ProofContext<'_>,
+    ) -> Result<PreparedPinnedAssertion, VerificationError> {
+        self.verify_candidate(proof, context)?;
+        Ok(PreparedPinnedAssertion { anchor: self })
+    }
+
+    fn verify_candidate(
         &self,
         proof: &Proof,
         context: &ProofContext<'_>,
     ) -> Result<(), VerificationError> {
-        if !matches!(context.binding, ProofBinding::PinnedSession { .. }) {
+        if !matches!(context.binding, ProofBinding::PinnedIdentity { .. }) {
             return Err(VerificationError::InvalidProof);
         }
         if self.credential_id != proof.credential_id || self.public_key != proof.public_key {
@@ -319,6 +405,10 @@ impl PinnedAnchor {
         }
         verify_proof(proof, context)?;
 
+        Ok(())
+    }
+
+    fn revalidate(&self) -> Result<(), VerificationError> {
         // Force-init and assertion may overlap. The proof authenticates the
         // snapshot sent in this ceremony, but only this final compare under
         // the writer lock makes that snapshot current at acceptance time.
@@ -333,11 +423,32 @@ impl PinnedAnchor {
     }
 }
 
+impl PreparedPinnedAssertion {
+    /// Revalidate the exact record revision at the winner boundary.
+    pub fn commit(self) -> Result<(), VerificationError> {
+        self.anchor.revalidate()
+    }
+}
+
 fn verify_proof(proof: &Proof, context: &ProofContext<'_>) -> Result<(), VerificationError> {
     let key =
         VerifyingKey::from_bytes(&proof.public_key).map_err(|_| VerificationError::InvalidProof)?;
     let signature = Signature::from_bytes(&proof.signature);
     key.verify_strict(&proof_message(proof, context), &signature)
+        .map_err(|_| VerificationError::InvalidProof)
+}
+
+fn verify_registration_proof(
+    proof: &Proof,
+    context: &RegistrationProofContext<'_>,
+) -> Result<(), VerificationError> {
+    if proof.credential_id.is_empty() || proof.credential_id.len() > 1024 {
+        return Err(VerificationError::InvalidProof);
+    }
+    let key =
+        VerifyingKey::from_bytes(&proof.public_key).map_err(|_| VerificationError::InvalidProof)?;
+    let signature = Signature::from_bytes(&proof.signature);
+    key.verify_strict(&registration_proof_message(proof, context), &signature)
         .map_err(|_| VerificationError::InvalidProof)
 }
 
@@ -353,27 +464,22 @@ fn verified_pin_bytes(proof: &Proof) -> Result<Vec<u8>, String> {
 }
 
 pub fn proof_message(proof: &Proof, context: &ProofContext<'_>) -> Vec<u8> {
-    let binding = match context.binding {
-        ProofBinding::BootstrapSas { confirmation } => confirmation.binding_digest(),
-        ProofBinding::PinnedSession { digest } => digest,
-    };
-    let mut message = Vec::with_capacity(
-        PROOF_DOMAIN.len()
-            + 1
-            + binding.len()
-            + context.challenge.len()
-            + proof.credential_id.len()
-            + context.prf_output.len()
-            + context.key_name.len()
-            + proof.public_key.len()
-            + 25,
-    );
+    let mut message = Vec::with_capacity(PROOF_DOMAIN.len() + 256);
     message.extend_from_slice(PROOF_DOMAIN);
-    message.push(match context.binding {
-        ProofBinding::BootstrapSas { .. } => 0,
-        ProofBinding::PinnedSession { .. } => 1,
-    });
-    append_field(&mut message, binding);
+    match context.binding {
+        ProofBinding::FirstPairSas { confirmation } => {
+            message.push(0);
+            append_field(&mut message, confirmation.binding_digest());
+        }
+        ProofBinding::PinnedIdentity {
+            session_binding,
+            request,
+        } => {
+            message.push(1);
+            append_field(&mut message, session_binding);
+            append_field(&mut message, request);
+        }
+    }
     append_field(&mut message, context.challenge);
     append_field(&mut message, &proof.credential_id);
     append_field(&mut message, context.prf_output);
@@ -382,6 +488,16 @@ pub fn proof_message(proof: &Proof, context: &ProofContext<'_>) -> Vec<u8> {
         AssertionDisposition::Once => 0,
         AssertionDisposition::Remember => 1,
     });
+    append_field(&mut message, &proof.public_key);
+    message
+}
+
+fn registration_proof_message(proof: &Proof, context: &RegistrationProofContext<'_>) -> Vec<u8> {
+    let mut message = Vec::with_capacity(REGISTRATION_PROOF_DOMAIN.len() + 128);
+    message.extend_from_slice(REGISTRATION_PROOF_DOMAIN);
+    append_field(&mut message, context.confirmation.binding_digest());
+    append_field(&mut message, context.challenge);
+    append_field(&mut message, &proof.credential_id);
     append_field(&mut message, &proof.public_key);
     message
 }
@@ -434,7 +550,7 @@ pub fn prf_salt() -> [u8; 32] {
     Sha256::digest(PRF_SALT_CONTEXT).into()
 }
 
-/// Snapshot the identity generation that remembered-key lookup must obey.
+/// Snapshot the record revision that remembered-key lookup must obey.
 /// Without an identity file, remembered entries are deliberately unavailable.
 pub fn remember_authority() -> Result<RememberAuthority, String> {
     let path = default_path()?;
@@ -442,14 +558,25 @@ pub fn remember_authority() -> Result<RememberAuthority, String> {
 }
 
 pub(crate) fn remember_authority_at(path: PathBuf) -> Result<RememberAuthority, String> {
-    let expected = read_revision(&path)
-        .map_err(|error| format!("reading nearby identity at {}: {error}", path.display()))?;
+    let expected = read_revision(&path).map_err(|error| {
+        format!(
+            "reading local passkey record at {}: {error}",
+            path.display()
+        )
+    })?;
     let Revision::Present(bytes) = expected else {
         return Err(format!(
-            "no nearby identity is stored at {}",
+            "no local passkey record is stored at {}",
             path.display()
         ));
     };
+    remember_authority_from_bytes(path, bytes)
+}
+
+fn remember_authority_from_bytes(
+    path: PathBuf,
+    bytes: Vec<u8>,
+) -> Result<RememberAuthority, String> {
     let stored = parse_stored_file(&path, &bytes)?;
     let encoded = match stored.identity {
         StoredIdentity::Credential { credential_id } => credential_id,
@@ -472,6 +599,91 @@ pub(crate) fn remember_authority_at(path: PathBuf) -> Result<RememberAuthority, 
         expected: bytes,
         credential_id,
     })
+}
+
+/// Snapshot the local identity once before starting the two approval routes.
+/// Missing state enables passkey discovery; any existing state constrains the
+/// native provider to its credential.
+pub fn native_assertion_authority() -> Result<NativeAssertionAuthority, String> {
+    let path = default_path()?;
+    native_assertion_authority_at(path)
+}
+
+fn native_assertion_authority_at(path: PathBuf) -> Result<NativeAssertionAuthority, String> {
+    let revision = read_revision(&path).map_err(|error| {
+        format!(
+            "reading local passkey record at {}: {error}",
+            path.display()
+        )
+    })?;
+    match revision {
+        Revision::Missing => Ok(NativeAssertionAuthority::New(PendingInit {
+            path,
+            expected: Revision::Missing,
+        })),
+        Revision::Present(bytes) => {
+            remember_authority_from_bytes(path, bytes).map(NativeAssertionAuthority::Existing)
+        }
+    }
+}
+
+impl NativeAssertionAuthority {
+    pub fn prepare(self, credential_id: &[u8]) -> Result<PreparedNativeAssertion, String> {
+        if credential_id.is_empty() || credential_id.len() > 1024 {
+            return Err(format!(
+                "native passkey provider returned a credential ID of {} bytes; expected 1 to 1024",
+                credential_id.len()
+            ));
+        }
+        match self {
+            Self::New(pending_init) => Ok(PreparedNativeAssertion::New {
+                pending_init,
+                credential_id: credential_id.to_vec(),
+            }),
+            Self::Existing(authority) if authority.credential_id == credential_id => {
+                Ok(PreparedNativeAssertion::Existing(authority))
+            }
+            Self::Existing(_) => Err(
+                "native passkey provider returned a credential other than the local passkey credential record"
+                    .to_string(),
+            ),
+        }
+    }
+}
+
+impl PreparedNativeAssertion {
+    /// Commit at the approval winner boundary. New credentials reuse init's
+    /// revision CAS; existing credentials revalidate their exact revision
+    /// under the same writer lock used by init and nearby pairing.
+    pub fn commit(self) -> Result<(), String> {
+        match self {
+            Self::New {
+                pending_init,
+                credential_id,
+            } => pending_init
+                .commit(&credential_id)
+                .map(|_| ())
+                .map_err(|error| match error {
+                    InitCommitError::NotPublished(error) => error,
+                    InitCommitError::PublishedButNotDurable(error) => format!(
+                        "the local passkey credential record was published, but its durability is unknown: {error}"
+                    ),
+                }),
+            Self::Existing(authority) => {
+                let _lock = IdentityLock::acquire(&authority.path)?;
+                let current = read_revision(&authority.path)
+                    .map_err(|error| format!("reading {}: {error}", authority.path.display()))?;
+                if matches!(current, Revision::Present(bytes) if bytes == authority.expected) {
+                    Ok(())
+                } else {
+                    Err(
+                        "the local passkey credential record changed while native approval was open"
+                            .to_string(),
+                    )
+                }
+            }
+        }
+    }
 }
 
 impl RememberAuthority {
@@ -499,11 +711,15 @@ pub fn prepare_init(mode: InitMode) -> Result<PendingInit, String> {
 }
 
 pub(crate) fn prepare_init_at(path: PathBuf, mode: InitMode) -> Result<PendingInit, String> {
-    let expected = read_revision(&path)
-        .map_err(|error| format!("reading nearby identity at {}: {error}", path.display()))?;
+    let expected = read_revision(&path).map_err(|error| {
+        format!(
+            "reading local passkey record at {}: {error}",
+            path.display()
+        )
+    })?;
     if matches!((&mode, &expected), (InitMode::Create, Revision::Present(_))) {
         return Err(format!(
-            "a nearby passkey identity is already stored at {}; pass --force to replace it",
+            "a local passkey record is already stored at {}; pass --force to replace it",
             path.display()
         ));
     }
@@ -511,6 +727,19 @@ pub(crate) fn prepare_init_at(path: PathBuf, mode: InitMode) -> Result<PendingIn
 }
 
 impl PendingInit {
+    pub fn prepare_registration_pin(
+        self,
+        proof: &Proof,
+        context: &RegistrationProofContext<'_>,
+    ) -> Result<PreparedRegistrationPin, VerificationError> {
+        verify_registration_proof(proof, context)?;
+        let bytes = verified_pin_bytes(proof).map_err(VerificationError::Store)?;
+        Ok(PreparedRegistrationPin {
+            pending_init: self,
+            bytes,
+        })
+    }
+
     pub fn commit(self, credential_id: &[u8]) -> Result<PersistedInit, InitCommitError> {
         if credential_id.is_empty() || credential_id.len() > 1024 {
             return Err(InitCommitError::NotPublished(
@@ -518,6 +747,10 @@ impl PendingInit {
             ));
         }
         let bytes = init_credential_bytes(credential_id).map_err(InitCommitError::NotPublished)?;
+        self.commit_bytes(&bytes)
+    }
+
+    fn commit_bytes(self, bytes: &[u8]) -> Result<PersistedInit, InitCommitError> {
         let _lock = IdentityLock::acquire(&self.path).map_err(InitCommitError::NotPublished)?;
         let current = read_revision(&self.path).map_err(|error| {
             InitCommitError::NotPublished(format!("reading {}: {error}", self.path.display()))
@@ -530,7 +763,7 @@ impl PendingInit {
         }
         match self.expected {
             Revision::Missing => {
-                match write_private_new(&self.path, &bytes).map_err(InitCommitError::from)? {
+                match write_private_new(&self.path, bytes).map_err(InitCommitError::from)? {
                     NewFile::Created => {}
                     NewFile::AlreadyExists => {
                         return Err(InitCommitError::NotPublished(format!(
@@ -541,10 +774,16 @@ impl PendingInit {
                 }
             }
             Revision::Present(_) => {
-                write_private_replace(&self.path, &bytes).map_err(InitCommitError::from)?
+                write_private_replace(&self.path, bytes).map_err(InitCommitError::from)?
             }
         }
         Ok(PersistedInit)
+    }
+}
+
+impl PreparedRegistrationPin {
+    pub fn commit(self) -> Result<PersistedInit, InitCommitError> {
+        self.pending_init.commit_bytes(&self.bytes)
     }
 }
 
@@ -621,7 +860,7 @@ impl IdentityLock {
                 let error = std::io::Error::last_os_error();
                 return Err(if error.kind() == std::io::ErrorKind::WouldBlock {
                     format!(
-                        "another nearby identity update is in progress at {}",
+                        "another passkey record update is in progress at {}",
                         path.display()
                     )
                 } else {
@@ -638,7 +877,7 @@ impl IdentityLock {
             options.open(&path).map_err(|error| {
                 if error.kind() == std::io::ErrorKind::AlreadyExists {
                     format!(
-                        "another nearby identity update is in progress at {}",
+                        "another passkey record update is in progress at {}",
                         path.display()
                     )
                 } else {
@@ -826,9 +1065,12 @@ mod tests {
 
     #[derive(Clone, Copy)]
     enum TestBinding {
-        Bootstrap,
-        Pinned,
+        FirstPair,
+        PinnedIdentity,
     }
+
+    const TEST_SESSION_BINDING: [u8; 32] = [0x33; 32];
+    const TEST_REQUEST: &[u8] = br#"{"type":"request","request":{"kind":"assert"}}"#;
 
     fn temp_path(tag: &str) -> PathBuf {
         std::env::temp_dir()
@@ -839,7 +1081,7 @@ mod tests {
             .join("nearby-identity.json")
     }
 
-    fn bootstrap_fields_for<'a>(
+    fn first_pair_fields_for<'a>(
         proof: &'a Proof,
         confirmation: &'a ConfirmedComparison,
         challenge: &'a [u8; 32],
@@ -847,7 +1089,7 @@ mod tests {
     ) -> ProofContext<'a> {
         let _ = proof;
         ProofContext {
-            binding: ProofBinding::BootstrapSas { confirmation },
+            binding: ProofBinding::FirstPairSas { confirmation },
             challenge,
             prf_output: prf,
             key_name: "deploy",
@@ -857,13 +1099,15 @@ mod tests {
 
     fn pinned_fields_for<'a>(
         proof: &'a Proof,
-        digest: &'a [u8; 32],
         challenge: &'a [u8; 32],
         prf: &'a [u8; 32],
     ) -> ProofContext<'a> {
         let _ = proof;
         ProofContext {
-            binding: ProofBinding::PinnedSession { digest },
+            binding: ProofBinding::PinnedIdentity {
+                session_binding: &TEST_SESSION_BINDING,
+                request: TEST_REQUEST,
+            },
             challenge,
             prf_output: prf,
             key_name: "deploy",
@@ -883,19 +1127,40 @@ mod tests {
         let challenge = [0x24; 32];
         let prf = [0x11; 32];
         let message = match binding {
-            TestBinding::Bootstrap => {
+            TestBinding::FirstPair => {
                 let confirmation = ConfirmedComparison::from_digest_for_test(digest);
                 proof_message(
                     &proof,
-                    &bootstrap_fields_for(&proof, &confirmation, &challenge, &prf),
+                    &first_pair_fields_for(&proof, &confirmation, &challenge, &prf),
                 )
             }
-            TestBinding::Pinned => proof_message(
-                &proof,
-                &pinned_fields_for(&proof, &digest, &challenge, &prf),
-            ),
+            TestBinding::PinnedIdentity => {
+                proof_message(&proof, &pinned_fields_for(&proof, &challenge, &prf))
+            }
         };
         proof.signature = signing.sign(&message).to_bytes();
+        proof
+    }
+
+    fn signed_registration_proof(seed: [u8; 32], credential_id: &[u8]) -> Proof {
+        let signing = SigningKey::from_bytes(&seed);
+        let public_key = signing.verifying_key().to_bytes();
+        let mut proof = Proof {
+            credential_id: credential_id.to_vec(),
+            public_key,
+            signature: [0; 64],
+        };
+        let confirmation = ConfirmedComparison::from_digest_for_test([0x42; 32]);
+        let challenge = [0x24; 32];
+        proof.signature = signing
+            .sign(&registration_proof_message(
+                &proof,
+                &RegistrationProofContext {
+                    confirmation: &confirmation,
+                    challenge: &challenge,
+                },
+            ))
+            .to_bytes();
         proof
     }
 
@@ -940,6 +1205,114 @@ mod tests {
     }
 
     #[test]
+    fn first_native_assertion_is_discoverable_until_its_credential_wins() {
+        let path = temp_path("discoverable-native-assertion");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+        let authority = native_assertion_authority_at(path.clone()).unwrap();
+        assert!(matches!(&authority, NativeAssertionAuthority::New(_)));
+
+        let prepared = authority.prepare(b"native-credential").unwrap();
+        assert!(!path.exists());
+        prepared.commit().unwrap();
+
+        assert!(matches!(
+            pairing(Anchor::load_from(path.clone()).unwrap()).constraint(),
+            PairingConstraint::Credential { credential_id }
+                if credential_id == b"native-credential"
+        ));
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn existing_native_assertion_requires_the_recorded_credential_and_revision() {
+        let path = temp_path("constrained-native-assertion");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+        pending_init_at(path.clone())
+            .commit(b"credential-one")
+            .unwrap();
+
+        let authority = native_assertion_authority_at(path.clone()).unwrap();
+        assert!(matches!(
+            &authority,
+            NativeAssertionAuthority::Existing(authority)
+                if authority.credential_id() == b"credential-one"
+        ));
+        assert!(native_assertion_authority_at(path.clone())
+            .unwrap()
+            .prepare(b"credential-two")
+            .is_err());
+
+        let prepared = authority.prepare(b"credential-one").unwrap();
+        prepare_init_at(path.clone(), InitMode::Replace)
+            .unwrap()
+            .commit(b"credential-two")
+            .unwrap();
+        assert!(prepared.commit().is_err());
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn first_native_assertion_cannot_overwrite_a_concurrent_pairing() {
+        let path = temp_path("native-versus-pairing");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+        let native = native_assertion_authority_at(path.clone())
+            .unwrap()
+            .prepare(b"native-credential")
+            .unwrap();
+        let anchor = pairing(Anchor::load_from(path.clone()).unwrap());
+        let proof = signed_proof([7; 32], b"nearby-credential", TestBinding::FirstPair);
+        let digest = [0x42; 32];
+        let confirmation = ConfirmedComparison::from_digest_for_test(digest);
+        let challenge = [0x24; 32];
+        let prf = [0x11; 32];
+        anchor
+            .prepare_pin(
+                &proof,
+                &first_pair_fields_for(&proof, &confirmation, &challenge, &prf),
+            )
+            .unwrap()
+            .commit()
+            .unwrap();
+
+        assert!(native.commit().is_err());
+        assert_eq!(
+            pinned(Anchor::load_from(path.clone()).unwrap()).credential_id(),
+            b"nearby-credential"
+        );
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn identity_file_rejects_unknown_top_level_fields() {
+        let path = Path::new("nearby-identity.json");
+        let bytes = br#"{
+            "format": "keytap-nearby-identity-v1",
+            "identity": {
+                "kind": "credential",
+                "credentialId": "Y3JlZGVudGlhbA"
+            },
+            "extra": true
+        }"#;
+
+        assert!(parse_stored_file(path, bytes).is_err());
+    }
+
+    #[test]
+    fn identity_file_rejects_unknown_variant_fields() {
+        let path = Path::new("nearby-identity.json");
+        let bytes = br#"{
+            "format": "keytap-nearby-identity-v1",
+            "identity": {
+                "kind": "credential",
+                "credentialId": "Y3JlZGVudGlhbA",
+                "publicKey": "unused"
+            }
+        }"#;
+
+        assert!(parse_stored_file(path, bytes).is_err());
+    }
+
+    #[test]
     fn init_commit_is_a_revision_compare_and_swap() {
         let path = temp_path("init-cas");
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
@@ -951,6 +1324,95 @@ mod tests {
         assert!(matches!(
             pairing(Anchor::load_from(path.clone()).unwrap()).constraint(),
             PairingConstraint::Credential { credential_id } if credential_id == b"credential-one"
+        ));
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn nearby_registration_publishes_the_sas_authenticated_identity() {
+        let path = temp_path("registration-pin");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+        let proof = signed_registration_proof([7; 32], b"credential-one");
+        let confirmation = ConfirmedComparison::from_digest_for_test([0x42; 32]);
+        let challenge = [0x24; 32];
+        let prepared = pending_init_at(path.clone())
+            .prepare_registration_pin(
+                &proof,
+                &RegistrationProofContext {
+                    confirmation: &confirmation,
+                    challenge: &challenge,
+                },
+            )
+            .unwrap();
+        assert!(!path.exists(), "verification must not publish the identity");
+        prepared.commit().unwrap();
+
+        let anchor = pinned(Anchor::load_from(path.clone()).unwrap());
+        assert_eq!(anchor.credential_id(), b"credential-one");
+        assert_eq!(anchor.public_key, proof.public_key);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn nearby_registration_rejects_a_different_sas_or_challenge() {
+        let path = temp_path("registration-binding");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+        let proof = signed_registration_proof([7; 32], b"credential-one");
+        let wrong_confirmation = ConfirmedComparison::from_digest_for_test([0x43; 32]);
+        let challenge = [0x24; 32];
+        assert!(matches!(
+            pending_init_at(path.clone()).prepare_registration_pin(
+                &proof,
+                &RegistrationProofContext {
+                    confirmation: &wrong_confirmation,
+                    challenge: &challenge,
+                },
+            ),
+            Err(VerificationError::InvalidProof)
+        ));
+
+        let confirmation = ConfirmedComparison::from_digest_for_test([0x42; 32]);
+        let wrong_challenge = [0x25; 32];
+        assert!(matches!(
+            pending_init_at(path.clone()).prepare_registration_pin(
+                &proof,
+                &RegistrationProofContext {
+                    confirmation: &confirmation,
+                    challenge: &wrong_challenge,
+                },
+            ),
+            Err(VerificationError::InvalidProof)
+        ));
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn nearby_registration_pin_obeys_the_init_revision_boundary() {
+        let path = temp_path("registration-race");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+        let proof = signed_registration_proof([7; 32], b"credential-one");
+        let confirmation = ConfirmedComparison::from_digest_for_test([0x42; 32]);
+        let challenge = [0x24; 32];
+        let prepared = pending_init_at(path.clone())
+            .prepare_registration_pin(
+                &proof,
+                &RegistrationProofContext {
+                    confirmation: &confirmation,
+                    challenge: &challenge,
+                },
+            )
+            .unwrap();
+        pending_init_at(path.clone())
+            .commit(b"credential-two")
+            .unwrap();
+        assert!(matches!(
+            prepared.commit(),
+            Err(InitCommitError::NotPublished(_))
+        ));
+        assert!(matches!(
+            pairing(Anchor::load_from(path.clone()).unwrap()).constraint(),
+            PairingConstraint::Credential { credential_id }
+                if credential_id == b"credential-two"
         ));
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
@@ -1005,22 +1467,24 @@ mod tests {
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
         let pending = pending_init_at(path.clone());
         let anchor = pairing(Anchor::load_from(path.clone()).unwrap());
-        let proof = signed_proof([7; 32], b"paired-credential", TestBinding::Bootstrap);
+        let proof = signed_proof([7; 32], b"nearby-credential", TestBinding::FirstPair);
         let digest = [0x42; 32];
         let confirmation = ConfirmedComparison::from_digest_for_test(digest);
         let challenge = [0x24; 32];
         let prf = [0x11; 32];
         anchor
-            .verify_and_pin_after_sas(
+            .prepare_pin(
                 &proof,
-                &bootstrap_fields_for(&proof, &confirmation, &challenge, &prf),
+                &first_pair_fields_for(&proof, &confirmation, &challenge, &prf),
             )
+            .unwrap()
+            .commit()
             .unwrap();
 
         assert!(pending.commit(b"init-credential").is_err());
         assert_eq!(
             pinned(Anchor::load_from(path.clone()).unwrap()).credential_id(),
-            b"paired-credential"
+            b"nearby-credential"
         );
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
@@ -1051,26 +1515,38 @@ mod tests {
         let anchor = pairing(Anchor::load_from(path.clone()).unwrap());
         assert!(matches!(anchor.constraint(), PairingConstraint::AnyPasskey));
 
-        let proof = signed_proof([7; 32], b"credential-one", TestBinding::Bootstrap);
+        let proof = signed_proof([7; 32], b"credential-one", TestBinding::FirstPair);
         let digest = [0x42; 32];
         let confirmation = ConfirmedComparison::from_digest_for_test(digest);
         let challenge = [0x24; 32];
         let prf = [0x11; 32];
-        anchor
-            .verify_and_pin_after_sas(
+        let prepared = anchor
+            .prepare_pin(
                 &proof,
-                &bootstrap_fields_for(&proof, &confirmation, &challenge, &prf),
+                &first_pair_fields_for(&proof, &confirmation, &challenge, &prf),
             )
             .unwrap();
+        assert!(
+            !path.exists(),
+            "verification alone must not publish the winning identity"
+        );
+        prepared.commit().unwrap();
+
+        let native = native_assertion_authority_at(path.clone()).unwrap();
+        assert!(matches!(
+            &native,
+            NativeAssertionAuthority::Existing(authority)
+                if authority.credential_id() == b"credential-one"
+        ));
+        native.prepare(b"credential-one").unwrap().commit().unwrap();
 
         let anchor = pinned(Anchor::load_from(path.clone()).unwrap());
         assert_eq!(anchor.credential_id(), b"credential-one");
-        let proof = signed_proof([7; 32], b"credential-one", TestBinding::Pinned);
+        let proof = signed_proof([7; 32], b"credential-one", TestBinding::PinnedIdentity);
         anchor
-            .verify(
-                &proof,
-                &pinned_fields_for(&proof, &digest, &challenge, &prf),
-            )
+            .prepare(&proof, &pinned_fields_for(&proof, &challenge, &prf))
+            .unwrap()
+            .commit()
             .unwrap();
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
@@ -1084,25 +1560,27 @@ mod tests {
         let confirmation = ConfirmedComparison::from_digest_for_test(digest);
         let challenge = [0x24; 32];
         let prf = [0x11; 32];
-        let bootstrap = signed_proof([7; 32], b"credential-one", TestBinding::Bootstrap);
+        let bootstrap = signed_proof([7; 32], b"credential-one", TestBinding::FirstPair);
         first
-            .verify_and_pin_after_sas(
+            .prepare_pin(
                 &bootstrap,
-                &bootstrap_fields_for(&bootstrap, &confirmation, &challenge, &prf),
+                &first_pair_fields_for(&bootstrap, &confirmation, &challenge, &prf),
             )
+            .unwrap()
+            .commit()
             .unwrap();
 
-        // The assertion captured generation one, then a force-init committed
-        // generation two before the assertion result reached final acceptance.
+        // The assertion verified one revision, then a force-init committed a
+        // replacement before the approval race reached its winner boundary.
         let stale = pinned(Anchor::load_from(path.clone()).unwrap());
+        let old_proof = signed_proof([7; 32], b"credential-one", TestBinding::PinnedIdentity);
+        let prepared = stale
+            .prepare(&old_proof, &pinned_fields_for(&old_proof, &challenge, &prf))
+            .unwrap();
         let replacement = prepare_init_at(path.clone(), InitMode::Replace).unwrap();
         replacement.commit(b"credential-two").unwrap();
-        let old_proof = signed_proof([7; 32], b"credential-one", TestBinding::Pinned);
         assert!(matches!(
-            stale.verify(
-                &old_proof,
-                &pinned_fields_for(&old_proof, &digest, &challenge, &prf),
-            ),
+            prepared.commit(),
             Err(VerificationError::IdentityMismatch)
         ));
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
@@ -1117,28 +1595,27 @@ mod tests {
         let confirmation = ConfirmedComparison::from_digest_for_test(digest);
         let challenge = [0x24; 32];
         let prf = [0x11; 32];
-        let proof = signed_proof([7; 32], b"credential-one", TestBinding::Bootstrap);
+        let proof = signed_proof([7; 32], b"credential-one", TestBinding::FirstPair);
         first
-            .verify_and_pin_after_sas(
+            .prepare_pin(
                 &proof,
-                &bootstrap_fields_for(&proof, &confirmation, &challenge, &prf),
+                &first_pair_fields_for(&proof, &confirmation, &challenge, &prf),
             )
+            .unwrap()
+            .commit()
             .unwrap();
 
         let anchor = pinned(Anchor::load_from(path.clone()).unwrap());
-        let other = signed_proof([9; 32], b"credential-two", TestBinding::Pinned);
+        let other = signed_proof([9; 32], b"credential-two", TestBinding::PinnedIdentity);
         assert!(matches!(
-            anchor.verify(
-                &other,
-                &pinned_fields_for(&other, &digest, &challenge, &prf),
-            ),
+            anchor.prepare(&other, &pinned_fields_for(&other, &challenge, &prf),),
             Err(VerificationError::IdentityMismatch)
         ));
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
     #[test]
-    fn credential_only_init_anchor_still_requires_sas() {
+    fn credential_anchor_requires_confirmed_first_pairing() {
         let path = temp_path("credential-pairing");
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
         let stored = StoredFile {
@@ -1154,25 +1631,27 @@ mod tests {
             PairingConstraint::Credential { credential_id } if credential_id == b"credential-one"
         ));
 
-        let digest = [0x42; 32];
-        let confirmation = ConfirmedComparison::from_digest_for_test(digest);
         let challenge = [0x24; 32];
         let prf = [0x11; 32];
-        let wrong = signed_proof([9; 32], b"credential-two", TestBinding::Bootstrap);
+        let confirmation = ConfirmedComparison::from_digest_for_test([0x42; 32]);
+        let wrong = signed_proof([9; 32], b"credential-two", TestBinding::FirstPair);
         assert!(matches!(
-            anchor.verify_and_pin_after_sas(
+            anchor.prepare_pin(
                 &wrong,
-                &bootstrap_fields_for(&wrong, &confirmation, &challenge, &prf),
+                &first_pair_fields_for(&wrong, &confirmation, &challenge, &prf),
             ),
             Err(VerificationError::IdentityMismatch)
         ));
 
-        let matching = signed_proof([7; 32], b"credential-one", TestBinding::Bootstrap);
+        let anchor = pairing(Anchor::load_from(path.clone()).unwrap());
+        let matching = signed_proof([7; 32], b"credential-one", TestBinding::FirstPair);
         anchor
-            .verify_and_pin_after_sas(
+            .prepare_pin(
                 &matching,
-                &bootstrap_fields_for(&matching, &confirmation, &challenge, &prf),
+                &first_pair_fields_for(&matching, &confirmation, &challenge, &prf),
             )
+            .unwrap()
+            .commit()
             .unwrap();
         assert!(matches!(
             Anchor::load_from(path.clone()).unwrap(),
@@ -1187,24 +1666,28 @@ mod tests {
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
         let first = pairing(Anchor::load_from(path.clone()).unwrap());
         let racing = pairing(Anchor::load_from(path.clone()).unwrap());
-        let winner = signed_proof([7; 32], b"credential-one", TestBinding::Bootstrap);
-        let loser = signed_proof([9; 32], b"credential-two", TestBinding::Bootstrap);
+        let winner = signed_proof([7; 32], b"credential-one", TestBinding::FirstPair);
+        let loser = signed_proof([9; 32], b"credential-two", TestBinding::FirstPair);
         let digest = [0x42; 32];
         let confirmation = ConfirmedComparison::from_digest_for_test(digest);
         let challenge = [0x24; 32];
         let prf = [0x11; 32];
 
-        first
-            .verify_and_pin_after_sas(
+        let winner = first
+            .prepare_pin(
                 &winner,
-                &bootstrap_fields_for(&winner, &confirmation, &challenge, &prf),
+                &first_pair_fields_for(&winner, &confirmation, &challenge, &prf),
             )
             .unwrap();
-        assert!(matches!(
-            racing.verify_and_pin_after_sas(
+        let loser = racing
+            .prepare_pin(
                 &loser,
-                &bootstrap_fields_for(&loser, &confirmation, &challenge, &prf),
-            ),
+                &first_pair_fields_for(&loser, &confirmation, &challenge, &prf),
+            )
+            .unwrap();
+        winner.commit().unwrap();
+        assert!(matches!(
+            loser.commit(),
             Err(VerificationError::IdentityMismatch)
         ));
         assert_eq!(
@@ -1219,38 +1702,80 @@ mod tests {
         let path = temp_path("binding");
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
         let anchor = pairing(Anchor::load_from(path.clone()).unwrap());
-        let proof = signed_proof([7; 32], b"credential-one", TestBinding::Bootstrap);
+        let proof = signed_proof([7; 32], b"credential-one", TestBinding::FirstPair);
         let wrong_digest = [0x43; 32];
         let wrong_confirmation = ConfirmedComparison::from_digest_for_test(wrong_digest);
         let challenge = [0x24; 32];
         let prf = [0x11; 32];
         assert!(matches!(
-            anchor.verify_and_pin_after_sas(
+            anchor.prepare_pin(
                 &proof,
-                &bootstrap_fields_for(&proof, &wrong_confirmation, &challenge, &prf),
+                &first_pair_fields_for(&proof, &wrong_confirmation, &challenge, &prf),
             ),
             Err(VerificationError::InvalidProof)
         ));
         assert!(!path.exists(), "an invalid proof must never create a pin");
 
-        let correct_digest = [0x42; 32];
+        let anchor = pairing(Anchor::load_from(path.clone()).unwrap());
         assert!(matches!(
-            anchor.verify_and_pin_after_sas(
-                &proof,
-                &pinned_fields_for(&proof, &correct_digest, &challenge, &prf),
-            ),
+            anchor.prepare_pin(&proof, &pinned_fields_for(&proof, &challenge, &prf),),
             Err(VerificationError::InvalidProof)
         ));
     }
 
     #[test]
-    fn disposition_cannot_be_flipped_after_the_phone_signs() {
-        let proof = signed_proof([7; 32], b"credential-one", TestBinding::Bootstrap);
+    fn pinned_proofs_bind_the_mode_session_and_exact_request() {
+        let challenge = [0x24; 32];
+        let prf = [0x11; 32];
+        let proof = signed_proof([7; 32], b"credential-one", TestBinding::PinnedIdentity);
+        assert!(verify_proof(&proof, &pinned_fields_for(&proof, &challenge, &prf)).is_ok());
+
+        let other_session = [0x34; 32];
+        let wrong_session = ProofContext {
+            binding: ProofBinding::PinnedIdentity {
+                session_binding: &other_session,
+                request: TEST_REQUEST,
+            },
+            ..pinned_fields_for(&proof, &challenge, &prf)
+        };
+        assert!(matches!(
+            verify_proof(&proof, &wrong_session),
+            Err(VerificationError::InvalidProof)
+        ));
+
+        let wrong_request = ProofContext {
+            binding: ProofBinding::PinnedIdentity {
+                session_binding: &TEST_SESSION_BINDING,
+                request: br#"{"type":"request","request":{"kind":"register"}}"#,
+            },
+            ..pinned_fields_for(&proof, &challenge, &prf)
+        };
+        assert!(matches!(
+            verify_proof(&proof, &wrong_request),
+            Err(VerificationError::InvalidProof)
+        ));
+
+        let confirmation = ConfirmedComparison::from_digest_for_test([0x42; 32]);
+        let wrong_mode = ProofContext {
+            binding: ProofBinding::FirstPairSas {
+                confirmation: &confirmation,
+            },
+            ..pinned_fields_for(&proof, &challenge, &prf)
+        };
+        assert!(matches!(
+            verify_proof(&proof, &wrong_mode),
+            Err(VerificationError::InvalidProof)
+        ));
+    }
+
+    #[test]
+    fn disposition_cannot_be_flipped_after_the_approver_signs() {
+        let proof = signed_proof([7; 32], b"credential-one", TestBinding::FirstPair);
         let digest = [0x42; 32];
         let confirmation = ConfirmedComparison::from_digest_for_test(digest);
         let challenge = [0x24; 32];
         let prf = [0x11; 32];
-        let mut context = bootstrap_fields_for(&proof, &confirmation, &challenge, &prf);
+        let mut context = first_pair_fields_for(&proof, &confirmation, &challenge, &prf);
         context.disposition = AssertionDisposition::Remember;
 
         assert!(matches!(
@@ -1261,14 +1786,24 @@ mod tests {
 
     #[test]
     fn proof_bytes_are_deterministic_for_browser_interop() {
-        let proof = signed_proof([7; 32], b"credential-one", TestBinding::Bootstrap);
+        let proof = signed_proof([7; 32], b"credential-one", TestBinding::FirstPair);
         assert_eq!(
             URL_SAFE_NO_PAD.encode(proof.public_key),
             "6kpsY-KcUgq-9VB7Ey7F-ZVHdq6-vnuSQh7qaRRG0iw"
         );
         assert_eq!(
             URL_SAFE_NO_PAD.encode(proof.signature),
-            "IX4VUH_eU2LO8p6PHiv4TGTPuJeR2py11D2rz97nt7hCCQFAjALLRkIHXq9viryIPfek-zGZmgfFoG6cNcUJAg"
+            "FI5i8E_aJfYVyMSx4mLpyNlkxeShIynByHP6uw_Ynw7E6qMidgretZF9y-lDgXep-ulV4cxDeNBYTwlkdWX6BQ"
+        );
+
+        let registration = signed_registration_proof([7; 32], b"credential-one");
+        assert_eq!(
+            URL_SAFE_NO_PAD.encode(registration.public_key),
+            "6kpsY-KcUgq-9VB7Ey7F-ZVHdq6-vnuSQh7qaRRG0iw"
+        );
+        assert_eq!(
+            URL_SAFE_NO_PAD.encode(registration.signature),
+            "-SgBnVv-F9ZDxFkl6jp85kwLRc43U2z-NGVb5gVlz3b0HcNbU8LhShwmgcNAEotlCHt4IrOBJ_iQyuMpz6sYDw"
         );
     }
 }

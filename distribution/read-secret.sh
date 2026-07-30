@@ -1,8 +1,6 @@
 #!/bin/bash
 # Decrypts a secret from distribution/secrets/<NAME>.age.
 # Uses keytap locally; falls back to age + AGE_SECRET_KEY in CI.
-# On first local run, caches the age key in macOS Keychain so subsequent
-# runs don't require keytap (biometric/PIN) if the keychain is unlocked.
 #
 # Usage:
 #   ./distribution/read-secret.sh SECRET_NAME
@@ -24,39 +22,11 @@ if [ ! -f "$SECRET_PATH" ]; then
     exit 1
 fi
 
-KEYCHAIN_SERVICE="keytap"
-# Use project-specific account to avoid cross-project key collisions.
-# Different projects have different age recipients, so each needs its own cached key.
-PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-PROJECT_NAME="$(basename "$PROJECT_ROOT")"
-KEYCHAIN_ACCOUNT="AGE_SECRET_KEY_${PROJECT_NAME}"
-
-# Try to read the age key from macOS Keychain (silent fail if locked or missing)
-try_keychain() {
-    security find-generic-password -s "$KEYCHAIN_SERVICE" -a "$KEYCHAIN_ACCOUNT" -w 2>/dev/null
-}
-
-# Cache the age key into macOS Keychain for future runs
-cache_to_keychain() {
-    local age_key="$1"
-    # Update if exists, add if not
-    if ! security add-generic-password -U -s "$KEYCHAIN_SERVICE" -a "$KEYCHAIN_ACCOUNT" -w "$age_key" 2>/dev/null; then
-        echo "Warning: Failed to cache age key in keychain — keytap will be needed next run" >&2
-    fi
-}
-
 if [ -n "${AGE_SECRET_KEY:-}" ]; then
-    # CI path: use the env var directly
-    echo "$AGE_SECRET_KEY" | age -d -i - "$SECRET_PATH"
-elif AGE_KEY="$(try_keychain)"; then
-    # Keychain hit: decrypt using the cached key
-    echo "$AGE_KEY" | age -d -i - "$SECRET_PATH"
+    printf '%s\n' "$AGE_SECRET_KEY" | age -d -i - "$SECRET_PATH"
 elif command -v keytap &>/dev/null; then
-    # First run / keychain locked: get key from keytap, decrypt, and cache
-    AGE_KEY="$(keytap reveal keytap --format age)"
-    echo "$AGE_KEY" | age -d -i - "$SECRET_PATH"
-    cache_to_keychain "$AGE_KEY"
+    keytap decrypt keytap < "$SECRET_PATH"
 else
-    echo "Error: Neither AGE_SECRET_KEY, keychain, nor keytap available" >&2
+    echo "Error: Neither AGE_SECRET_KEY nor keytap is available" >&2
     exit 1
 fi

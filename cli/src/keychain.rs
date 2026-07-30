@@ -1,13 +1,12 @@
 //! Thin, uniform access to the OS keychain for remembered keys.
 //!
 //! Everything keytap stores lives under one keychain service (`keytap`) so
-//! entries stay recognizable and auditable next to the user-managed entries
-//! the README recommends. The trait exists so `remember.rs` holds all policy
-//! (naming, formats, root rotation) as plain testable logic, while this module
-//! stays a dumb byte store per platform: the macOS Keychain via the Security
-//! framework, the freedesktop Secret Service (GNOME Keyring, KWallet, …) via
-//! D-Bus on Linux, plus an opt-in plain-file store (see [`file`]) for
-//! machines with neither.
+//! entries stay recognizable and auditable. The trait exists so `remember.rs`
+//! holds all policy (naming, formats, root rotation) as plain testable logic,
+//! while this module stays a dumb byte store per platform: the macOS Keychain
+//! via the Security framework, the freedesktop Secret Service (GNOME Keyring,
+//! KWallet, …) via D-Bus on Linux, plus an opt-in plain-file store (see
+//! [`file`]) for machines with neither.
 
 use zeroize::Zeroizing;
 
@@ -29,7 +28,10 @@ impl std::fmt::Display for KeychainError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             KeychainError::Unsupported => {
-                write!(f, "remembered keys are not supported on this platform (no OS keychain backend)")
+                write!(
+                    f,
+                    "remembered keys are not supported on this platform (no OS keychain backend)"
+                )
             }
             KeychainError::Backend(msg) => write!(f, "keychain error: {msg}"),
         }
@@ -196,7 +198,9 @@ mod platform {
                     // exist: the dialog a locked keyring pops here is for a
                     // key that is about to be used.
                     item.ensure_unlocked().map_err(backend_err)?;
-                    Ok(Some(Zeroizing::new(item.get_secret().map_err(backend_err)?)))
+                    Ok(Some(Zeroizing::new(
+                        item.get_secret().map_err(backend_err)?,
+                    )))
                 }
                 None => Ok(None),
             }
@@ -232,8 +236,8 @@ mod platform {
         }
 
         fn accounts(&self) -> Result<Vec<String>, KeychainError> {
-            // User-managed entries under the same service (e.g. the README's
-            // secret-tool recipe) may lack an `account` attribute; skip them.
+            // Service-matching items without an `account` attribute are not
+            // keytap-managed remembered keys.
             let collection = self.collection()?;
             Ok(find(&collection, None)?
                 .iter()
@@ -288,7 +292,7 @@ pub mod file {
     use super::{Keychain, KeychainError};
     use base64::engine::general_purpose::STANDARD as BASE64;
     use base64::Engine;
-    use serde_json::{Map, Value};
+    use serde::{Deserialize, Serialize};
     use std::collections::BTreeMap;
     use std::fs::File;
     use std::path::{Path, PathBuf};
@@ -297,6 +301,14 @@ pub mod file {
     const FORMAT: &str = "keytap-file-store-v1";
     const WARNING: &str =
         "Raw keytap keys, NOT encrypted at rest. Remove entries with `keytap forget` or delete this file.";
+
+    #[derive(Deserialize, Serialize)]
+    #[serde(deny_unknown_fields)]
+    struct StoredFile {
+        format: String,
+        warning: String,
+        entries: BTreeMap<String, String>,
+    }
 
     /// `$XDG_STATE_HOME/keytap/remembered.json`, defaulting to
     /// `~/.local/state/keytap/remembered.json`. `None` when neither variable
@@ -322,7 +334,7 @@ pub mod file {
     }
 
     fn existing_at(path: PathBuf) -> Option<FileStore> {
-        (path.is_file() || path.with_extension("json.tmp").is_file()).then(|| FileStore { path })
+        (path.is_file() || path.with_extension("json.tmp").is_file()).then_some(FileStore { path })
     }
 
     /// The store at the default path for writing; the parent directory is
@@ -417,21 +429,23 @@ pub mod file {
                     )))
                 }
             };
-            let root: Value =
+            let stored: StoredFile =
                 serde_json::from_str(&text).map_err(|_| self.corrupt("invalid JSON"))?;
-            if root.get("format").and_then(Value::as_str) != Some(FORMAT) {
+            if stored.format != FORMAT {
                 return Err(self.corrupt("unknown format"));
             }
-            let Some(raw_entries) = root.get("entries").and_then(Value::as_object) else {
-                return Err(self.corrupt("no entries object"));
-            };
+            if stored.warning != WARNING {
+                return Err(self.corrupt("invalid warning"));
+            }
             let mut entries = BTreeMap::new();
-            for (account, value) in raw_entries {
-                let encoded = value.as_str().ok_or_else(|| self.corrupt("non-string entry"))?;
+            for (account, encoded) in stored.entries {
                 let bytes = BASE64
-                    .decode(encoded)
+                    .decode(&encoded)
                     .map_err(|_| self.corrupt("entry is not valid base64"))?;
-                entries.insert(account.clone(), bytes);
+                if BASE64.encode(&bytes) != encoded {
+                    return Err(self.corrupt("entry is not canonical base64"));
+                }
+                entries.insert(account, bytes);
             }
             Ok(entries)
         }
@@ -447,17 +461,15 @@ pub mod file {
                 make_private_dir(dir).map_err(|e| io_err("creating the directory for", e))?;
             }
 
-            let mut raw_entries = Map::new();
-            for (account, value) in entries {
-                raw_entries.insert(account.clone(), Value::String(BASE64.encode(value)));
-            }
-            let root = Value::Object(Map::from_iter([
-                ("format".to_string(), Value::String(FORMAT.to_string())),
-                ("warning".to_string(), Value::String(WARNING.to_string())),
-                ("entries".to_string(), Value::Object(raw_entries)),
-            ]));
-            let json =
-                serde_json::to_string_pretty(&root).expect("a map of strings serializes");
+            let stored = StoredFile {
+                format: FORMAT.to_string(),
+                warning: WARNING.to_string(),
+                entries: entries
+                    .iter()
+                    .map(|(account, value)| (account.clone(), BASE64.encode(value)))
+                    .collect(),
+            };
+            let json = serde_json::to_string_pretty(&stored).expect("a map of strings serializes");
 
             // The transaction lock makes this fixed name unique among
             // writers, and acquiring that lock removes a crash remnant before
@@ -484,7 +496,10 @@ pub mod file {
     #[cfg(unix)]
     fn make_private_dir(dir: &Path) -> std::io::Result<()> {
         use std::os::unix::fs::DirBuilderExt;
-        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir)
     }
 
     #[cfg(not(unix))]
@@ -576,8 +591,10 @@ pub mod file {
 
         /// A store under a fresh temp directory; the caller cleans up.
         fn temp_store(tag: &str) -> (PathBuf, FileStore) {
-            let dir = std::env::temp_dir()
-                .join(format!("keytap-file-store-test-{}-{tag}", std::process::id()));
+            let dir = std::env::temp_dir().join(format!(
+                "keytap-file-store-test-{}-{tag}",
+                std::process::id()
+            ));
             let _ = std::fs::remove_dir_all(&dir);
             (dir.clone(), FileStore::at(dir.join("remembered.json")))
         }
@@ -614,11 +631,11 @@ pub mod file {
             let (dir, mut store) = temp_store("round-trip");
             let account = "remember:test-root:round-trip";
 
-            store.set(account, b"keytap-remember-v1:aa").unwrap();
-            assert_eq!(&store.get(account).unwrap().unwrap()[..], b"keytap-remember-v1:aa");
+            store.set(account, b"first secret").unwrap();
+            assert_eq!(&store.get(account).unwrap().unwrap()[..], b"first secret");
 
-            store.set(account, b"keytap-remember-v1:bb").unwrap();
-            assert_eq!(&store.get(account).unwrap().unwrap()[..], b"keytap-remember-v1:bb");
+            store.set(account, b"second secret").unwrap();
+            assert_eq!(&store.get(account).unwrap().unwrap()[..], b"second secret");
 
             assert!(store.accounts().unwrap().contains(&account.to_string()));
 
@@ -654,6 +671,52 @@ pub mod file {
             );
 
             let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn file_store_accepts_only_its_exact_current_schema() {
+            let cases = [
+                (
+                    "missing-warning",
+                    serde_json::json!({
+                        "format": FORMAT,
+                        "entries": {"remember:root:name": "eA=="}
+                    }),
+                ),
+                (
+                    "changed-warning",
+                    serde_json::json!({
+                        "format": FORMAT,
+                        "warning": "keys",
+                        "entries": {"remember:root:name": "eA=="}
+                    }),
+                ),
+                (
+                    "extra-field",
+                    serde_json::json!({
+                        "format": FORMAT,
+                        "warning": WARNING,
+                        "entries": {"remember:root:name": "eA=="},
+                        "extra": true
+                    }),
+                ),
+                (
+                    "non-string-entry",
+                    serde_json::json!({
+                        "format": FORMAT,
+                        "warning": WARNING,
+                        "entries": {"remember:root:name": 7}
+                    }),
+                ),
+            ];
+
+            for (tag, value) in cases {
+                let (dir, store) = temp_store(tag);
+                std::fs::create_dir_all(&dir).unwrap();
+                std::fs::write(store.path(), serde_json::to_vec(&value).unwrap()).unwrap();
+                assert!(store.get("remember:root:name").is_err(), "case {tag}");
+                let _ = std::fs::remove_dir_all(&dir);
+            }
         }
 
         #[test]
@@ -728,9 +791,7 @@ pub mod file {
             // Exercise the other public mutation too: a waiting delete must
             // base its rewrite on a competing update committed under the
             // same lock, rather than erase that update with an old snapshot.
-            store
-                .set("remember:old-root:delete-me", b"old")
-                .unwrap();
+            store.set("remember:old-root:delete-me", b"old").unwrap();
             let lock = StoreLock::acquire(store.path()).unwrap();
             let mut entries = store.read().unwrap();
             entries.insert("remember:new-root:preserved".to_string(), b"new".to_vec());
@@ -756,9 +817,12 @@ pub mod file {
         fn store_is_owner_only() {
             use std::os::unix::fs::PermissionsExt;
             let (dir, mut store) = temp_store("perms");
-            store.set("remember:test-root:perms", b"keytap-remember-v1:aa").unwrap();
+            store.set("remember:test-root:perms", b"secret").unwrap();
 
-            let file_mode = std::fs::metadata(store.path()).unwrap().permissions().mode();
+            let file_mode = std::fs::metadata(store.path())
+                .unwrap()
+                .permissions()
+                .mode();
             let dir_mode = std::fs::metadata(&dir).unwrap().permissions().mode();
             assert_eq!(file_mode & 0o777, 0o600);
             assert_eq!(dir_mode & 0o777, 0o700);
@@ -784,12 +848,12 @@ mod live_tests {
         let mut kc = open().expect("open platform keychain");
         let account = "remember:live-test-root:round-trip";
 
-        kc.set(account, b"keytap-remember-v1:aa").unwrap();
-        assert_eq!(&kc.get(account).unwrap().unwrap()[..], b"keytap-remember-v1:aa");
+        kc.set(account, b"first secret").unwrap();
+        assert_eq!(&kc.get(account).unwrap().unwrap()[..], b"first secret");
 
         // Setting again overwrites in place.
-        kc.set(account, b"keytap-remember-v1:bb").unwrap();
-        assert_eq!(&kc.get(account).unwrap().unwrap()[..], b"keytap-remember-v1:bb");
+        kc.set(account, b"second secret").unwrap();
+        assert_eq!(&kc.get(account).unwrap().unwrap()[..], b"second secret");
 
         // Enumeration sees the entry.
         assert!(kc.accounts().unwrap().contains(&account.to_string()));

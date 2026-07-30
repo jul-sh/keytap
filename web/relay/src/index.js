@@ -1,723 +1,316 @@
-const CORS_ORIGINS = new Set([
-  "https://keytap.jul.sh",
-]);
+const ROOM_PATH = /^\/room\/([A-Za-z0-9_-]{43})$/;
+const LIFECYCLE_KEY = "room:lifecycle";
+const WAITING_MS = 5 * 60 * 1000;
+const PAIRED_MS = 8 * 60 * 1000;
+const TOMBSTONE_MS = 60 * 60 * 1000;
+const MAX_FRAME_BYTES = 16 * 1024;
+const MAX_FRAMES_PER_ROLE = 8;
 
-const RENDEZVOUS_ID_PATTERN = "[a-zA-Z0-9_-]{43}";
-// Covers the CLI's five-minute scan wait plus its optional ten-minute
-// remember window. The room deadline is independent of credential expiry.
-const SIGNAL_SESSION_TTL_MS = 20 * 60 * 1000;
-const TURN_CREDENTIAL_TTL_SECONDS = 1200;
-const MAX_SIGNAL_BYTES = 128 * 1024;
-const MAX_SIGNAL_MESSAGES_PER_SOCKET = 8;
-const TURN_PROVIDER_RESPONSE_MAX_BYTES = 64 * 1024;
-const SIGNAL_LIFECYCLE_KEY = "signal:lifecycle";
-
-/** @typedef {"cli" | "phone"} SignalRole */
-
-/**
- * @typedef {
- *   | { kind: "missing" }
- *   | { kind: "configured", keyId: string, apiToken: string }
- * } TurnConfiguration
- */
+/** @typedef {"cli" | "approver"} Role */
 
 /**
  * @typedef {
  *   | { kind: "missing" }
  *   | { kind: "invalid" }
- *   | { kind: "active", generation: string, expiresAt: number }
- * } SignalLifecycle
+ *   | { kind: "waiting", expiresAt: number }
+ *   | { kind: "paired", expiresAt: number }
+ *   | { kind: "closed", expiresAt: number }
+ * } Lifecycle
  */
 
 /**
- * @param {Request} request
- * @returns {HeadersInit}
+ * @typedef {{ kind: "peer", role: Role, sent: number }} Peer
  */
-function corsHeaders(request) {
-  const origin = request.headers.get("Origin") || "";
-  const allowed = CORS_ORIGINS.has(origin) ? origin : "";
-  return {
-    "Access-Control-Allow-Origin": allowed,
-    "Access-Control-Allow-Methods": "GET, PUT, POST, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type",
-  };
-}
 
-/**
- * Parse an untrusted role at the HTTP boundary.
- * @param {string | null} value
- * @returns {SignalRole | null}
- */
-function parseSignalRole(value) {
-  switch (value) {
-    case "cli":
-    case "phone":
-      return value;
-    default:
-      return null;
+function canonicalRoomId(value) {
+  try {
+    const padded = value.replace(/-/g, "+").replace(/_/g, "/") + "=";
+    const binary = atob(padded);
+    const canonical = btoa(binary)
+      .replace(/\+/g, "-")
+      .replace(/\//g, "_")
+      .replace(/=+$/g, "");
+    return binary.length === 32 && canonical === value;
+  } catch {
+    return false;
   }
 }
 
-/**
- * Parse lifecycle data read from Durable Object storage. Missing and corrupt
- * state are distinct so callers can create only at WebSocket admission while
- * all credential paths fail closed.
- * @param {unknown} value
- * @returns {SignalLifecycle}
- */
-function parseSignalLifecycle(value) {
-  if (value === undefined) {
-    return { kind: "missing" };
-  }
+function parseRoom(request) {
+  const url = new URL(request.url);
+  const match = ROOM_PATH.exec(url.pathname);
+  const role = url.search === "?role=cli"
+    ? "cli"
+    : url.search === "?role=approver" ? "approver" : null;
   if (
-    value &&
-    typeof value === "object" &&
-    "kind" in value &&
-    value.kind === "active" &&
-    "generation" in value &&
-    typeof value.generation === "string" &&
-    value.generation.length > 0 &&
-    "expiresAt" in value &&
-    Number.isSafeInteger(value.expiresAt) &&
-    value.expiresAt > 0
+    url.protocol !== "https:" ||
+    !match ||
+    !canonicalRoomId(match[1]) ||
+    !role
   ) {
-    return {
-      kind: "active",
-      generation: value.generation,
-      expiresAt: value.expiresAt,
-    };
+    return null;
   }
-  return { kind: "invalid" };
+  return { id: match[1], role };
 }
 
-/**
- * @param {unknown} env
- * @returns {TurnConfiguration}
- */
-function turnConfiguration(env) {
+/** @returns {Lifecycle} */
+function parseLifecycle(value) {
+  if (value === undefined) return { kind: "missing" };
   if (
-    env &&
-    typeof env === "object" &&
-    "TURN_KEY_ID" in env &&
-    "TURN_KEY_API_TOKEN" in env &&
-    typeof env.TURN_KEY_ID === "string" &&
-    env.TURN_KEY_ID.length > 0 &&
-    typeof env.TURN_KEY_API_TOKEN === "string" &&
-    env.TURN_KEY_API_TOKEN.length > 0
+    !value ||
+    typeof value !== "object" ||
+    Array.isArray(value) ||
+    Object.keys(value).sort().join(",") !== "expiresAt,kind" ||
+    !["waiting", "paired", "closed"].includes(value.kind) ||
+    !Number.isSafeInteger(value.expiresAt) ||
+    value.expiresAt <= 0
   ) {
-    return {
-      kind: "configured",
-      keyId: env.TURN_KEY_ID,
-      apiToken: env.TURN_KEY_API_TOKEN,
-    };
+    return { kind: "invalid" };
   }
-  return { kind: "missing" };
+  return { kind: value.kind, expiresAt: value.expiresAt };
 }
 
-/**
- * @param {Request} request
- * @param {number} status
- * @param {string} message
- * @param {HeadersInit} [extraHeaders]
- * @returns {Response}
- */
-function v2Error(request, status, message, extraHeaders = {}) {
-  return new Response(message, {
-    status,
-    headers: {
-      ...corsHeaders(request),
-      ...extraHeaders,
-      "Cache-Control": "no-store",
-    },
-  });
+/** @returns {Peer | null} */
+function parsePeer(value) {
+  if (
+    !value ||
+    typeof value !== "object" ||
+    Array.isArray(value) ||
+    Object.keys(value).sort().join(",") !== "kind,role,sent" ||
+    value.kind !== "peer" ||
+    (value.role !== "cli" && value.role !== "approver") ||
+    !Number.isSafeInteger(value.sent) ||
+    value.sent < 0 ||
+    value.sent > MAX_FRAMES_PER_ROLE
+  ) {
+    return null;
+  }
+  return value;
+}
+
+function error(status, message) {
+  return new Response(message, { status });
 }
 
 export default {
-  /**
-   * @param {Request} request
-   * @param {{ RELAY_SESSION: DurableObjectNamespace, SIGNAL_SESSION: DurableObjectNamespace }} env
-   * @returns {Promise<Response>}
-   */
   async fetch(request, env) {
-    const url = new URL(request.url);
-    const legacyMatch = url.pathname.match(/^\/relay\/([a-zA-Z0-9_-]{8,44})$/);
-
-    if (legacyMatch) {
-      if (request.method === "OPTIONS") {
-        return new Response(null, { status: 204, headers: corsHeaders(request) });
-      }
-
-      const sessionId = legacyMatch[1];
-      const id = env.RELAY_SESSION.idFromName(sessionId);
-      const stub = env.RELAY_SESSION.get(id);
-      return stub.fetch(request);
+    const room = parseRoom(request);
+    if (!room) return error(404, "Not found");
+    if (
+      request.method !== "GET" ||
+      request.headers.get("Upgrade")?.toLowerCase() !== "websocket"
+    ) {
+      return error(426, "WebSocket upgrade required");
     }
-
-    const turnMatch = url.pathname.match(
-      new RegExp(`^/v2/signal/(${RENDEZVOUS_ID_PATTERN})/turn$`),
-    );
-    const signalMatch = url.pathname.match(
-      new RegExp(`^/v2/signal/(${RENDEZVOUS_ID_PATTERN})$`),
-    );
-
-    if (!turnMatch && !signalMatch) {
-      return new Response("Not found", { status: 404 });
-    }
-
-    if (request.method === "OPTIONS") {
-      return new Response(null, { status: 204, headers: corsHeaders(request) });
-    }
-
-    const rendezvousId = (turnMatch || signalMatch)[1];
-    const id = env.SIGNAL_SESSION.idFromName(rendezvousId);
-    const stub = env.SIGNAL_SESSION.get(id);
-    return stub.fetch(request);
+    const { success } = await env.ROOM_UPGRADE_RATE_LIMITER.limit({
+      key: request.headers.get("CF-Connecting-IP") || "unattributed",
+    });
+    if (!success) return error(429, "Too many room attempts");
+    return env.RELAY_ROOM.getByName(room.id).fetch(request);
   },
 };
 
-// Sessions are one-time and short-lived: the CLI gives up after 5 minutes,
-// so anything older is garbage. The alarm wipes storage after this window.
-const SESSION_TTL_MS = 10 * 60 * 1000;
-
-export class RelaySession {
-  /**
-   * @param {DurableObjectState} state
-   * @param {unknown} _env
-   */
-  constructor(state, _env) {
+export class RelayRoom {
+  constructor(state) {
     this.state = state;
+    this.admissions = Promise.resolve();
   }
 
-  /**
-   * @param {Request} request
-   * @returns {Promise<Response>}
-   */
   async fetch(request) {
-    // WebSocket upgrade (CLI connects here)
-    if (request.headers.get("Upgrade") === "websocket") {
+    const room = parseRoom(request);
+    if (!room) return error(404, "Not found");
+    if (
+      request.method !== "GET" ||
+      request.headers.get("Upgrade")?.toLowerCase() !== "websocket"
+    ) {
+      return error(426, "WebSocket upgrade required");
+    }
+
+    return this.serializeAdmission(async () => {
+      const admission = await this.admit(room.role);
+      if (admission === "closed") return error(410, "Room closed");
+      if (admission === "duplicate") {
+        return error(409, `${room.role} already connected`);
+      }
+
       const pair = new WebSocketPair();
       const [client, server] = Object.values(pair);
-      this.state.acceptWebSocket(server);
+      this.state.acceptWebSocket(server, [room.role]);
+      server.serializeAttachment({ kind: "peer", role: room.role, sent: 0 });
       return new Response(null, { status: 101, webSocket: client });
-    }
-
-    // PUT config from CLI
-    if (request.method === "PUT") {
-      const cors = corsHeaders(request);
-      const body = await request.text();
-
-      try {
-        JSON.parse(body);
-      } catch {
-        return new Response("Invalid JSON", { status: 400, headers: cors });
-      }
-
-      // Durable storage, not an instance field: with hibernatable WebSockets
-      // the runtime evicts this object from memory between events, so
-      // in-memory state does not survive until the phone's GET.
-      await this.state.storage.put("config", body);
-      await this.state.storage.setAlarm(Date.now() + SESSION_TTL_MS);
-      return new Response(JSON.stringify({ ok: true }), {
-        status: 200,
-        headers: { ...cors, "Content-Type": "application/json" },
-      });
-    }
-
-    // GET config (phone fetches it)
-    if (request.method === "GET") {
-      const cors = corsHeaders(request);
-      const config = await this.state.storage.get("config");
-      if (!config) {
-        return new Response("No config", { status: 404, headers: cors });
-      }
-      return new Response(config, {
-        status: 200,
-        headers: { ...cors, "Content-Type": "application/json" },
-      });
-    }
-
-    // POST from phone with encrypted blob
-    if (request.method === "POST") {
-      const cors = corsHeaders(request);
-      const body = await request.text();
-
-      try {
-        JSON.parse(body);
-      } catch {
-        return new Response("Invalid JSON", { status: 400, headers: cors });
-      }
-
-      // Push to all connected WebSockets (should be exactly one: the CLI).
-      // The socket stays open afterwards: the page may follow up (a
-      // remember opt-in, or a "done" that releases the CLI early), and the
-      // CLI closes from its side when it exits.
-      let delivered = false;
-      for (const ws of this.state.getWebSockets()) {
-        try {
-          ws.send(body);
-          delivered = true;
-        } catch {
-          // WebSocket already closed
-        }
-      }
-
-      if (!delivered) {
-        return new Response("No CLI connected", { status: 410, headers: cors });
-      }
-
-      // The config is one-time; after first delivery nobody refetches it.
-      await this.state.storage.deleteAll();
-      await this.state.storage.deleteAlarm();
-
-      return new Response(JSON.stringify({ ok: true }), {
-        status: 200,
-        headers: { ...cors, "Content-Type": "application/json" },
-      });
-    }
-
-    return new Response("Method not allowed", {
-      status: 405,
-      headers: corsHeaders(request),
     });
   }
 
-  async alarm() {
-    await this.state.storage.deleteAll();
+  serializeAdmission(operation) {
+    const result = this.admissions.then(operation);
+    this.admissions = result.catch(() => {});
+    return result;
   }
 
-  async webSocketMessage() {}
-
-  /** @param {WebSocket} ws */
-  async webSocketClose(ws) {
-    try { ws.close(); } catch {}
-  }
-
-  /** @param {WebSocket} ws */
-  async webSocketError(ws) {
-    try { ws.close(1011, "error"); } catch {}
-  }
-}
-
-/**
- * A short-lived, single-use WebRTC signaling room. SDP is forwarded as an
- * opaque, bounded string: authentication belongs to the Q-derived protocol at
- * the endpoints, not to this relay.
- */
-export class SignalSession {
-  /**
-   * @param {DurableObjectState} state
-   * @param {unknown} env
-   */
-  constructor(state, env) {
-    this.state = state;
-    this.env = env;
-  }
-
-  /**
-   * @param {Request} request
-   * @returns {Promise<Response>}
-   */
-  async fetch(request) {
-    const url = new URL(request.url);
-    const turnMatch = url.pathname.match(
-      new RegExp(`^/v2/signal/${RENDEZVOUS_ID_PATTERN}/turn$`),
-    );
-
-    if (turnMatch) {
-      if (request.method !== "GET") {
-        return v2Error(request, 405, "Method not allowed", { Allow: "GET" });
-      }
-      return this.fetchTurnCredential(request);
-    }
-
-    if (!url.pathname.match(new RegExp(`^/v2/signal/${RENDEZVOUS_ID_PATTERN}$`))) {
-      return v2Error(request, 404, "Not found");
-    }
-
-    if (request.method !== "GET" || request.headers.get("Upgrade") !== "websocket") {
-      return v2Error(request, 426, "WebSocket upgrade required", {
-        Upgrade: "websocket",
-      });
-    }
-
-    const role = parseSignalRole(url.searchParams.get("role"));
-    if (role === null) {
-      return v2Error(request, 400, "role must be cli or phone");
-    }
-
-    const lifecycle = await this.beginOrJoinSignalSession(role);
+  /** @param {Role} role */
+  async admit(role) {
+    const lifecycle = parseLifecycle(await this.state.storage.get(LIFECYCLE_KEY));
     switch (lifecycle.kind) {
-      case "expired":
-        return v2Error(request, 410, "Signal session expired");
-      case "active":
-        break;
-    }
-
-    if (
-      role === "phone" &&
-      this.socketsForRole("cli", lifecycle.generation).length !== 1
-    ) {
-      return v2Error(request, 410, "CLI is no longer waiting");
-    }
-
-    if (this.socketsForRole(role, lifecycle.generation).length !== 0) {
-      return v2Error(request, 409, `${role} is already connected`);
-    }
-
-    const pair = new WebSocketPair();
-    const [client, server] = Object.values(pair);
-    server.serializeAttachment({
-      kind: "peer",
-      role,
-      generation: lifecycle.generation,
-      forwardedMessages: 0,
-    });
-    this.state.acceptWebSocket(server, [role]);
-    this.notifyPeerReady(lifecycle.generation);
-
-    return new Response(null, { status: 101, webSocket: client });
-  }
-
-  /**
-   * @param {SignalRole} role
-   * @param {string} generation
-   * @returns {WebSocket[]}
-   */
-  socketsForRole(role, generation) {
-    return this.state.getWebSockets(role).filter((socket) => {
-      const attachment = socket.deserializeAttachment();
-      return (
-        attachment &&
-        attachment.kind === "peer" &&
-        attachment.role === role &&
-        attachment.generation === generation &&
-        socket.readyState === WebSocket.OPEN
-      );
-    });
-  }
-
-  /** @param {string} generation */
-  notifyPeerReady(generation) {
-    const cli = this.socketsForRole("cli", generation);
-    const phone = this.socketsForRole("phone", generation);
-    if (cli.length === 1 && phone.length === 1) {
-      const message = JSON.stringify({ type: "peer-ready" });
-      try { cli[0].send(message); } catch {}
-      try { phone[0].send(message); } catch {}
-    }
-  }
-
-  /**
-   * Only the CLI creates a generation, before it prints the QR. A phone can
-   * join that live generation but cannot revive an old link after the CLI has
-   * left. TURN requests never create sessions either.
-   * @param {SignalRole} role
-   * @returns {Promise<
-   *   | { kind: "active", generation: string, expiresAt: number }
-   *   | { kind: "expired" }
-   * >}
-   */
-  async beginOrJoinSignalSession(role) {
-    const lifecycle = parseSignalLifecycle(
-      await this.state.storage.get(SIGNAL_LIFECYCLE_KEY),
-    );
-    switch (lifecycle.kind) {
-      case "active":
+      case "missing":
+        if (role === "approver") return "closed";
+        await this.persist({ kind: "waiting", expiresAt: Date.now() + WAITING_MS });
+        return "accepted";
+      case "invalid":
+        await this.closeRoom(1011, "invalid room state");
+        return "closed";
+      case "closed":
+        if (lifecycle.expiresAt <= Date.now()) await this.cleanup();
+        return "closed";
+      case "waiting":
         if (lifecycle.expiresAt <= Date.now()) {
-          await this.expireSignalSession();
-          return { kind: "expired" };
+          await this.closeRoom(1001, "room expired");
+          return "closed";
         }
+        if (role === "cli") return "duplicate";
         if (
-          role === "cli" &&
-          this.socketsForRole("cli", lifecycle.generation).length === 0
+          this.sockets("cli").length !== 1 ||
+          this.sockets("approver").length !== 0
         ) {
-          // A closing CLI's delayed callback must not erase its replacement.
-          await this.expireSignalSession();
-          return this.createSignalSession();
+          await this.closeRoom(1001, "CLI left");
+          return "closed";
         }
-        await this.ensureLifecycleAlarm(lifecycle.expiresAt);
-        return lifecycle;
-      case "invalid":
-        await this.expireSignalSession();
-        return { kind: "expired" };
-      case "missing": {
-        if (role === "phone") {
-          return { kind: "expired" };
-        }
-        return this.createSignalSession();
-      }
-    }
-  }
-
-  async createSignalSession() {
-    const active = {
-      kind: "active",
-      generation: crypto.randomUUID(),
-      expiresAt: Date.now() + SIGNAL_SESSION_TTL_MS,
-    };
-    await this.state.storage.put(SIGNAL_LIFECYCLE_KEY, active);
-    await this.ensureLifecycleAlarm(active.expiresAt);
-    return active;
-  }
-
-  /**
-   * @returns {Promise<
-   *   | { kind: "active", generation: string, expiresAt: number }
-   *   | { kind: "expired" }
-   * >}
-   */
-  async requireActiveSignalSession() {
-    const lifecycle = parseSignalLifecycle(
-      await this.state.storage.get(SIGNAL_LIFECYCLE_KEY),
-    );
-    switch (lifecycle.kind) {
-      case "active":
+        await this.persist({ kind: "paired", expiresAt: Date.now() + PAIRED_MS });
+        return "accepted";
+      case "paired":
         if (lifecycle.expiresAt <= Date.now()) {
-          await this.expireSignalSession();
-          return { kind: "expired" };
+          await this.closeRoom(1001, "room expired");
+          return "closed";
         }
-        return lifecycle;
-      case "missing":
-        return { kind: "expired" };
-      case "invalid":
-        await this.expireSignalSession();
-        return { kind: "expired" };
+        return "duplicate";
     }
   }
 
-  /** @param {number} expiresAt */
-  async ensureLifecycleAlarm(expiresAt) {
-    const alarm = await this.state.storage.getAlarm();
-    if (alarm !== expiresAt) {
-      await this.state.storage.setAlarm(expiresAt);
-    }
+  async persist(lifecycle) {
+    await Promise.all([
+      this.state.storage.put(LIFECYCLE_KEY, lifecycle),
+      this.state.storage.setAlarm(lifecycle.expiresAt),
+    ]);
   }
 
-  /**
-   * @param {Request} request
-   * @returns {Promise<Response>}
-   */
-  async fetchTurnCredential(request) {
-    const lifecycle = await this.requireActiveSignalSession();
-    switch (lifecycle.kind) {
-      case "expired":
-        return v2Error(request, 410, "Signal session expired");
-      case "active":
-        break;
+  /** @param {Role} role */
+  sockets(role) {
+    return this.state.getWebSockets(role).filter((socket) =>
+      socket.readyState === WebSocket.OPEN && parsePeer(socket.deserializeAttachment())?.role === role
+    );
+  }
+
+  async requireOpen() {
+    const lifecycle = parseLifecycle(await this.state.storage.get(LIFECYCLE_KEY));
+    if (
+      (lifecycle.kind === "waiting" || lifecycle.kind === "paired") &&
+      lifecycle.expiresAt > Date.now()
+    ) return true;
+    if (lifecycle.kind === "waiting" || lifecycle.kind === "paired") {
+      await this.closeRoom(1001, "room expired");
+    }
+    else if (lifecycle.kind === "invalid") await this.closeRoom(1011, "invalid room state");
+    return false;
+  }
+
+  async webSocketMessage(socket, message) {
+    if (!(message instanceof ArrayBuffer)) {
+      await this.closeRoom(1008, "binary frames required");
+      return;
+    }
+    if (message.byteLength > MAX_FRAME_BYTES) {
+      await this.closeRoom(1009, "frame too large");
+      return;
     }
 
-    const config = turnConfiguration(this.env);
-    switch (config.kind) {
-      case "missing":
-        return v2Error(request, 503, "TURN is not configured");
-      case "configured":
-        break;
+    const peer = parsePeer(socket.deserializeAttachment());
+    if (!peer || !(await this.requireOpen())) {
+      if (!peer) await this.closeRoom(1008, "invalid peer state");
+      return;
+    }
+    if (peer.sent >= MAX_FRAMES_PER_ROLE) {
+      await this.closeRoom(1008, "frame limit reached");
+      return;
+    }
+
+    const destination = peer.role === "cli" ? "approver" : "cli";
+    const sockets = this.sockets(destination);
+    if (sockets.length !== 1) {
+      await this.closeRoom(1001, "peer left");
+      return;
     }
 
     try {
-      const serialized = await this.mintTurnCredential(config);
-      const current = await this.requireActiveSignalSession();
-      if (
-        current.kind === "expired" ||
-        current.generation !== lifecycle.generation
-      ) {
-        return v2Error(request, 410, "Signal session expired");
-      }
-      return this.turnCredentialResponse(request, serialized);
+      sockets[0].send(message);
+      socket.serializeAttachment({ ...peer, sent: peer.sent + 1 });
     } catch {
-      return v2Error(request, 502, "TURN credential provider failed");
+      await this.closeRoom(1011, "relay failed");
     }
   }
 
-  /**
-   * @param {{ kind: "configured", keyId: string, apiToken: string }} config
-   * @returns {Promise<string>}
-   */
-  async mintTurnCredential(config) {
-    const endpoint =
-      `https://rtc.live.cloudflare.com/v1/turn/keys/${encodeURIComponent(config.keyId)}` +
-      "/credentials/generate-ice-servers";
-    const response = await fetch(endpoint, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${config.apiToken}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ ttl: TURN_CREDENTIAL_TTL_SECONDS }),
-    });
-
-    if (!response.ok) {
-      throw new Error(`TURN provider returned ${response.status}`);
-    }
-
-    const body = await response.text();
-    if (new TextEncoder().encode(body).byteLength > TURN_PROVIDER_RESPONSE_MAX_BYTES) {
-      throw new Error("TURN provider response is too large");
-    }
-
-    return body;
-  }
-
-  /**
-   * @param {Request} request
-   * @param {string} serialized
-   * @returns {Response}
-   */
-  turnCredentialResponse(request, serialized) {
-    return new Response(serialized, {
-      status: 200,
-      headers: {
-        ...corsHeaders(request),
-        "Content-Type": "application/json",
-        "Cache-Control": "no-store, private",
-      },
-    });
-  }
-
-  /**
-   * @param {WebSocket} ws
-   * @param {string | ArrayBuffer} message
-   */
-  async webSocketMessage(ws, message) {
-    if (typeof message !== "string") {
-      try { ws.close(1003, "text messages only"); } catch {}
-      return;
-    }
-    if (new TextEncoder().encode(message).byteLength > MAX_SIGNAL_BYTES) {
-      try { ws.close(1009, "signal too large"); } catch {}
-      return;
-    }
-
-    const attachment = ws.deserializeAttachment();
-    if (
-      !attachment ||
-      attachment.kind !== "peer" ||
-      parseSignalRole(attachment.role) === null ||
-      typeof attachment.generation !== "string" ||
-      attachment.generation.length === 0 ||
-      !Number.isSafeInteger(attachment.forwardedMessages) ||
-      attachment.forwardedMessages < 0
-    ) {
-      try { ws.close(1008, "invalid peer state"); } catch {}
-      return;
-    }
-    if (attachment.forwardedMessages >= MAX_SIGNAL_MESSAGES_PER_SOCKET) {
-      try { ws.close(1008, "too many signals"); } catch {}
-      return;
-    }
-
-    const lifecycle = await this.requireActiveSignalSession();
+  async closeRoom(code, reason) {
+    const lifecycle = parseLifecycle(await this.state.storage.get(LIFECYCLE_KEY));
     switch (lifecycle.kind) {
-      case "expired":
-        try { ws.close(1008, "signal session expired"); } catch {}
-        return;
-      case "active":
-        if (lifecycle.generation !== attachment.generation) {
-          try { ws.close(1008, "stale signal session"); } catch {}
+      case "missing":
+        break;
+      case "waiting":
+      case "paired":
+      case "invalid":
+        await this.persist({ kind: "closed", expiresAt: Date.now() + TOMBSTONE_MS });
+        break;
+      case "closed":
+        if (lifecycle.expiresAt <= Date.now()) {
+          await this.cleanup();
           return;
         }
+        await this.state.storage.setAlarm(lifecycle.expiresAt);
         break;
     }
-
-    /** @type {SignalRole} */
-    const role = attachment.role;
-    /** @type {SignalRole} */
-    const destinationRole = role === "cli" ? "phone" : "cli";
-    const destinations = this.socketsForRole(destinationRole, lifecycle.generation);
-    if (destinations.length !== 1) {
-      try { ws.send(JSON.stringify({ type: "peer-not-ready" })); } catch {}
-      return;
+    for (const socket of this.state.getWebSockets()) {
+      try { socket.close(code, reason); } catch {}
     }
+  }
 
-    ws.serializeAttachment({
-      kind: "peer",
-      role,
-      generation: lifecycle.generation,
-      forwardedMessages: attachment.forwardedMessages + 1,
-    });
-    try {
-      destinations[0].send(message);
-    } catch {
-      try { ws.send(JSON.stringify({ type: "peer-not-ready" })); } catch {}
-    }
+  async webSocketClose() {
+    await this.closeRoom(1000, "peer left");
+  }
+
+  async webSocketError() {
+    await this.closeRoom(1011, "peer error");
   }
 
   async alarm() {
-    const lifecycle = parseSignalLifecycle(
-      await this.state.storage.get(SIGNAL_LIFECYCLE_KEY),
-    );
+    const lifecycle = parseLifecycle(await this.state.storage.get(LIFECYCLE_KEY));
     switch (lifecycle.kind) {
-      case "active":
-        if (lifecycle.expiresAt > Date.now()) {
-          // Alarm delivery is at-least-once. A retry for an erased generation
-          // must not delete a newer session using the same Durable Object ID.
-          await this.ensureLifecycleAlarm(lifecycle.expiresAt);
-          return;
+      case "waiting":
+      case "paired":
+        if (lifecycle.expiresAt <= Date.now()) {
+          await this.closeRoom(1001, "room expired");
+        } else {
+          await this.state.storage.setAlarm(lifecycle.expiresAt);
         }
-        await this.expireSignalSession();
+        return;
+      case "closed":
+        if (lifecycle.expiresAt <= Date.now()) {
+          await this.cleanup();
+        } else {
+          await this.state.storage.setAlarm(lifecycle.expiresAt);
+        }
+        return;
+      case "invalid":
+        await this.closeRoom(1011, "invalid room state");
         return;
       case "missing":
-      case "invalid":
-        await this.expireSignalSession();
-        return;
+        await this.cleanup();
     }
   }
 
-  async expireSignalSession() {
-    for (const ws of this.state.getWebSockets()) {
-      try { ws.close(1001, "session expired"); } catch {}
+  async cleanup() {
+    for (const socket of this.state.getWebSockets()) {
+      try { socket.close(1001, "room expired"); } catch {}
     }
-    await this.state.storage.deleteAll();
-    // This Worker's compatibility date predates deleteAll() clearing alarms.
-    await this.state.storage.deleteAlarm();
-  }
-
-  /** @param {string} generation */
-  async expireSignalGeneration(generation) {
-    const lifecycle = parseSignalLifecycle(
-      await this.state.storage.get(SIGNAL_LIFECYCLE_KEY),
-    );
-    if (lifecycle.kind !== "active" || lifecycle.generation !== generation) {
-      return;
-    }
-    await this.expireSignalSession();
-  }
-
-  /** @param {WebSocket} ws */
-  async webSocketClose(ws) {
-    const attachment = ws.deserializeAttachment();
-    if (attachment?.role === "cli" && typeof attachment.generation === "string") {
-      await this.expireSignalGeneration(attachment.generation);
-    } else {
-      this.notifyOtherPeerLeft(ws);
-    }
-    try { ws.close(); } catch {}
-  }
-
-  /** @param {WebSocket} ws */
-  async webSocketError(ws) {
-    const attachment = ws.deserializeAttachment();
-    if (attachment?.role === "cli" && typeof attachment.generation === "string") {
-      await this.expireSignalGeneration(attachment.generation);
-    } else {
-      this.notifyOtherPeerLeft(ws);
-    }
-    try { ws.close(1011, "error"); } catch {}
-  }
-
-  /** @param {WebSocket} ws */
-  notifyOtherPeerLeft(ws) {
-    const attachment = ws.deserializeAttachment();
-    const role = parseSignalRole(attachment?.role ?? null);
-    if (role === null) {
-      return;
-    }
-    if (typeof attachment.generation !== "string" || attachment.generation.length === 0) {
-      return;
-    }
-    const destinationRole = role === "cli" ? "phone" : "cli";
-    for (const peer of this.socketsForRole(destinationRole, attachment.generation)) {
-      try { peer.send(JSON.stringify({ type: "peer-left" })); } catch {}
-    }
+    await Promise.all([
+      this.state.storage.deleteAll(),
+      this.state.storage.deleteAlarm(),
+    ]);
   }
 }

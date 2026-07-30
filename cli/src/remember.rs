@@ -7,19 +7,18 @@
 //! `keytap forget --all`, or the passkey is replaced.
 //!
 //! Every remembered key is tied to a *root*: a fingerprint of the WebAuthn
-//! credential that produced it. The nearby identity file is the sole root
-//! authority. Publishing a replacement identity makes old-root entries
+//! credential that produced it. The local passkey record is the sole root
+//! authority. Publishing a replacement record makes old-root entries
 //! unreachable immediately, even if their best-effort cleanup fails.
 //!
 //! Storage layout (service `keytap`, see `keychain.rs`):
-//!   account `remember:<root_id>:<name>` → value `keytap-remember-v1:<hex key>`
+//!   account `remember:<root_id>:<name>` → the 32 raw derived-key bytes
 
 use crate::keychain::{self, Keychain, KeychainError};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
 const REMEMBER_ACCOUNT_PREFIX: &str = "remember:";
-const KEY_VALUE_PREFIX: &str = "keytap-remember-v1:";
 
 /// Domain separator for credential fingerprints, so a root id can never be
 /// confused with any other hash of the credential ID.
@@ -56,7 +55,7 @@ fn open_stores() -> Result<Vec<Box<dyn Keychain>>, KeychainError> {
 /// deliberately swallows (a stateless user on a keychain-less machine should
 /// not see warnings on every command).
 pub fn lookup(name: &str) -> Option<Zeroizing<Vec<u8>>> {
-    // The identity file is the generation authority. In particular, an init
+    // The passkey record is the revision authority. In particular, an init
     // that published its new credential but crashed before keychain cleanup
     // must make every old-root entry unreachable immediately.
     let authority = crate::nearby_identity::remember_authority().ok()?;
@@ -143,12 +142,12 @@ fn probe_writable(kc: &mut (impl Keychain + ?Sized)) -> Result<(), KeychainError
 pub fn remember(target: &mut WriteTarget, name: &str, credential_id: &[u8], raw_key: &[u8]) {
     let authority = crate::nearby_identity::remember_authority().unwrap_or_else(|error| {
         crate::die(&format!(
-            "could not verify the current passkey identity before remembering: {error}"
+            "could not verify the local passkey record before remembering: {error}"
         ))
     });
     if authority.credential_id() != credential_id {
         crate::die(
-            "the passkey you just used is not this machine's current passkey identity; refusing \
+            "the passkey you just used does not match this machine's local passkey record; refusing \
              to remember a key that later commands would not use",
         );
     }
@@ -166,20 +165,20 @@ pub fn remember(target: &mut WriteTarget, name: &str, credential_id: &[u8], raw_
             location = target.location
         ),
         Ok(false) | Err(_) => crate::die(
-            "the passkey identity changed while the key was being stored; the stale entry will \
+            "the local passkey record changed while the key was being stored; the stale entry will \
              not be used",
         ),
     }
 }
 
-/// Honor the storage disposition signed by the phone's nearby assertion.
+/// Honor the storage disposition signed by the approver's nearby assertion.
 /// Storage remains best-effort for ordinary derivation commands: failure is
 /// reported to both endpoints, while the verified one-time key can still be
 /// used by the command.
 pub enum NearbyRememberOutcome {
     Stored,
     /// Identity authority or durable local storage was unavailable. This is
-    /// distinct from the phone returning a different credential/PRF result.
+    /// distinct from the approver returning a different credential/PRF result.
     Unavailable,
 }
 
@@ -192,20 +191,20 @@ pub fn remember_requested_nearby(
     // remains a non-panicking stderr note and cannot corrupt key output.
     let could_not = |why: &str| {
         crate::note(&format!(
-            "warning: you asked on your phone to remember '{name}' on this machine, but {why}"
+            "warning: you asked on the nearby device to remember '{name}' on this machine, but {why}"
         ));
     };
     let authority = match crate::nearby_identity::remember_authority() {
         Ok(authority) => authority,
         Err(error) => {
             could_not(&format!(
-                "the passkey identity could not be checked: {error}"
+                "the local passkey record could not be checked: {error}"
             ));
             return NearbyRememberOutcome::Unavailable;
         }
     };
     if authority.credential_id() != credential_id {
-        could_not("the passkey is no longer this machine's current nearby identity");
+        could_not("the passkey no longer matches this machine's local passkey record");
         return NearbyRememberOutcome::Unavailable;
     }
 
@@ -225,7 +224,7 @@ pub fn remember_requested_nearby(
         Ok(()) => match authority.revalidate() {
             Ok(true) => {
                 crate::note(&format!(
-                    "Remembered '{name}' in {location}, as requested on your phone. Future keytap \
+                    "Remembered '{name}' in {location}, as requested on the nearby device. Future keytap \
                      commands for this name will not prompt until you run `keytap forget {name}` or \
                      replace the passkey.",
                     location = target.location
@@ -233,7 +232,7 @@ pub fn remember_requested_nearby(
                 NearbyRememberOutcome::Stored
             }
             Ok(false) | Err(_) => {
-                could_not("the nearby identity changed while the key was being stored");
+                could_not("the local passkey record changed while the key was being stored");
                 NearbyRememberOutcome::Unavailable
             }
         },
@@ -383,16 +382,6 @@ fn parse_remember_account(account: &str) -> Option<(&str, &str)> {
         .split_once(':')
 }
 
-fn encode_key_value(raw_key: &[u8]) -> Zeroizing<String> {
-    Zeroizing::new(format!("{KEY_VALUE_PREFIX}{}", hex::encode(raw_key)))
-}
-
-fn decode_key_value(value: &[u8]) -> Option<Zeroizing<Vec<u8>>> {
-    let text = std::str::from_utf8(value).ok()?;
-    let bytes = hex::decode(text.strip_prefix(KEY_VALUE_PREFIX)?).ok()?;
-    (bytes.len() == 32).then(|| Zeroizing::new(bytes))
-}
-
 enum Resolution {
     Hit(Zeroizing<Vec<u8>>),
     Miss,
@@ -406,12 +395,13 @@ fn lookup_root_in(
     root: &str,
     name: &str,
 ) -> Result<Resolution, KeychainError> {
-    let Some(value) = kc.get(&remember_account(&root, name))? else {
+    let Some(value) = kc.get(&remember_account(root, name))? else {
         return Ok(Resolution::Miss);
     };
-    Ok(match decode_key_value(&value) {
-        Some(key) => Resolution::Hit(key),
-        None => Resolution::Invalid,
+    Ok(if value.len() == 32 {
+        Resolution::Hit(value)
+    } else {
+        Resolution::Invalid
     })
 }
 
@@ -421,10 +411,12 @@ fn remember_root_in(
     root: &str,
     raw_key: &[u8],
 ) -> Result<(), KeychainError> {
-    kc.set(
-        &remember_account(&root, name),
-        encode_key_value(raw_key).as_bytes(),
-    )?;
+    if raw_key.len() != 32 {
+        return Err(KeychainError::Backend(
+            "derived key must be exactly 32 bytes".to_string(),
+        ));
+    }
+    kc.set(&remember_account(root, name), raw_key)?;
     Ok(())
 }
 
@@ -434,7 +426,7 @@ fn forget_root_in(
     root: &str,
     name: &str,
 ) -> Result<bool, KeychainError> {
-    kc.delete(&remember_account(&root, name))
+    kc.delete(&remember_account(root, name))
 }
 
 /// Delete every `remember:*` entry regardless of root; returns how many.
@@ -570,11 +562,8 @@ mod tests {
     #[test]
     fn lookup_is_scoped_to_the_authoritative_root() {
         let mut kc = MemoryKeychain::default();
-        kc.set(
-            &remember_account(&root_id(CRED_2), "deploy"),
-            encode_key_value(&KEY_B).as_bytes(),
-        )
-        .unwrap();
+        kc.set(&remember_account(&root_id(CRED_2), "deploy"), &KEY_B)
+            .unwrap();
         assert!(matches!(
             lookup_root_in(&kc, &root_id(CRED_1), "deploy").unwrap(),
             Resolution::Miss
@@ -623,11 +612,8 @@ mod tests {
         remember_root_in(&mut kc, "deploy", &root_id(CRED_1), &KEY_A).unwrap();
         remember_root_in(&mut kc, "backup", &root_id(CRED_1), &KEY_B).unwrap();
         // A stray entry from an even older root is wiped too.
-        kc.set(
-            &remember_account(&root_id(b"ancient"), "old"),
-            encode_key_value(&KEY_B).as_bytes(),
-        )
-        .unwrap();
+        kc.set(&remember_account(&root_id(b"ancient"), "old"), &KEY_B)
+            .unwrap();
         // A user-managed entry under the keytap service survives cleanup.
         kc.set("deploy", b"user-managed").unwrap();
 
@@ -662,11 +648,8 @@ mod tests {
     fn forget_all_clears_every_root_but_spares_everything_else() {
         let mut kc = MemoryKeychain::default();
         remember_root_in(&mut kc, "deploy", &root_id(CRED_1), &KEY_A).unwrap();
-        kc.set(
-            &remember_account(&root_id(CRED_2), "stale"),
-            encode_key_value(&KEY_B).as_bytes(),
-        )
-        .unwrap();
+        kc.set(&remember_account(&root_id(CRED_2), "stale"), &KEY_B)
+            .unwrap();
         kc.set("deploy", b"user-managed").unwrap();
 
         assert_eq!(forget_all_in(&mut kc).unwrap(), 2);
@@ -683,11 +666,8 @@ mod tests {
         remember_root_in(&mut kc, "alpha", &root, &KEY_B).unwrap();
         // Names may contain the account separator.
         remember_root_in(&mut kc, "ns:key", &root, &KEY_A).unwrap();
-        kc.set(
-            &remember_account(&root_id(CRED_2), "foreign"),
-            encode_key_value(&KEY_B).as_bytes(),
-        )
-        .unwrap();
+        kc.set(&remember_account(&root_id(CRED_2), "foreign"), &KEY_B)
+            .unwrap();
 
         assert_eq!(
             list_root_in(&kc, &root).unwrap(),
@@ -699,12 +679,7 @@ mod tests {
     fn malformed_entries_resolve_to_invalid_not_a_key() {
         let mut kc = MemoryKeychain::default();
         let root = root_id(CRED_1);
-        for bad in [
-            b"garbage".as_slice(),                 // no prefix
-            b"keytap-remember-v1:zz".as_slice(),   // not hex
-            b"keytap-remember-v1:aabb".as_slice(), // wrong length
-            b"\xff\xfe".as_slice(),                // not UTF-8
-        ] {
+        for bad in [b"".as_slice(), &[0x11; 31], &[0x22; 33], &[0x33; 64]] {
             kc.set(&remember_account(&root, "deploy"), bad).unwrap();
             assert!(matches!(
                 lookup_root_in(&kc, &root, "deploy").unwrap(),
@@ -714,9 +689,19 @@ mod tests {
     }
 
     #[test]
-    fn value_encoding_round_trips_and_rejects_truncation() {
-        let encoded = encode_key_value(&KEY_A);
-        assert_eq!(&decode_key_value(encoded.as_bytes()).unwrap()[..], &KEY_A);
-        assert!(decode_key_value(&encoded.as_bytes()[..encoded.len() - 2]).is_none());
+    fn remember_stores_exactly_the_raw_key_and_rejects_other_lengths() {
+        let mut kc = MemoryKeychain::default();
+        let root = root_id(CRED_1);
+
+        remember_root_in(&mut kc, "deploy", &root, &KEY_A).unwrap();
+        assert_eq!(
+            &kc.get(&remember_account(&root, "deploy")).unwrap().unwrap()[..],
+            &KEY_A
+        );
+
+        assert!(remember_root_in(&mut kc, "short", &root, &[0; 31]).is_err());
+        assert!(remember_root_in(&mut kc, "long", &root, &[0; 33]).is_err());
+        assert!(kc.get(&remember_account(&root, "short")).unwrap().is_none());
+        assert!(kc.get(&remember_account(&root, "long")).unwrap().is_none());
     }
 }

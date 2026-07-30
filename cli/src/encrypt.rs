@@ -16,14 +16,18 @@ pub fn encrypt(
     let files: Vec<(String, String)> = recipients_files
         .iter()
         .map(|file| {
-            let contents = std::fs::read_to_string(file)
-                .unwrap_or_else(|e| crate::die(&format!("failed to read recipients file {file}: {e}")));
+            let contents = std::fs::read_to_string(file).unwrap_or_else(|e| {
+                crate::die(&format!("failed to read recipients file {file}: {e}"))
+            });
             (file.clone(), contents)
         })
         .collect();
-    let recipients =
-        keytap_core::encrypt::recipients(include_self.then_some(raw_key), additional_recipients, &files)
-            .unwrap_or_else(|e| crate::die(&e.to_string()));
+    let recipients = keytap_core::encrypt::recipients(
+        include_self.then_some(raw_key),
+        additional_recipients,
+        &files,
+    )
+    .unwrap_or_else(|e| crate::die(&e.to_string()));
 
     let mut reader = BufReader::new(io::stdin());
     let mut writer = BufWriter::new(io::stdout());

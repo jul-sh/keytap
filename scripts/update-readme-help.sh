@@ -14,9 +14,7 @@ README="README.md"
 BEGIN="<!--HELP:BEGIN-->"
 END="<!--HELP:END-->"
 
-# Build the CLI without the native passkey feature: `--help` never touches the
-# passkey path, and this keeps CI off macOS/Swift toolchains.
-cargo build -q -p keytap --no-default-features
+cargo build -q -p keytap
 
 help_output="$(./target/debug/keytap --help)"
 

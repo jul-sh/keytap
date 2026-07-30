@@ -1,5 +1,4 @@
 Keytap.app/
-Tapkey.app/
 Keytap.provisionprofile
 target/
 .claude/
@@ -8,5 +7,7 @@ macos/swift-lib/.build/
 *.zip
 .mcp.json
 .wrangler/
+.dev.vars*
+.env*
 web/pkg/
 result

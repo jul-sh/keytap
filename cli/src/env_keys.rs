@@ -10,7 +10,7 @@
 //!
 //! Resolution is per name and sits above every other source: a variable
 //! that is present wins over remembered keys and ceremonies; a variable
-//! that is absent falls through to them (`main::obtain_key` refuses the
+//! that is absent falls through to them (`main::with_derived_key` refuses the
 //! ceremony rung when `$CI` is set). A variable that is present but
 //! unusable — empty, wrong encoding — is always a hard error, never a
 //! silent fall-through to a prompt no one can answer.
@@ -28,7 +28,13 @@ const BARE: &str = "KEYTAP_KEY";
 pub fn var_name(name: &str) -> String {
     let suffix: String = name
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_uppercase() } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
         .collect();
     format!("{PREFIX}{suffix}")
 }
@@ -51,7 +57,9 @@ pub fn resolve(name: &str) -> Option<Zeroizing<Vec<u8>>> {
     let value = Zeroizing::new(value);
     let value = value.trim();
     if value.is_empty() {
-        crate::die(&format!("${var} is set but empty (is the CI secret it maps from unset?)"));
+        crate::die(&format!(
+            "${var} is set but empty (is the CI secret it maps from unset?)"
+        ));
     }
     match keytap_core::parse_age_secret_key(value) {
         Ok(raw_key) => {
@@ -74,7 +82,7 @@ mod tests {
         assert_eq!(var_name("ci"), "KEYTAP_KEY_CI");
         assert_eq!(var_name("deploy"), "KEYTAP_KEY_DEPLOY");
         assert_eq!(var_name("my-app.prod"), "KEYTAP_KEY_MY_APP_PROD");
-        assert_eq!(var_name("ns:key v2"), "KEYTAP_KEY_NS_KEY_V2");
+        assert_eq!(var_name("ns:key two"), "KEYTAP_KEY_NS_KEY_TWO");
         assert_eq!(var_name("Already_UPPER1"), "KEYTAP_KEY_ALREADY_UPPER1");
     }
 }

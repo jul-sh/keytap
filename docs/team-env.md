@@ -94,7 +94,7 @@ When a secret changes, edit `.env`, encrypt it again with the same command,
 and commit only `.env.age`. Teammates pull and decrypt again. Keytap users can
 optionally run `keytap remember YOUR_KEY_NAME` once to stop repeated prompts on
 that machine; read
-[Skipping repeated prompts](../README.md#skipping-repeated-prompts) first.
+[Remembered keys and CI](../README.md#remembered-keys-and-ci) first.
 
 ## Add or remove a developer
 

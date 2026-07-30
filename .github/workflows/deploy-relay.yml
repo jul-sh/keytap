@@ -1,11 +1,12 @@
-name: Deploy Relay
+name: Deploy Relay Worker
 
 on:
   push:
     branches:
       - main
     paths:
-      - web/relay/**
+      - web/relay/src/**
+      - web/relay/wrangler.jsonc
       - .github/workflows/deploy-relay.yml
   workflow_dispatch:
 
@@ -26,8 +27,8 @@ jobs:
         env:
           AGE_SECRET_KEY: ${{ secrets.AGE_SECRET_KEY }}
 
-      - name: Deploy relay worker
+      - name: Deploy relay Worker
         working-directory: web/relay
-        run: nix run nixpkgs#wrangler -- deploy
+        run: npx --yes wrangler@4.115.0 deploy
         env:
           CLOUDFLARE_API_TOKEN: ${{ env.CLOUDFLARE_API_TOKEN }}

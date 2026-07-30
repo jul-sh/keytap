@@ -1,699 +1,1107 @@
-'use strict';
+import {
+  IdentityProofUnavailableError,
+  InitialIndeterminateError,
+  InitialRejectionError,
+  PairingRejectedError,
+  ProtocolError,
+  createApproverCipher,
+  createNearbyIdentityProof,
+  createRegistrationIdentityProof,
+  createSasCommitment,
+  createSasContext,
+  createSasDigest,
+  decodeBase64URL,
+  encodeBase64URL,
+  isCompletedElsewhereMessage,
+  parseCliMessage,
+  parseInitialRequest,
+  parseSasWordList,
+  relayRoomId,
+  sasPhrase,
+  verifySasCommitment,
+} from './nearby-protocol.js';
 
-const RELAY_URL = 'https://keytap-relay.julsh.workers.dev';
+const RELAY_ORIGIN = 'https://keytap-relay.julsh.workers.dev';
+const OPEN_TIMEOUT_MS = 30_000;
+const RELAY_MESSAGE_TIMEOUT_MS = 150_000;
+const WEBAUTHN_TIMEOUT_MS = 120_000;
+const MAX_RELAY_FRAME_BYTES = 16 * 1024;
+const MAX_WORD_LIST_BYTES = 32 * 1024;
+const RP_ID = 'keytap.jul.sh';
 
-/** @param {string} value */
-function decodeBase64URL(value) {
-  const base64 = value.replace(/-/g, '+').replace(/_/g, '/');
-  const padded = base64 + '='.repeat((4 - (base64.length % 4)) % 4);
-  return Uint8Array.from(atob(padded), c => c.charCodeAt(0));
+let identityWasmPromise;
+let sasWordsPromise;
+
+/**
+ * @typedef {
+ *   {kind: 'boot'} |
+ *   {kind: 'connecting'} |
+ *   {kind: 'sas', session: RelaySession, request: Request, digest: Uint8Array} |
+ *   {kind: 'choice', session: RelaySession, request: AssertRequest, binding: ProofBinding} |
+ *   {kind: 'ceremony', session: RelaySession, operation: CeremonyOperation} |
+ *   {kind: 'registration-created', session: RelaySession, credential: CreatedCredential} |
+ *   {kind: 'sent', session: RelaySession, result: SentResult} |
+ *   {kind: 'suspended', work: SuspendedWork} |
+ *   {kind: 'terminal', outcome: TerminalOutcome} |
+ *   {kind: 'expired'}
+ * } Phase
+ * @typedef {RegisterRequest | AssertRequest} Request
+ * @typedef {{kind: 'assert', challenge: Uint8Array, prfSalt: Uint8Array, identitySalt: Uint8Array, identity: IdentityMode, keyName: string, storage: 'choose'|'remember'}} AssertRequest
+ * @typedef {{kind: 'pairing-any'} | {kind: 'pairing-credential', credentialId: Uint8Array} | {kind: 'pinned', credentialId: Uint8Array}} IdentityMode
+ * @typedef {
+ *   {kind: 'first-pair-sas', digest: Uint8Array} |
+ *   {kind: 'pinned-identity', sessionBinding: Uint8Array, requestFrameBytes: Uint8Array}
+ * } ProofBinding
+ * @typedef {'once'|'remember'} Disposition
+ * @typedef {{kind: 'registration', request: RegisterRequest} | {kind: 'assertion', request: AssertRequest, binding: ProofBinding, disposition: Disposition}} CeremonyOperation
+ * @typedef {{kind: 'register', challenge: Uint8Array, identitySalt: Uint8Array, userId: Uint8Array, userName: string}} RegisterRequest
+ * @typedef {{kind: 'identified', credentialId: Uint8Array} | {kind: 'malformed'}} CreatedCredential
+ * @typedef {{kind: 'registration'} | {kind: 'assertion', keyName: string, disposition: Disposition}} SentResult
+ * @typedef {{kind: 'pre-result'} | {kind: 'registration-created'} | {kind: 'registration-sent'} | {kind: 'assertion-sent'} | {kind: 'terminal', outcome: TerminalOutcome}} SuspendedWork
+ * @typedef {{kind: 'registered'|'once'|'stored'|'storage-unavailable'|'completed-elsewhere'|'pairing-rejected'|'identity-store-unavailable'|'identity-rejected'|'identity-indeterminate'|'capability-unavailable'|'registration-created-unsaved'|'registration-indeterminate'|'assertion-indeterminate'|'failed'|'expired', title: string, message: string}} TerminalOutcome
+ */
+
+/** @type {Phase} */
+let phase = { kind: 'boot' };
+let pageLifetime;
+let activeSession;
+
+export function isTopLevelContext(context) {
+  try {
+    return context.top === context.self;
+  } catch {
+    return false;
+  }
 }
 
-/** @param {Uint8Array|ArrayBuffer} buf */
-function encodeBase64URL(buf) {
-  const bytes = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
-  let binary = '';
-  for (const b of bytes) binary += String.fromCharCode(b);
-  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+export function revealTopLevelPage(context, root) {
+  if (!isTopLevelContext(context)) return false;
+  root.classList.add('approval-top-level');
+  return true;
 }
 
-// ─── DOM ───
+export class CompletedElsewhereError extends ProtocolError {
+  constructor() {
+    super('approval completed on the Mac');
+    this.name = 'CompletedElsewhereError';
+  }
+}
 
-const $ = id => document.getElementById(id);
+export class LocalPairingRejectionError extends ProtocolError {
+  constructor() {
+    super('the pairing words were rejected on this device');
+    this.name = 'LocalPairingRejectionError';
+  }
+}
 
-/** Render a message into an element; string parts stay text, {code} parts
- * become <code> spans. Everything goes through textContent. */
-function render(el, ...parts) {
-  el.textContent = '';
-  for (const part of parts) {
-    if (typeof part === 'string') {
-      el.append(part);
+export class PasskeyPrfUnavailableError extends Error {
+  constructor() {
+    super('this browser and passkey did not return the required PRF outputs');
+    this.name = 'PasskeyPrfUnavailableError';
+  }
+}
+
+class AsyncQueue {
+  constructor() {
+    this.items = [];
+    this.waiters = [];
+    this.failure = null;
+  }
+
+  push(value) {
+    if (this.failure) return;
+    const waiter = this.waiters.shift();
+    if (waiter) {
+      clearTimeout(waiter.timer);
+      waiter.resolve(value);
     } else {
-      const code = document.createElement('code');
-      code.textContent = part.code;
-      el.append(code);
+      this.items.push(value);
+    }
+  }
+
+  fail(error) {
+    if (this.failure) return;
+    this.failure = error instanceof Error ? error : new Error(String(error));
+    for (const waiter of this.waiters.splice(0)) {
+      clearTimeout(waiter.timer);
+      waiter.reject(this.failure);
+    }
+  }
+
+  next(timeoutMs = RELAY_MESSAGE_TIMEOUT_MS) {
+    if (this.items.length > 0) return Promise.resolve(this.items.shift());
+    if (this.failure) return Promise.reject(this.failure);
+    return new Promise((resolve, reject) => {
+      const waiter = { resolve, reject, timer: 0 };
+      waiter.timer = setTimeout(() => {
+        const index = this.waiters.indexOf(waiter);
+        if (index !== -1) this.waiters.splice(index, 1);
+        reject(new ProtocolError('timed out waiting for the CLI'));
+      }, timeoutMs);
+      this.waiters.push(waiter);
+    });
+  }
+}
+
+function abortReason(signal) {
+  return signal.reason instanceof Error
+    ? signal.reason
+    : new DOMException('The operation was aborted.', 'AbortError');
+}
+
+function throwIfAborted(signal) {
+  if (signal?.aborted) throw abortReason(signal);
+}
+
+function abortable(promise, signal) {
+  if (!signal) return promise;
+  try {
+    throwIfAborted(signal);
+  } catch (error) {
+    return Promise.reject(error);
+  }
+  return new Promise((resolve, reject) => {
+    const onAbort = () => reject(abortReason(signal));
+    signal.addEventListener('abort', onAbort, { once: true });
+    Promise.resolve(promise).then(
+      value => {
+        signal.removeEventListener('abort', onAbort);
+        resolve(value);
+      },
+      error => {
+        signal.removeEventListener('abort', onAbort);
+        reject(error);
+      },
+    );
+  });
+}
+
+export function exactCliPublicKeyFromFragment() {
+  const fragment = location.hash.startsWith('#') ? location.hash.slice(1) : '';
+  history.replaceState(null, '', location.pathname + location.search);
+  const matched = /^key=([A-Za-z0-9_-]{87})$/.exec(fragment);
+  if (!matched) {
+    throw new ProtocolError('No unambiguous nearby CLI key in the approval link.');
+  }
+  let publicKey;
+  try {
+    publicKey = decodeBase64URL(matched[1]);
+  } catch {
+    throw new ProtocolError('Invalid nearby CLI key in the approval link.');
+  }
+  if (publicKey.length !== 65 || publicKey[0] !== 0x04) {
+    throw new ProtocolError('Invalid nearby CLI key in the approval link.');
+  }
+  return publicKey;
+}
+
+export async function relayUrl(cliPublicKey) {
+  const url = new URL(RELAY_ORIGIN);
+  url.protocol = 'wss:';
+  url.pathname = `/room/${await relayRoomId(cliPublicKey)}`;
+  url.search = 'role=approver';
+  return url.href;
+}
+
+async function binaryMessage(data) {
+  if (data instanceof ArrayBuffer) return new Uint8Array(data);
+  if (ArrayBuffer.isView(data)) {
+    return new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+  }
+  if (typeof Blob === 'function' && data instanceof Blob) {
+    if (data.size > MAX_RELAY_FRAME_BYTES) throw new ProtocolError('relay frame is too large');
+    return new Uint8Array(await data.arrayBuffer());
+  }
+  throw new ProtocolError('relay sent a non-binary frame');
+}
+
+export class RelaySession {
+  constructor(socket, cipher, controller) {
+    this.socket = socket;
+    this.cipher = cipher;
+    this.controller = controller;
+    this.incoming = new AsyncQueue();
+    this.intentionalClose = false;
+    this.deferredSocketFailure = false;
+    this.decodeChain = Promise.resolve();
+
+    socket.addEventListener('message', event => {
+      this.decodeChain = this.decodeChain.then(async () => {
+        const frame = await binaryMessage(event.data);
+        if (frame.length > MAX_RELAY_FRAME_BYTES) throw new ProtocolError('relay frame is too large');
+        const opened = await cipher.open(frame);
+        if (isCompletedElsewhereMessage(opened.value)) {
+          throw new CompletedElsewhereError();
+        }
+        this.incoming.push(opened);
+      }).catch(error => this.fail(error));
+    });
+    socket.addEventListener('close', () => {
+      this.deferSocketFailure(new ProtocolError('the encrypted relay closed'));
+    });
+    socket.addEventListener('error', () => {
+      this.deferSocketFailure(new ProtocolError('the encrypted relay failed'));
+    });
+  }
+
+  deferSocketFailure(error) {
+    if (this.intentionalClose || this.deferredSocketFailure) return;
+    this.deferredSocketFailure = true;
+    this.decodeChain = this.decodeChain.then(() => this.fail(error));
+  }
+
+  fail(error) {
+    const failure = error instanceof Error ? error : new ProtocolError('the encrypted relay failed');
+    this.incoming.fail(failure);
+    if (!this.controller.signal.aborted) this.controller.abort(failure);
+  }
+
+  async send(message) {
+    throwIfAborted(this.controller.signal);
+    const frame = await this.cipher.seal(message);
+    throwIfAborted(this.controller.signal);
+    if (this.socket.readyState !== WebSocket.OPEN) {
+      throw new ProtocolError('the encrypted relay closed');
+    }
+    this.socket.send(frame);
+  }
+
+  async nextRaw(timeoutMs) {
+    return this.incoming.next(timeoutMs);
+  }
+
+  async next(timeoutMs) {
+    return (await this.nextRaw(timeoutMs)).value;
+  }
+
+  close() {
+    if (this.intentionalClose) return;
+    this.intentionalClose = true;
+    this.incoming.fail(this.controller.signal.aborted
+      ? abortReason(this.controller.signal)
+      : new ProtocolError('the encrypted relay closed'));
+    if (this.socket.readyState === WebSocket.OPEN
+        || this.socket.readyState === WebSocket.CONNECTING) {
+      this.socket.close(1000, 'done');
     }
   }
 }
 
-/** Progress and confirmations. Clears the alert region: the regions are
- * complementary, never additive. */
-function say(...parts) {
-  $('alert').textContent = '';
-  render($('status'), ...parts);
-}
+export async function openRelay(cliPublicKey, controller) {
+  const cipher = await createApproverCipher(cliPublicKey);
+  throwIfAborted(controller.signal);
+  const socket = new WebSocket(await relayUrl(cliPublicKey));
+  socket.binaryType = 'arraybuffer';
 
-/** Failures and expiry. */
-function alertUser(...parts) {
-  $('status').textContent = '';
-  render($('alert'), ...parts);
-}
-
-// ─── Session state ───
-
-let config = null;
-let sessionId = null;
-let expiryTimer = 0;
-
-/**
- * Every phase carries only the data valid in that phase. In particular,
- * retries hold an already-encrypted envelope and the remember offer owns its
- * expiry and pagehide messages.
- * @typedef {
- *   {kind: 'loading'} |
- *   {kind: 'ready', action: 'run'} |
- *   {kind: 'ready', action: 'resend-register', envelope: string} |
- *   {kind: 'ready', action: 'resend-assert', envelope: string, firstResult: FirstResult} |
- *   {kind: 'first-busy'} |
- *   {kind: 'offer', data: OfferData} |
- *   {kind: 'remembering', step: 'probe'|'ceremony', data: OfferData} |
- *   {kind: 'remember-posting', envelope: string} |
- *   {kind: 'remember-retry', envelope: string} |
- *   {kind: 'released'} |
- *   {kind: 'finished'}
- * } Phase
- * @typedef {{rawId: ArrayBuffer, credentialIdB64: string, prfFirstB64: string}} FirstResult
- * @typedef {{
- *   firstResult: FirstResult,
- *   expiryAt: number,
- *   pendingEnvelope: Promise<string>,
- *   doneEnvelope: string|null
- * }} OfferData
- */
-/** @type {Phase} */
-let phase = { kind: 'loading' };
-
-function markerKey(sid) {
-  return `keytap-sent-${sid}`;
-}
-
-function setMarker(state) {
   try {
-    sessionStorage.setItem(markerKey(sessionId), JSON.stringify({ state, name: config.keyName }));
-  } catch { /* storage may be unavailable; the marker is best-effort */ }
+    await abortable(new Promise((resolve, reject) => {
+      let settled = false;
+      const finish = operation => value => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        operation(value);
+      };
+      const accept = finish(resolve);
+      const rejectOnce = finish(reject);
+      const timer = setTimeout(() => {
+        rejectOnce(new ProtocolError('timed out reaching the encrypted relay'));
+        socket.close();
+      }, OPEN_TIMEOUT_MS);
+      socket.addEventListener('open', accept, { once: true });
+      socket.addEventListener('error', () => rejectOnce(new ProtocolError('could not reach the encrypted relay')), { once: true });
+      socket.addEventListener('close', () => rejectOnce(new ProtocolError('the encrypted relay closed')), { once: true });
+    }), controller.signal);
+  } catch (error) {
+    if (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING) socket.close();
+    throw error;
+  }
+
+  const session = new RelaySession(socket, cipher, controller);
+  socket.send(cipher.hello);
+  return { session, sessionBinding: cipher.sessionBinding };
 }
 
-function getMarker(sid) {
+async function nextCliMessage(session, expectedType) {
+  return parseCliMessage(await session.next(), expectedType);
+}
+
+async function loadSasWords(signal) {
+  sasWordsPromise ??= (async () => {
+    const response = await fetch('./nearby-sas-words.txt', { cache: 'force-cache', signal });
+    if (!response.ok) throw new ProtocolError('could not load pairing words');
+    const declared = Number(response.headers.get('content-length'));
+    if (Number.isFinite(declared) && declared > MAX_WORD_LIST_BYTES) {
+      throw new ProtocolError('pairing word list is too large');
+    }
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    if (bytes.length > MAX_WORD_LIST_BYTES) throw new ProtocolError('pairing word list is too large');
+    return parseSasWordList(bytes);
+  })();
+  return abortable(sasWordsPromise, signal);
+}
+
+async function deriveEd25519PublicKey(identitySeed) {
+  if (!(identitySeed instanceof Uint8Array) || identitySeed.length !== 32) {
+    throw new ProtocolError('invalid identity PRF output');
+  }
+  identityWasmPromise ??= import('./pkg/keytap_web.js').then(async module => {
+    await module.default();
+    return module;
+  });
+  const wasm = await identityWasmPromise;
+  const publicKey = new Uint8Array(wasm.ed25519PublicKey(identitySeed));
+  if (publicKey.length !== 32) throw new ProtocolError('invalid Ed25519 identity');
+  return publicKey;
+}
+
+function guardPasskeyOrigin() {
+  const host = location.hostname;
+  if (host === RP_ID || host.endsWith(`.${RP_ID}`)) return;
+  throw new Error(`passkey approval only works on https://${RP_ID}`);
+}
+
+function runRegistration(request, signal) {
+  guardPasskeyOrigin();
+  return navigator.credentials.create({
+    signal,
+    publicKey: {
+      challenge: request.challenge,
+      rp: { id: RP_ID, name: 'keytap' },
+      user: { id: request.userId, name: request.userName, displayName: request.userName },
+      pubKeyCredParams: [{ type: 'public-key', alg: -7 }, { type: 'public-key', alg: -257 }],
+      authenticatorSelection: { residentKey: 'required', userVerification: 'required' },
+      attestation: 'none',
+      timeout: WEBAUTHN_TIMEOUT_MS,
+      extensions: { prf: { eval: { first: request.identitySalt } } },
+    },
+  });
+}
+
+function firstPrfResult(credential) {
   try {
-    return JSON.parse(sessionStorage.getItem(markerKey(sid)));
+    const first = credential?.getClientExtensionResults?.()?.prf?.results?.first;
+    const output = first ? new Uint8Array(first) : new Uint8Array();
+    if (output.length === 32) return output;
+    output.fill(0);
+    return null;
   } catch {
     return null;
   }
 }
 
-// ─── Config ───
-
-function parseRawConfig(raw) {
-  return {
-    operation: raw.o === 'r' ? 'register' : 'assert',
-    sessionId: raw.s,
-    cliPubKey: raw.k,
-    prfSalt: raw.p,
-    challenge: raw.c,
-    keyName: raw.n || 'default',
-    userId: raw.u,
-    userName: raw.un,
-    // The CLI lingers this many seconds for post-auth follow-ups; the
-    // whole opt-in flow is keyed on it.
-    windowSecs: typeof raw.w === 'number' && raw.w > 0 ? raw.w : 0,
-  };
-}
-
-async function fetchConfig() {
-  const hash = location.hash.startsWith('#') ? location.hash.slice(1) : '';
-  const params = new URLSearchParams(hash);
-
-  const sid = params.get('s');
-  if (!sid) throw { kind: 'no-session' };
-
-  let resp;
-  try {
-    resp = await fetch(`${RELAY_URL}/relay/${sid}`);
-  } catch {
-    throw { kind: 'network' };
+function equalBytes(left, right) {
+  if (left.length !== right.length) return false;
+  let difference = 0;
+  for (let index = 0; index < left.length; index += 1) {
+    difference |= left[index] ^ right[index];
   }
-  if (resp.status === 404) throw { kind: 'gone', sid };
-  if (!resp.ok) throw { kind: 'network' };
-  return parseRawConfig(await resp.json());
+  return difference === 0;
 }
 
-// ─── Crypto ───
+/** Obtain the registration identity, falling back when create omits PRF results. */
+export async function registrationIdentitySeed(
+  createdCredential,
+  request,
+  credentialId,
+  signal,
+) {
+  const createTime = firstPrfResult(createdCredential);
+  if (createTime) return createTime;
 
-async function encryptEnvelope(payload) {
-  const keyPair = await crypto.subtle.generateKey({ name: 'X25519' }, false, ['deriveBits']);
-  const publicKeyRaw = await crypto.subtle.exportKey('raw', keyPair.publicKey);
-
-  const cliPubKey = await crypto.subtle.importKey('raw', decodeBase64URL(config.cliPubKey), { name: 'X25519' }, false, []);
-  const sharedBits = await crypto.subtle.deriveBits({ name: 'X25519', public: cliPubKey }, keyPair.privateKey, 256);
-
-  const ikm = await crypto.subtle.importKey('raw', sharedBits, 'HKDF', false, ['deriveKey']);
-  const enc = new TextEncoder();
-  const aesKey = await crypto.subtle.deriveKey(
-    { name: 'HKDF', hash: 'SHA-256', salt: enc.encode(config.sessionId), info: enc.encode('keytap:e2e:v1') },
-    ikm,
-    { name: 'AES-GCM', length: 256 },
-    false,
-    ['encrypt']
-  );
-
-  const nonce = crypto.getRandomValues(new Uint8Array(12));
-  const ciphertext = await crypto.subtle.encrypt({ name: 'AES-GCM', iv: nonce }, aesKey, enc.encode(JSON.stringify(payload)));
-
-  return JSON.stringify({
-    pk: encodeBase64URL(new Uint8Array(publicKeyRaw)),
-    nonce: encodeBase64URL(nonce),
-    ciphertext: encodeBase64URL(ciphertext),
-  });
-}
-
-function abortAfter(ms) {
-  if (typeof AbortSignal.timeout === 'function') return AbortSignal.timeout(ms);
-  const controller = new AbortController();
-  setTimeout(() => controller.abort(), ms);
-  return controller.signal;
-}
-
-function post(body, timeoutMs) {
-  const options = { method: 'POST', headers: { 'Content-Type': 'application/json' }, body };
-  if (timeoutMs) options.signal = abortAfter(timeoutMs);
-  return fetch(`${RELAY_URL}/relay/${sessionId}`, options);
-}
-
-// ─── WebAuthn ───
-
-async function runRegister() {
-  const credential = await navigator.credentials.create({
+  guardPasskeyOrigin();
+  const asserted = await navigator.credentials.get({
+    signal,
     publicKey: {
-      challenge: decodeBase64URL(config.challenge),
-      rp: { id: 'keytap.jul.sh', name: 'keytap' },
-      user: { id: decodeBase64URL(config.userId), name: config.userName, displayName: config.userName },
-      pubKeyCredParams: [{ type: 'public-key', alg: -7 }, { type: 'public-key', alg: -257 }],
-      authenticatorSelection: { residentKey: 'required', userVerification: 'required' },
-      attestation: 'none',
-      timeout: 120000,
-      extensions: { prf: { eval: { first: decodeBase64URL(config.prfSalt) } } },
+      challenge: request.challenge,
+      rpId: RP_ID,
+      userVerification: 'required',
+      timeout: WEBAUTHN_TIMEOUT_MS,
+      allowCredentials: [{ type: 'public-key', id: credentialId }],
+      extensions: { prf: { eval: { first: request.identitySalt } } },
     },
   });
-
-  const prf = credential.getClientExtensionResults()?.prf;
-  if (!prf?.enabled) throw new Error('Passkey created but this authenticator does not support PRF.');
-
-  return credential;
+  let assertedId;
+  try {
+    assertedId = asserted?.rawId ? new Uint8Array(asserted.rawId) : new Uint8Array();
+  } catch {
+    assertedId = new Uint8Array();
+  }
+  const assertedSeed = firstPrfResult(asserted);
+  if (!assertedSeed || !equalBytes(assertedId, credentialId)) {
+    assertedSeed?.fill(0);
+    throw new PasskeyPrfUnavailableError();
+  }
+  return assertedSeed;
 }
 
-/** @param {ArrayBuffer?} allowId pin the sheet to one credential (second ceremony) */
-async function runAssertion(allowId) {
+/** @returns {Promise<ProofBinding>} */
+export async function assertionProofBinding(
+  identity,
+  sessionBinding,
+  requestFrameBytes,
+  confirmFirstPair,
+) {
+  switch (identity?.kind) {
+    case 'pairing-any':
+    case 'pairing-credential':
+      return { kind: 'first-pair-sas', digest: await confirmFirstPair() };
+    case 'pinned':
+      return { kind: 'pinned-identity', sessionBinding, requestFrameBytes };
+    default:
+      throw new ProtocolError('invalid identity mode');
+  }
+}
+
+async function runAssertion(request, binding, disposition, signal) {
+  guardPasskeyOrigin();
   const publicKey = {
-    challenge: decodeBase64URL(config.challenge),
-    rpId: 'keytap.jul.sh',
+    challenge: request.challenge,
+    rpId: RP_ID,
     userVerification: 'required',
-    timeout: 120000,
-    extensions: { prf: { eval: { first: decodeBase64URL(config.prfSalt) } } },
+    timeout: WEBAUTHN_TIMEOUT_MS,
+    extensions: { prf: { eval: { first: request.prfSalt, second: request.identitySalt } } },
   };
-  if (allowId) publicKey.allowCredentials = [{ type: 'public-key', id: allowId }];
-
-  const credential = await navigator.credentials.get({ publicKey });
-  const prfFirst = credential.getClientExtensionResults()?.prf?.results?.first;
-  if (!prfFirst) throw new Error('PRF output was not returned.');
-  return { credential, prfFirst };
-}
-
-function isCancel(e) {
-  return e && (e.name === 'NotAllowedError' || e.name === 'AbortError');
-}
-
-// ─── Offer expiry (page-local; the CLI's window is the real clock) ───
-
-function armExpiry() {
-  if (phase.kind !== 'offer') return;
-  phase.data.expiryAt = Date.now() + Math.max(config.windowSecs - 10, 5) * 1000;
-  scheduleExpiryCheck();
-}
-
-function scheduleExpiryCheck() {
-  if (phase.kind !== 'offer' && phase.kind !== 'remembering') return;
-  clearTimeout(expiryTimer);
-  expiryTimer = setTimeout(checkExpiry, Math.max(phase.data.expiryAt - Date.now(), 0) + 20);
-}
-
-function checkExpiry() {
-  if (phase.kind === 'remembering') {
-    // Never expire mid-ceremony or mid-POST; look again shortly.
-    expiryTimer = setTimeout(checkExpiry, 1000);
-    return;
+  switch (request.identity.kind) {
+    case 'pairing-any':
+      break;
+    case 'pairing-credential':
+    case 'pinned':
+      publicKey.allowCredentials = [{ type: 'public-key', id: request.identity.credentialId }];
+      break;
   }
-  if (phase.kind !== 'offer') return;
-  if (Date.now() >= phase.data.expiryAt) {
-    expireOffer(true);
-  } else {
-    scheduleExpiryCheck();
+  const credential = await navigator.credentials.get({ publicKey, signal });
+  let credentialId;
+  let prfFirst;
+  let identitySeed;
+  try {
+    const results = credential?.getClientExtensionResults?.()?.prf?.results;
+    credentialId = credential?.rawId ? new Uint8Array(credential.rawId) : new Uint8Array();
+    prfFirst = results?.first ? new Uint8Array(results.first) : new Uint8Array();
+    identitySeed = results?.second ? new Uint8Array(results.second) : new Uint8Array();
+  } catch {
+    throw new PasskeyPrfUnavailableError();
   }
-}
-
-/** @param {boolean} releaseCli post the done envelope so the terminal frees
- * up as this guidance renders (skipped when the CLI already 410'd). */
-function expireOffer(releaseCli) {
-  if (phase.kind !== 'offer' && phase.kind !== 'remembering') return;
-  const { doneEnvelope } = phase.data;
-  phase = { kind: 'finished' };
-  document.title = 'keytap: finished';
-  $('offer').hidden = true;
-  if (releaseCli && doneEnvelope) {
-    post(doneEnvelope).catch(() => {});
+  if (credentialId.length < 1 || credentialId.length > 1024
+      || prfFirst.length !== 32 || identitySeed.length !== 32) {
+    prfFirst.fill(0);
+    identitySeed.fill(0);
+    throw new PasskeyPrfUnavailableError();
   }
-  const name = config.keyName;
-  alertUser(
-    'That machine has finished waiting, so this page can no longer set it up. Nothing was stored. To remember ',
-    { code: name }, ' there, run ', { code: `keytap remember ${name}` }, ' in that terminal.'
-  );
-  $('alert').focus();
-}
-
-// ─── Offer flow ───
-
-function humanDuration(secs) {
-  return secs < 90 ? `about ${secs} seconds` : `about ${Math.round(secs / 60)} minutes`;
-}
-
-function setOfferButtonsDisabled(disabled) {
-  for (const btn of [$('remember-btn'), $('done-btn')]) {
-    btn.setAttribute('aria-disabled', disabled ? 'true' : 'false');
+  let identity;
+  try {
+    identity = await createNearbyIdentityProof({
+      binding,
+      challenge: request.challenge,
+      credentialId,
+      prfFirst,
+      keyName: request.keyName,
+      disposition,
+    }, identitySeed, deriveEd25519PublicKey);
+  } catch (error) {
+    prfFirst.fill(0);
+    throw error;
+  } finally {
+    identitySeed.fill(0);
   }
+  return { credentialId, prfFirst, identity };
 }
 
-function enterOffer(firstResult) {
-  const name = config.keyName;
-  render($('offer-body'),
-    'That machine can keep ', { code: name }, ', so keytap stops prompting for it until ',
-    { code: `keytap forget ${name}` }, '. Confirming takes one more passkey check.'
-  );
-  $('offer-hint').textContent =
-    `This offer ends when that machine stops waiting, in ${humanDuration(config.windowSecs)}. Don’t remember stores nothing.`;
-  setOfferButtonsDisabled(false);
-  $('offer').hidden = false;
-  say('Sent. Your CLI has the key.');
-  $('offer-heading').focus();
-  phase = {
-    kind: 'offer',
-    data: {
-      firstResult,
-      expiryAt: 0,
-      pendingEnvelope: encryptEnvelope({ type: 'remember-pending' }),
-      doneEnvelope: null,
+function assertionResultMessage(request, result, disposition) {
+  const message = {
+    type: request.identity.kind === 'pinned' ? 'assertion-result' : 'paired-assertion-result',
+    credentialId: encodeBase64URL(result.credentialId),
+    prfFirst: encodeBase64URL(result.prfFirst),
+    identity: {
+      algorithm: 'ed25519',
+      publicKey: encodeBase64URL(result.identity.publicKey),
+      signature: encodeBase64URL(result.identity.signature),
     },
+    disposition,
   };
-  armExpiry();
-  // The beacon cannot run async crypto inside pagehide, and the pending
-  // probe should not make the user wait; its envelope was built above.
-  encryptEnvelope({ type: 'done' }).then(envelope => {
-    if (phase.kind === 'offer' || phase.kind === 'remembering') phase.data.doneEnvelope = envelope;
-  }, () => {});
+  result.prfFirst.fill(0);
+  return message;
 }
 
-async function onRememberTap() {
-  if (phase.kind !== 'offer') return;
-  const data = phase.data;
-  phase = { kind: 'remembering', step: 'probe', data };
-  setOfferButtonsDisabled(true);
+function isPasskeyCancellation(error) {
+  return error?.name === 'NotAllowedError'
+    || error?.name === 'AbortError'
+    || error?.message === 'cancelled';
+}
 
-  // Liveness probe before any gesture is spent: a dead session becomes
-  // guidance here, never a wasted Face ID.
-  const probeStarted = performance.now();
-  let resp;
+export function classifyCreatedCredential(credential) {
   try {
-    resp = await post(await data.pendingEnvelope, 4000);
+    const credentialId = credential?.rawId
+      ? new Uint8Array(credential.rawId)
+      : new Uint8Array();
+    return credentialId.length >= 1 && credentialId.length <= 1024
+      ? { kind: 'identified', credentialId }
+      : { kind: 'malformed' };
   } catch {
-    phase = { kind: 'offer', data };
-    setOfferButtonsDisabled(false);
-    alertUser("Couldn't reach the relay. Nothing was stored. Tap Remember on that machine to try again.");
-    $('remember-btn').focus();
-    return;
-  }
-  const probeMs = performance.now() - probeStarted;
-  if (resp.status === 410) {
-    expireOffer(false);
-    return;
-  }
-  if (!resp.ok) {
-    phase = { kind: 'offer', data };
-    setOfferButtonsDisabled(false);
-    alertUser("Couldn't reach the relay. Nothing was stored. Tap Remember on that machine to try again.");
-    $('remember-btn').focus();
-    return;
-  }
-
-  phase = { kind: 'remembering', step: 'ceremony', data };
-  say('Confirming with your passkey…');
-  document.title = 'keytap: approve';
-  const ceremonyStarted = performance.now();
-  let second;
-  try {
-    second = await runAssertion(data.firstResult.rawId);
-  } catch (e) {
-    phase = { kind: 'offer', data };
-    setOfferButtonsDisabled(false);
-    document.title = 'keytap: sent';
-    if (isCancel(e) && performance.now() - ceremonyStarted < 200 && probeMs > 2000) {
-      // The prompt never opened: the slow probe outlived the tap's
-      // transient activation. Not a user decision.
-      say('The passkey prompt didn’t open. Tap Remember on that machine to try again.');
-    } else if (isCancel(e)) {
-      say('Passkey check cancelled. The key was already sent; nothing was stored.');
-    } else {
-      console.error(e);
-      alertUser(e.message);
-    }
-    $('remember-btn').focus();
-    return;
-  }
-
-  // The sheet is pinned to the first credential, so a mismatch means a
-  // broken authenticator UI; refuse locally, nothing leaves the page.
-  if (encodeBase64URL(second.credential.rawId) !== data.firstResult.credentialIdB64
-      || encodeBase64URL(second.prfFirst) !== data.firstResult.prfFirstB64) {
-    phase = { kind: 'offer', data };
-    setOfferButtonsDisabled(false);
-    document.title = 'keytap: sent';
-    alertUser('That approval used a different passkey, so nothing was sent. Try again with the passkey that just derived the key.');
-    $('remember-btn').focus();
-    return;
-  }
-
-  say('Encrypting and sending…');
-  const envelope = await encryptEnvelope({
-    type: 'assert-success',
-    credentialId: data.firstResult.credentialIdB64,
-    prfFirst: data.firstResult.prfFirstB64,
-    remember: true,
-  });
-  phase = { kind: 'remember-posting', envelope };
-  await postRemember(envelope);
-}
-
-async function postRemember(envelope) {
-  let resp;
-  try {
-    resp = await post(envelope);
-  } catch {
-    phase = { kind: 'remember-retry', envelope };
-    alertUser("Couldn't reach the relay. Nothing was stored. Tap Try again to resend.");
-    const btn = $('remember-btn');
-    btn.textContent = 'Try again';
-    btn.setAttribute('aria-disabled', 'false');
-    btn.focus();
-    return;
-  }
-  phase = { kind: 'finished' };
-  $('offer').hidden = true;
-  const name = config.keyName;
-  if (resp.status === 410) {
-    document.title = 'keytap: finished';
-    alertUser(
-      'Your passkey check succeeded, but that machine had already finished waiting, so nothing was sent or stored. To remember ',
-      { code: name }, ' there, run ', { code: `keytap remember ${name}` }, ' in that terminal.'
-    );
-    $('alert').focus();
-    return;
-  }
-  document.title = 'keytap: remembered';
-  setMarker('remembered');
-  say('Remember request sent. The terminal on that machine confirms where the key was stored. You can close this page.');
-  $('status').focus();
-}
-
-function onDoneTap() {
-  if (phase.kind !== 'offer') return;
-  const { doneEnvelope } = phase.data;
-  phase = { kind: 'finished' };
-  document.title = 'keytap: finished';
-  $('offer').hidden = true;
-  if (doneEnvelope) {
-    // 410 just means the CLI already left; not an error.
-    post(doneEnvelope).catch(() => {});
-  }
-  say('Done. You can close this page.');
-  $('status').focus();
-}
-
-// Retry that resends the held remember envelope, never a new ceremony.
-function onRememberButton() {
-  if (phase.kind === 'remember-retry') {
-    const { envelope } = phase;
-    $('remember-btn').setAttribute('aria-disabled', 'true');
-    phase = { kind: 'remember-posting', envelope };
-    say('Encrypting and sending…');
-    postRemember(envelope);
-  } else {
-    onRememberTap();
+    return { kind: 'malformed' };
   }
 }
 
-// ─── First ceremony (assert) ───
-
-function enterSent(firstResult) {
-  document.title = 'keytap: sent';
-  $('summary').hidden = true;
-  $('explainer').hidden = true;
-  $('details').hidden = true;
-  $('start').remove();
-  if (config.operation === 'register') {
-    // No marker: reloading a spent register session has nothing to finish.
-    $('title').textContent = 'Passkey created';
-    say('Sent to your CLI. You can close this page.');
-    phase = { kind: 'finished' };
-    return;
-  }
-  $('title').textContent = 'Key sent';
-  setMarker('sent');
-  if (config.windowSecs > 0) {
-    enterOffer(firstResult);
-  } else {
-    say('Sent. You can close this page.');
-    phase = { kind: 'finished' };
-  }
+function registrationCreatedUnsavedOutcome() {
+  return {
+    kind: 'registration-created-unsaved',
+    title: 'Passkey created; setup incomplete',
+    message: 'A passkey may have been created on this device, but the CLI did not save it. Check the terminal and this device’s passkey settings; remove the unused passkey before retrying if necessary.',
+  };
 }
 
-async function postFirst(envelope, firstResult) {
-  say('Encrypting and sending…');
-  let resp;
-  try {
-    resp = await post(envelope);
-  } catch {
-    phase = firstResult
-      ? { kind: 'ready', action: 'resend-assert', envelope, firstResult }
-      : { kind: 'ready', action: 'resend-register', envelope };
-    const btn = $('start');
-    btn.textContent = 'Try again';
-    btn.disabled = false;
-    alertUser("Couldn't reach the relay. Nothing was sent. Tap Try again to resend.");
-    return;
-  }
-  if (resp.status === 410) {
-    phase = { kind: 'finished' };
-    $('start').remove();
-    alertUser('Your CLI stopped waiting. Run the command again and scan the fresh code.');
-    return;
-  }
-  if (!resp.ok) {
-    phase = firstResult
-      ? { kind: 'ready', action: 'resend-assert', envelope, firstResult }
-      : { kind: 'ready', action: 'resend-register', envelope };
-    const btn = $('start');
-    btn.textContent = 'Try again';
-    btn.disabled = false;
-    alertUser("Couldn't reach the relay. Nothing was sent. Tap Try again to resend.");
-    return;
-  }
-  enterSent(firstResult);
+function registrationIndeterminateOutcome() {
+  return {
+    kind: 'registration-indeterminate',
+    title: 'Setup status unknown',
+    message: 'The passkey was created and its result was sent, but this page could not confirm whether the CLI saved it. Check the terminal before retrying.',
+  };
 }
 
-async function runFirst() {
-  const btn = $('start');
-  phase = { kind: 'first-busy' };
-  btn.disabled = true;
-  document.title = 'keytap: approve';
-
-  let envelope;
-  let firstResult;
-  try {
-    if (config.operation === 'register') {
-      say('Waiting for passkey creation…');
-      const credential = await runRegister();
-      envelope = await encryptEnvelope({
-        type: 'register-success',
-        credentialId: encodeBase64URL(credential.rawId),
-      });
-    } else {
-      say('Waiting for passkey approval…');
-      const { credential, prfFirst } = await runAssertion(null);
-      firstResult = {
-        rawId: credential.rawId,
-        credentialIdB64: encodeBase64URL(credential.rawId),
-        prfFirstB64: encodeBase64URL(prfFirst),
-      };
-      const payload = {
-        type: 'assert-success',
-        credentialId: firstResult.credentialIdB64,
-        prfFirst: firstResult.prfFirstB64,
-      };
-      // Announce follow-up capability only to a CLI that lingers for it.
-      if (config.windowSecs > 0) payload.follow = true;
-      envelope = await encryptEnvelope(payload);
-    }
-  } catch (e) {
-    phase = { kind: 'ready', action: 'run' };
-    btn.disabled = false;
-    const label = config.operation === 'register' ? 'Create passkey' : 'Approve request';
-    btn.textContent = label;
-    if (isCancel(e)) {
-      say(`The passkey prompt was cancelled or didn’t open. Nothing was sent. Tap ${label} to try again.`);
-    } else {
-      console.error(e);
-      alertUser(e.message);
-    }
-    return;
-  }
-
-  await postFirst(envelope, firstResult);
+function assertionIndeterminateOutcome() {
+  return {
+    kind: 'assertion-indeterminate',
+    title: 'Approval status unknown',
+    message: 'The approved key result was sent, but this page could not confirm whether the CLI accepted it. Check the terminal before retrying.',
+  };
 }
 
-// ─── Terminal states reached without a live session ───
-
-function renderFinished(marker) {
-  $('title').textContent = 'Key sent';
-  document.title = 'keytap: finished';
-  $('summary').hidden = true;
-  $('explainer').hidden = true;
-  $('details').hidden = true;
-  $('start')?.remove();
-  $('offer').hidden = true;
-  phase = { kind: 'finished' };
-  if (marker && marker.state === 'remembered') {
-    document.title = 'keytap: remembered';
-    say('Remember request sent. The terminal on that machine confirms where the key was stored. You can close this page.');
-  } else {
-    const name = marker?.name || 'default';
-    say(
-      'Finished on this page. To remember ', { code: name },
-      ' on that machine, run ', { code: `keytap remember ${name}` }, ' there.'
-    );
-  }
-  $('status').focus();
+function expiredOutcome() {
+  return {
+    kind: 'expired',
+    title: 'Request expired',
+    message: 'This request expired when you left the page. Run the keytap command again and open the fresh approval link.',
+  };
 }
 
-// ─── Lifecycle ───
-
-window.addEventListener('pagehide', () => {
-  // Once the second ceremony starts, silence: a done racing the remember
-  // follow-up could discard an explicitly confirmed choice.
-  const canRelease = phase.kind === 'offer'
-    || (phase.kind === 'remembering' && phase.step === 'probe');
-  if (canRelease && phase.data.doneEnvelope) {
-    const { doneEnvelope } = phase.data;
-    phase = { kind: 'released' };
-    // A plain string rides as text/plain, the only content type beacons
-    // can send cross-origin without a preflight.
-    navigator.sendBeacon(`${RELAY_URL}/relay/${sessionId}`, doneEnvelope);
-  }
-});
-
-window.addEventListener('pageshow', e => {
-  if (e.persisted && phase.kind === 'released') {
-    renderFinished(getMarker(sessionId));
-  }
-});
-
-document.addEventListener('visibilitychange', () => {
-  if (!document.hidden && (phase.kind === 'offer' || phase.kind === 'remembering')) scheduleExpiryCheck();
-});
-
-// ─── Entry ───
-
-async function main() {
-  let marker = null;
-  try {
-    config = await fetchConfig();
-  } catch (e) {
-    phase = { kind: 'finished' };
-    $('start').remove();
-    $('title').textContent = 'keytap';
-    $('explainer').hidden = true;
-    $('details').hidden = true;
-    if (e && e.kind === 'gone') {
-      sessionId = e.sid;
-      marker = getMarker(e.sid);
-      if (marker) {
-        renderFinished(marker);
-        return;
+export function suspendPhaseForPagehide(currentPhase) {
+  switch (currentPhase.kind) {
+    case 'registration-created':
+      return { kind: 'suspended', work: { kind: 'registration-created' } };
+    case 'sent':
+      switch (currentPhase.result.kind) {
+        case 'registration':
+          return { kind: 'suspended', work: { kind: 'registration-sent' } };
+        case 'assertion':
+          return { kind: 'suspended', work: { kind: 'assertion-sent' } };
       }
-      alertUser('This code was already used or has expired. Run the keytap command again for a fresh one.');
-    } else if (e && e.kind === 'network') {
-      alertUser("Couldn't reach the relay. Check the connection and reload this page.");
-    } else {
-      alertUser('No session in URL.');
-    }
-    return;
+      break;
+    case 'terminal':
+      return { kind: 'suspended', work: { kind: 'terminal', outcome: currentPhase.outcome } };
+    case 'suspended':
+      return currentPhase;
+    case 'boot':
+    case 'connecting':
+    case 'sas':
+    case 'choice':
+    case 'ceremony':
+    case 'expired':
+      return { kind: 'suspended', work: { kind: 'pre-result' } };
   }
-  sessionId = config.sessionId;
-  $('host-public-key').textContent = config.cliPubKey;
-  $('host-key').hidden = false;
-
-  const isRegister = config.operation === 'register';
-  $('title').textContent = isRegister ? 'Create your keytap passkey' : 'Approve this key request';
-  if (isRegister) {
-    $('summary').textContent = 'Create the passkey once, then keytap can recover the same keys anywhere.';
-    $('explainer').textContent = 'No account is needed. Your passkey stays in your password manager.';
-  } else {
-    render($('summary'), 'Your CLI requested key: ', { code: config.keyName });
-  }
-
-  $('remember-btn').addEventListener('click', onRememberButton);
-  $('done-btn').addEventListener('click', onDoneTap);
-
-  const btn = $('start');
-  btn.textContent = isRegister ? 'Create passkey' : 'Approve request';
-  btn.addEventListener('click', () => {
-    if (phase.kind === 'ready' && phase.action === 'resend-register') {
-      const { envelope } = phase;
-      phase = { kind: 'first-busy' };
-      btn.disabled = true;
-      postFirst(envelope, null);
-    } else if (phase.kind === 'ready' && phase.action === 'resend-assert') {
-      const { envelope, firstResult } = phase;
-      phase = { kind: 'first-busy' };
-      btn.disabled = true;
-      postFirst(envelope, firstResult);
-    } else if (phase.kind === 'ready' && phase.action === 'run') {
-      runFirst();
-    }
-  });
-
-  if (isRegister) {
-    say('Ready.');
-  } else {
-    say('Compare the host public key with your terminal, then approve the request.');
-  }
-  phase = { kind: 'ready', action: 'run' };
-  btn.disabled = false;
+  throw new ProtocolError('invalid nearby lifecycle phase');
 }
 
-// A current QR carries only its one-time CLI public key in `#k`. Keep the
-// deployed `#s` path intact so the previous CLI still completes its
-// X25519 relay flow. `#k` is a hard protocol discriminator: signature failure
-// never falls back to the legacy or symmetric-capability protocol.
-const entryParams = new URLSearchParams(location.hash.startsWith('#') ? location.hash.slice(1) : '');
-if (entryParams.has('k')) {
-  import('./nearby-v2.js').then(module => module.main()).catch(error => {
-    console.error(error);
-    history.replaceState(null, '', location.pathname + location.search);
-    phase = { kind: 'finished' };
-    $('start')?.remove();
-    $('title').textContent = 'keytap';
-    $('explainer').hidden = true;
-    $('details').hidden = true;
-    alertUser('Could not load the private connection. Reload this page, or run the command again and scan the fresh code.');
+export function outcomeForSuspendedPhase(suspendedPhase) {
+  if (suspendedPhase.kind !== 'suspended') {
+    throw new ProtocolError('invalid suspended nearby phase');
+  }
+  switch (suspendedPhase.work.kind) {
+    case 'pre-result':
+      return expiredOutcome();
+    case 'registration-created':
+      return registrationCreatedUnsavedOutcome();
+    case 'registration-sent':
+      return registrationIndeterminateOutcome();
+    case 'assertion-sent':
+      return assertionIndeterminateOutcome();
+    case 'terminal':
+      return suspendedPhase.work.outcome;
+  }
+  throw new ProtocolError('invalid suspended nearby work');
+}
+
+const $ = id => document.getElementById(id);
+
+function appendParts(element, parts) {
+  for (const part of parts) {
+    if (typeof part === 'string') {
+      element.append(part);
+    } else {
+      const code = document.createElement('code');
+      code.textContent = part.code;
+      element.append(code);
+    }
+  }
+  return element;
+}
+
+function paragraph(...parts) {
+  return appendParts(document.createElement('p'), parts);
+}
+
+function action(label, secondary = false) {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = secondary ? 'action action-secondary' : 'action';
+  button.textContent = label;
+  return button;
+}
+
+function setScreen(title, summary, ...content) {
+  document.title = `keytap: ${title.toLowerCase()}`;
+  $('title').textContent = title;
+  $('summary').textContent = summary;
+  $('content').replaceChildren(...content);
+  $('status').textContent = '';
+  $('alert').textContent = '';
+  $('details').hidden = false;
+  $('title').focus();
+}
+
+function setStatus(...parts) {
+  $('alert').textContent = '';
+  $('status').replaceChildren();
+  appendParts($('status'), parts);
+}
+
+function waitForChoice(choices, signal) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const listeners = [];
+    const finish = operation => value => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener('abort', onAbort);
+      for (const [button, listener] of listeners) button.removeEventListener('click', listener);
+      operation(value);
+    };
+    const accept = finish(resolve);
+    const decline = finish(reject);
+    const onAbort = () => decline(abortReason(signal));
+    signal.addEventListener('abort', onAbort, { once: true });
+    for (const [button, value] of choices) {
+      const listener = () => accept(value);
+      listeners.push([button, listener]);
+      button.addEventListener('click', listener);
+    }
+    if (signal.aborted) onAbort();
   });
-} else {
-  $('details').querySelector('p').textContent = 'This older-client compatibility flow protects key material with one-time X25519 and AES-256-GCM, but its relay supplies the CLI public key and must therefore be trusted not to substitute that key. Upgrade keytap to use the QR-authenticated WebRTC flow. Remembering a key requires a second approval.';
-  main();
+}
+
+async function confirmPairingWords(session, digest, signal) {
+  const words = await loadSasWords(signal);
+  const phrase = sasPhrase(digest, words);
+  const match = action('Words match — continue');
+  const reject = action('They do not match', true);
+  const output = document.createElement('output');
+  output.className = 'pairing-words';
+  output.setAttribute('aria-label', 'Pairing words');
+  output.textContent = phrase;
+  setScreen(
+    'Compare pairing words',
+    'Compare both words, in order, with the words in the terminal that displayed this approval link.',
+    output,
+    paragraph('Only continue when both words match exactly. The passkey prompt will not open until this device and the CLI have both confirmed them.'),
+    match,
+    reject,
+  );
+  setStatus('Waiting for your comparison…');
+  const decision = await waitForChoice([[match, 'confirmed'], [reject, 'rejected']], signal);
+  if (decision === 'rejected') {
+    await session.send({ type: 'sas-approver-rejected' });
+    throw new LocalPairingRejectionError();
+  }
+  match.disabled = true;
+  reject.disabled = true;
+  setStatus('Words confirmed here. Confirm them in the terminal…');
+  await session.send({ type: 'sas-approver-confirmed' });
+  await nextCliMessage(session, 'sas-cli-confirmed');
+}
+
+async function runSas(session, sessionBinding, request, requestFrameBytes, signal) {
+  const context = await createSasContext(sessionBinding, requestFrameBytes);
+  const commitMessage = await nextCliMessage(session, 'sas-cli-commit');
+  const cliCommitment = decodeBase64URL(commitMessage.commitment);
+  if (cliCommitment.length !== 32) throw new ProtocolError('invalid CLI SAS commitment');
+  const approverNonce = crypto.getRandomValues(new Uint8Array(32));
+  const approverCommitment = await createSasCommitment('approver', context, approverNonce);
+  await session.send({
+    type: 'sas-approver-commit',
+    commitment: encodeBase64URL(approverCommitment),
+  });
+  const reveal = await nextCliMessage(session, 'sas-cli-reveal');
+  const cliNonce = decodeBase64URL(reveal.nonce);
+  if (cliNonce.length !== 32
+      || !await verifySasCommitment('cli', context, cliNonce, cliCommitment)) {
+    await session.send({ type: 'sas-approver-rejected' });
+    throw new ProtocolError('the CLI did not open its pairing commitment');
+  }
+  await session.send({ type: 'sas-approver-reveal', nonce: encodeBase64URL(approverNonce) });
+  const digest = await createSasDigest(
+    context,
+    cliCommitment,
+    approverCommitment,
+    cliNonce,
+    approverNonce,
+  );
+  cliNonce.fill(0);
+  approverNonce.fill(0);
+  phase = { kind: 'sas', session, request, digest };
+  await confirmPairingWords(session, digest, signal);
+  return digest;
+}
+
+async function chooseDisposition(session, request, binding, signal, notice = '') {
+  const once = action('Use once');
+  const remember = action(request.storage === 'remember' ? 'Approve and remember' : 'Use and remember', true);
+  const controls = request.storage === 'remember' ? [remember] : [once, remember];
+  setScreen(
+    request.storage === 'remember' ? 'Remember this key?' : 'Use once or remember?',
+    `Your CLI requested key: ${request.keyName}`,
+    paragraph(
+      request.storage === 'remember'
+        ? 'Store this derived key on that machine.'
+        : 'Use it only for this command, or store it on that machine for later commands.',
+    ),
+    paragraph('Remove a stored key later with ', { code: `keytap forget ${request.keyName}` }, '.'),
+    ...controls,
+  );
+  if (notice) setStatus(notice);
+  phase = { kind: 'choice', session, request, binding };
+  const choices = request.storage === 'remember'
+    ? [[remember, 'remember']]
+    : [[once, 'once'], [remember, 'remember']];
+  return waitForChoice(choices, signal);
+}
+
+async function completeRegistration(session, request, sasDigest, signal) {
+  phase = { kind: 'ceremony', session, operation: { kind: 'registration', request } };
+  setScreen(
+    'Create your passkey',
+    'The pairing words matched on both devices.',
+    paragraph('Complete the passkey prompt. Some devices may ask you to confirm the new passkey once more to finish pairing.'),
+  );
+  setStatus('Creating your passkey…');
+  const credential = await runRegistration(request, signal);
+  const created = classifyCreatedCredential(credential);
+  phase = { kind: 'registration-created', session, credential: created };
+  if (created.kind === 'malformed') {
+    throw new Error('Passkey creation returned no credential identifier.');
+  }
+  setStatus('Finishing the trusted passkey pairing…');
+  const identitySeed = await registrationIdentitySeed(
+    credential,
+    request,
+    created.credentialId,
+    signal,
+  );
+  let identity;
+  try {
+    identity = await createRegistrationIdentityProof({
+      sasDigest,
+      challenge: request.challenge,
+      credentialId: created.credentialId,
+    }, identitySeed, deriveEd25519PublicKey);
+  } finally {
+    identitySeed.fill(0);
+  }
+  await session.send({
+    type: 'paired-registration-result',
+    credentialId: encodeBase64URL(created.credentialId),
+    identity: {
+      algorithm: 'ed25519',
+      publicKey: encodeBase64URL(identity.publicKey),
+      signature: encodeBase64URL(identity.signature),
+    },
+  });
+  phase = { kind: 'sent', session, result: { kind: 'registration' } };
+  setStatus('Passkey created. Waiting for the CLI to save the trusted credential…');
+  await nextCliMessage(session, 'initial-accepted');
+  return {
+    kind: 'registered',
+    title: 'Passkey paired',
+    message: 'The CLI saved this passkey as its trusted nearby credential. You can close this page.',
+  };
+}
+
+async function completeAssertion(session, request, binding, signal) {
+  let notice = '';
+  for (;;) {
+    const disposition = await chooseDisposition(session, request, binding, signal, notice);
+    phase = {
+      kind: 'ceremony',
+      session,
+      operation: { kind: 'assertion', request, binding, disposition },
+    };
+    setScreen(
+      'Approve this key request',
+      `Approve ${request.keyName} with your passkey.`,
+      paragraph('The derived key will be sent only through the end-to-end encrypted relay.'),
+    );
+    setStatus('Waiting for passkey approval…');
+    let result;
+    try {
+      result = await runAssertion(request, binding, disposition, signal);
+    } catch (error) {
+      if (!isPasskeyCancellation(error) || signal.aborted) throw error;
+      notice = 'The passkey prompt was cancelled or did not open. Nothing was sent; choose again to retry.';
+      continue;
+    }
+    const message = assertionResultMessage(request, result, disposition);
+    await session.send(message);
+    phase = {
+      kind: 'sent',
+      session,
+      result: { kind: 'assertion', keyName: request.keyName, disposition },
+    };
+    setStatus('Approved result sent. Waiting for the CLI to verify it…');
+    const acknowledgement = await nextCliMessage(session, 'assertion-accepted');
+    switch (acknowledgement.storage) {
+      case 'once':
+        if (disposition !== 'once') throw new ProtocolError('CLI acknowledged the wrong storage disposition');
+        return {
+          kind: 'once',
+          title: 'Key sent',
+          message: 'The key was accepted for this command and was not stored on that machine. You can close this page.',
+        };
+      case 'stored':
+        if (disposition !== 'remember') throw new ProtocolError('CLI acknowledged the wrong storage disposition');
+        return {
+          kind: 'stored',
+          title: 'Key remembered',
+          message: `The key was accepted and stored on that machine. Remove it later with keytap forget ${request.keyName}.`,
+        };
+      case 'unavailable':
+        if (disposition !== 'remember') throw new ProtocolError('CLI acknowledged the wrong storage disposition');
+        return {
+          kind: 'storage-unavailable',
+          title: 'Could not remember key',
+          message: 'The CLI received the approved key but could not confirm that it was stored. Check the terminal before retrying.',
+        };
+    }
+  }
+}
+
+export function failureOutcome(error, currentPhase) {
+  if (error instanceof CompletedElsewhereError) {
+    return {
+      kind: 'completed-elsewhere',
+      title: 'Approved on the Mac',
+      message: 'The passkey approval on the Mac completed first, so this device’s approval was not used. You can close this page.',
+    };
+  }
+  if (error instanceof LocalPairingRejectionError || error instanceof PairingRejectedError) {
+    return {
+      kind: 'pairing-rejected',
+      title: 'Pairing cancelled',
+      message: 'The pairing words were not confirmed on both devices. No passkey prompt opened and no key was accepted.',
+    };
+  }
+  if (error instanceof PasskeyPrfUnavailableError) {
+    if (currentPhase.kind === 'registration-created') {
+      return registrationCreatedUnsavedOutcome();
+    }
+    return {
+      kind: 'capability-unavailable',
+      title: 'Passkey not supported here',
+      message: 'This browser and passkey did not provide the two PRF outputs required for nearby approval. No key result was sent. Try a current browser or another PRF-capable passkey device.',
+    };
+  }
+  if (error instanceof IdentityProofUnavailableError) {
+    if (currentPhase.kind === 'registration-created') {
+      return registrationCreatedUnsavedOutcome();
+    }
+    return {
+      kind: 'capability-unavailable',
+      title: 'Browser not supported',
+      message: 'This browser could not create the passkey identity proof required for nearby approval. No key result was sent. Try a current browser on another device.',
+    };
+  }
+  if (error instanceof InitialRejectionError) {
+    if (error.reason === 'identity-store-unavailable') {
+      return {
+        kind: 'identity-store-unavailable',
+        title: 'Could not save trusted identity',
+        message: 'The CLI received the passkey result but could not durably save or access its trusted identity. Check the terminal before retrying.',
+      };
+    }
+    return {
+      kind: 'identity-rejected',
+      title: 'Passkey identity rejected',
+      message: 'The passkey identity did not match the identity trusted by the CLI, so no key was accepted.',
+    };
+  }
+  if (error instanceof InitialIndeterminateError) {
+    return {
+      kind: 'identity-indeterminate',
+      title: 'Pairing status unknown',
+      message: 'The CLI received the result but could not confirm durable identity storage. Check the terminal before retrying.',
+    };
+  }
+  switch (currentPhase.kind) {
+    case 'registration-created':
+      return registrationCreatedUnsavedOutcome();
+    case 'sent':
+      return currentPhase.result.kind === 'registration'
+        ? registrationIndeterminateOutcome()
+        : assertionIndeterminateOutcome();
+    case 'suspended':
+      return outcomeForSuspendedPhase(currentPhase);
+    case 'boot':
+    case 'connecting':
+    case 'sas':
+    case 'choice':
+    case 'ceremony':
+      return {
+        kind: 'failed',
+        title: 'Request failed',
+        message: error instanceof ProtocolError && /CLI key|approval link/.test(error.message)
+          ? 'This approval link is invalid. Run the keytap command again and open the fresh link.'
+          : 'The encrypted request could not be completed. Nothing was sent; run the command again and open the fresh approval link.',
+      };
+    case 'terminal':
+      return currentPhase.outcome;
+    case 'expired':
+      return expiredOutcome();
+  }
+  throw new ProtocolError('invalid nearby lifecycle phase');
+}
+
+function renderTerminal(outcome) {
+  phase = { kind: 'terminal', outcome };
+  document.title = `keytap: ${outcome.title.toLowerCase()}`;
+  $('title').textContent = outcome.title;
+  $('summary').textContent = '';
+  $('content').replaceChildren();
+  $('details').hidden = true;
+  $('status').textContent = '';
+  $('alert').textContent = '';
+  switch (outcome.kind) {
+    case 'registered':
+    case 'once':
+    case 'stored':
+    case 'completed-elsewhere':
+      $('status').textContent = outcome.message;
+      $('status').focus();
+      break;
+    case 'storage-unavailable':
+    case 'pairing-rejected':
+    case 'identity-store-unavailable':
+    case 'identity-rejected':
+    case 'identity-indeterminate':
+    case 'capability-unavailable':
+    case 'registration-created-unsaved':
+    case 'registration-indeterminate':
+    case 'assertion-indeterminate':
+    case 'failed':
+    case 'expired':
+      $('alert').textContent = outcome.message;
+      $('alert').focus();
+      break;
+    default:
+      throw new ProtocolError('invalid nearby terminal outcome');
+  }
+}
+
+export function terminateForPagehide(controller, session) {
+  if (!controller.signal.aborted) {
+    controller.abort(new DOMException('The page was left.', 'AbortError'));
+  }
+  session?.close();
+}
+
+export function handlePageShow(event, currentPhase = phase) {
+  if (!event.persisted) return;
+  if (pageLifetime) terminateForPagehide(pageLifetime, activeSession);
+  const suspended = currentPhase.kind === 'suspended'
+    ? currentPhase
+    : suspendPhaseForPagehide(currentPhase);
+  phase = suspended;
+  renderTerminal(outcomeForSuspendedPhase(suspended));
+}
+
+export async function main() {
+  if (typeof window !== 'undefined' && !isTopLevelContext(window)) return;
+  pageLifetime = new AbortController();
+  phase = { kind: 'connecting' };
+  setScreen(
+    'Connecting to your CLI',
+    'Establishing an end-to-end encrypted relay for this one-time request.',
+    paragraph('The relay can see that two devices connected, but it cannot read or change an accepted request.'),
+  );
+  setStatus('Waiting for your CLI…');
+
+  try {
+    const cliPublicKey = exactCliPublicKeyFromFragment();
+    const established = await openRelay(cliPublicKey, pageLifetime);
+    activeSession = established.session;
+    setStatus('Encrypted relay connected. Waiting for the request…');
+    const requestFrame = await activeSession.nextRaw();
+    const request = parseInitialRequest(requestFrame.value);
+    let outcome;
+    switch (request.kind) {
+      case 'register': {
+        const sasDigest = await runSas(
+          activeSession,
+          established.sessionBinding,
+          request,
+          requestFrame.bytes,
+          pageLifetime.signal,
+        );
+        outcome = await completeRegistration(
+          activeSession,
+          request,
+          sasDigest,
+          pageLifetime.signal,
+        );
+        break;
+      }
+      case 'assert': {
+        const binding = await assertionProofBinding(
+          request.identity,
+          established.sessionBinding,
+          requestFrame.bytes,
+          () => runSas(
+            activeSession,
+            established.sessionBinding,
+            request,
+            requestFrame.bytes,
+            pageLifetime.signal,
+          ),
+        );
+        outcome = await completeAssertion(
+          activeSession,
+          request,
+          binding,
+          pageLifetime.signal,
+        );
+        break;
+      }
+      default:
+        throw new ProtocolError('invalid nearby request');
+    }
+    renderTerminal(outcome);
+    activeSession.close();
+  } catch (error) {
+    if (phase.kind === 'expired' || pageLifetime.signal.reason?.message === 'The page was left.') return;
+    const failure = pageLifetime.signal.aborted && pageLifetime.signal.reason instanceof Error
+      ? pageLifetime.signal.reason
+      : error;
+    const outcome = failureOutcome(failure, phase);
+    renderTerminal(outcome);
+    activeSession?.close();
+  }
+}
+
+if (typeof document !== 'undefined' && typeof window !== 'undefined') {
+  if (revealTopLevelPage(window, document.documentElement)) {
+    window.addEventListener('pagehide', () => {
+      const controller = pageLifetime;
+      const session = activeSession;
+      phase = suspendPhaseForPagehide(phase);
+      if (controller) terminateForPagehide(controller, session);
+    });
+    window.addEventListener('pageshow', handlePageShow);
+    main();
+  }
 }
