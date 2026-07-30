@@ -49,19 +49,26 @@ Run `keytap <COMMAND> --help` for the full details of any command.
 
 ## Install
 
-Download the matching archive from the
-[latest release](https://github.com/jul-sh/keytap/releases/latest). Releases
-support Apple silicon macOS and x86-64 Linux. On macOS, keep `Keytap.app`
-intact and put its `Contents/MacOS/keytap` executable on your `PATH`; on Linux,
-put the `keytap` binary on your `PATH`.
-
-With Nix:
-
 ```bash
-nix profile install github:jul-sh/keytap
+case "$(uname -s)/$(uname -m)" in
+  Darwin/arm64) ASSET='arm64.zip' ;;
+  Linux/x86_64) ASSET='linux-x86_64.zip' ;;
+  *) echo 'Keytap has no release for this platform.' >&2; exit 1 ;;
+esac
+URL=$(curl -fsSL https://api.github.com/repos/jul-sh/keytap/releases/latest \
+  | grep -o '"browser_download_url": *"[^"]*"' | cut -d '"' -f 4 \
+  | grep "$ASSET$") \
+  && curl -fLO "$URL" && mkdir -p ~/.local/bin \
+  && if [ "$(uname -s)" = Darwin ]; then
+       mkdir -p ~/.local/share/keytap && unzip -o keytap-*-arm64.zip -d ~/.local/share/keytap \
+       && ln -sf ~/.local/share/keytap/Keytap.app/Contents/MacOS/keytap ~/.local/bin/keytap
+     else
+       unzip -o keytap-*-linux-x86_64.zip keytap -d ~/.local/bin
+     fi
 ```
 
-To verify a downloaded archive:
+Releases are built in CI with [build attestation](https://docs.github.com/en/actions/security-for-github-actions/using-artifact-attestations).
+To verify a downloaded release was built from this repository:
 
 ```bash
 gh attestation verify keytap-*.zip -R jul-sh/keytap
