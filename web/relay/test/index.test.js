@@ -147,6 +147,8 @@ test("Worker routes only the exact canonical room WebSocket URL", async () => {
   assert.deepEqual(rateLimitKeys, ["unattributed"]);
 
   for (const url of [
+    "https://relay.test/relay/legacy-session",
+    `https://relay.test/v2/signal/${ROOM_ID}`,
     `http://relay.test/room/${ROOM_ID}?role=cli`,
     `https://relay.test/room/${ROOM_ID}`,
     `https://relay.test/room/${ROOM_ID}/?role=cli`,

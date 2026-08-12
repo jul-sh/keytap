@@ -407,6 +407,8 @@ test('fragment parser accepts only the exact canonical key and erases it first',
     assert.deepEqual(exactCliPublicKeyFromFragment(), cliPublic);
     assert.deepEqual(replacements, [[null, '', '/nearby']]);
     for (const hash of [
+      '#s=legacy-session',
+      `#k=${encoded}`,
       `#key=${encoded}&extra=1`,
       `#key=%${encoded.charCodeAt(0).toString(16)}${encoded.slice(1)}`,
       `#key=${encoded}&`,
@@ -416,7 +418,7 @@ test('fragment parser accepts only the exact canonical key and erases it first',
       globalThis.location.hash = hash;
       assert.throws(() => exactCliPublicKeyFromFragment(), /approval link|CLI key/i);
     }
-    assert.equal(replacements.length, 6);
+    assert.equal(replacements.length, 8);
   } finally {
     if (previousLocation === undefined) delete globalThis.location;
     else globalThis.location = previousLocation;
