@@ -219,7 +219,7 @@ const io = {
 };
 
 function printSuggestions() {
-  io.hint('try it — tap a command or type:');
+  io.hint('try it; tap a command or type:');
   for (const { cmd, note } of SUGGESTIONS) {
     const div = document.createElement('div');
     div.className = 'ln hint suggestion';
@@ -599,14 +599,6 @@ async function main() {
   commands.keytap = createKeytapCommand(ceremony, io);
 
   io.out(`keytap ${cliVersion()} · one passkey becomes reproducible SSH keys, age identities, and app secrets.`);
-  io.out('same passkey + same name = the same key wherever that passkey is available. no derived key material is persisted; the browser keeps only the credential ID used to select the passkey.');
-  writeLinkLine(
-    'this demo shares the CLI parser and key derivation code. machine storage, nearby approval, and CI environment keys require the installed CLI: ',
-    'https://github.com/jul-sh/keytap#install',
-    'here',
-    '.',
-    'ln'
-  );
   io.out('');
   printSuggestions();
   io.out('');

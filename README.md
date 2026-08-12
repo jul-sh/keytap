@@ -10,8 +10,7 @@ keys. Derived keys are not stored unless you choose `remember`.
 > **Pre-release:** Expect breaking changes. Do not make Keytap the only way to
 > recover important secrets.
 
-[Try the web demo](https://keytap.jul.sh). It supports key derivation; nearby
-approval, remembered keys, and CI behavior require the installed CLI.
+[Try the web demo](https://keytap.jul.sh).
 
 <!--HELP:BEGIN-->
 ```
