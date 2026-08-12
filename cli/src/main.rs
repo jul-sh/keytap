@@ -9,7 +9,7 @@ mod nearby_protocol;
 mod nearby_sas;
 mod remember;
 
-use keytap_cli_spec::{Command, Invocation};
+use keytap_cli_spec::{ApprovalMode, Command, Invocation};
 #[cfg(any(target_os = "macos", test))]
 use std::sync::mpsc;
 #[cfg(target_os = "macos")]
@@ -31,7 +31,7 @@ fn main() {
     };
 
     match cli.command {
-        Command::Init { force, nearby } => {
+        Command::Init { force, approval } => {
             guard_ceremony("init", cli.prompt);
             let init_mode = if force {
                 nearby_identity::InitMode::Replace
@@ -43,17 +43,25 @@ fn main() {
                     "could not prepare the local credential record update: {error}"
                 ))
             });
-            let route = registration_route(nearby);
+            let route = registration_route(approval);
             register(pending_init, route);
             remember::after_init();
         }
-        Command::Public { ref name, format } => {
-            with_derived_key(name, cli.prompt, |raw_key| {
+        Command::Public {
+            ref name,
+            format,
+            approval,
+        } => {
+            with_derived_key(name, cli.prompt, approval, |raw_key| {
                 emit_public_key(raw_key, format, name)
             });
         }
-        Command::Reveal { ref name, format } => {
-            with_derived_key(name, cli.prompt, |raw_key| {
+        Command::Reveal {
+            ref name,
+            format,
+            approval,
+        } => {
+            with_derived_key(name, cli.prompt, approval, |raw_key| {
                 emit_private_key(raw_key, format)
             });
         }
@@ -62,15 +70,16 @@ fn main() {
             ref recipients,
             ref recipients_file,
             no_self,
+            approval,
         } => {
-            with_derived_key(name, cli.prompt, |raw_key| {
+            with_derived_key(name, cli.prompt, approval, |raw_key| {
                 encrypt::encrypt(raw_key, recipients, recipients_file, !no_self)
             });
         }
-        Command::Decrypt { ref name } => {
-            with_derived_key(name, cli.prompt, encrypt::decrypt);
+        Command::Decrypt { ref name, approval } => {
+            with_derived_key(name, cli.prompt, approval, encrypt::decrypt);
         }
-        Command::Remember { ref name } => {
+        Command::Remember { ref name, approval } => {
             // Fail fast on invalid names or unavailable local storage before
             // asking either device to perform a ceremony.
             if let Err(e) = keytap_core::prf_salt_for_name(name) {
@@ -78,7 +87,7 @@ fn main() {
             }
             guard_ceremony("remember", cli.prompt);
             let mut target = remember::write_target();
-            let assertion = authenticate(name, nearby::StoragePolicy::Remember);
+            let assertion = authenticate(name, nearby::StoragePolicy::Remember, approval);
             match assertion.into_remember_disposition() {
                 RememberDisposition::StoreLocally(assertion) => {
                     let raw_key = derive_key(&assertion.prf_output);
@@ -101,24 +110,37 @@ fn main() {
     }
 }
 
-/// Resolve the raw key for `name` and hand it to `use_key`, in order: a key
-/// from the environment (`$KEYTAP_KEY_<NAME>`, the CI path), a key remembered
-/// on this machine (under the active passkey root), and finally a passkey
-/// ceremony, deriving on demand. Under `$CI` the ceremony rung is refused
-/// unless `--prompt` asks for it.
+/// Resolve the raw key for `name` and hand it to `use_key`. Automatic approval
+/// checks the environment (`$KEYTAP_KEY_<NAME>`, the CI path), then a key
+/// remembered on this machine, then a fresh ceremony. Nearby-only approval
+/// deliberately skips both non-ceremony sources. Under `$CI`, either fresh
+/// ceremony is refused unless `--prompt` asks for it.
 ///
 /// The named derived key is retained only when the user explicitly chooses to
 /// remember it. First approval may still establish the local credential record
 /// used to constrain later passkey ceremonies.
-fn with_derived_key(name: &str, allow_prompt: bool, use_key: impl FnOnce(&[u8])) {
+fn with_derived_key(
+    name: &str,
+    allow_prompt: bool,
+    approval: ApprovalMode,
+    use_key: impl FnOnce(&[u8]),
+) {
     if let Err(error) = keytap_core::prf_salt_for_name(name) {
         die(&error.to_string());
     }
-    if let Some(raw_key) = env_keys::resolve(name) {
-        return use_key(&raw_key);
-    }
-    if let Some(raw_key) = remember::lookup(name) {
-        return use_key(&raw_key);
+    match approval {
+        ApprovalMode::Automatic => {
+            if let Some(raw_key) = env_keys::resolve(name) {
+                return use_key(&raw_key);
+            }
+            if let Some(raw_key) = remember::lookup(name) {
+                return use_key(&raw_key);
+            }
+        }
+        // An explicit route is also an explicit request for a fresh ceremony:
+        // stored and environment-provided keys do not involve an authenticator
+        // and therefore cannot satisfy `--nearby`.
+        ApprovalMode::NearbyOnly => {}
     }
     if in_ci() && !allow_prompt {
         die(&format!(
@@ -129,7 +151,7 @@ fn with_derived_key(name: &str, allow_prompt: bool, use_key: impl FnOnce(&[u8]))
             var = env_keys::var_name(name)
         ));
     }
-    let assertion = authenticate(name, nearby::StoragePolicy::Choose);
+    let assertion = authenticate(name, nearby::StoragePolicy::Choose, approval);
     let assertion = match assertion {
         Assertion::Native(assertion) | Assertion::Nearby { assertion, .. } => assertion,
     };
@@ -163,11 +185,33 @@ enum RegistrationRoute {
     Nearby,
 }
 
-fn registration_route(nearby_requested: bool) -> RegistrationRoute {
-    if nearby_requested {
-        RegistrationRoute::Nearby
-    } else {
-        default_registration_route()
+fn registration_route(approval: ApprovalMode) -> RegistrationRoute {
+    match approval {
+        ApprovalMode::Automatic => default_registration_route(),
+        ApprovalMode::NearbyOnly => RegistrationRoute::Nearby,
+    }
+}
+
+/// Which assertion machinery an installed build starts for a fresh ceremony.
+#[derive(Clone, Copy)]
+enum AssertionRoute {
+    #[cfg(target_os = "macos")]
+    ConcurrentNativeAndNearby,
+    Nearby,
+}
+
+#[cfg(target_os = "macos")]
+fn assertion_route(approval: ApprovalMode) -> AssertionRoute {
+    match approval {
+        ApprovalMode::Automatic => AssertionRoute::ConcurrentNativeAndNearby,
+        ApprovalMode::NearbyOnly => AssertionRoute::Nearby,
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn assertion_route(approval: ApprovalMode) -> AssertionRoute {
+    match approval {
+        ApprovalMode::Automatic | ApprovalMode::NearbyOnly => AssertionRoute::Nearby,
     }
 }
 
@@ -363,8 +407,19 @@ mod approval_startup_tests {
 
 /// Authenticate with a passkey ceremony.
 #[cfg(target_os = "macos")]
-fn authenticate(name: &str, storage_policy: nearby::StoragePolicy) -> Assertion {
+fn authenticate(
+    name: &str,
+    storage_policy: nearby::StoragePolicy,
+    approval: ApprovalMode,
+) -> Assertion {
     use approval::{ApprovalRace, ApprovalRoute, ClaimOutcome};
+
+    match assertion_route(approval) {
+        AssertionRoute::Nearby => {
+            return Assertion::nearby(nearby::authenticate_nearby(name, storage_policy));
+        }
+        AssertionRoute::ConcurrentNativeAndNearby => {}
+    }
 
     enum NearbyWorkerOutcome {
         Committed(nearby::NearbyAssertion),
@@ -483,8 +538,16 @@ fn authenticate(name: &str, storage_policy: nearby::StoragePolicy) -> Assertion 
 }
 
 #[cfg(not(target_os = "macos"))]
-fn authenticate(name: &str, storage_policy: nearby::StoragePolicy) -> Assertion {
-    Assertion::nearby(nearby::authenticate_nearby(name, storage_policy))
+fn authenticate(
+    name: &str,
+    storage_policy: nearby::StoragePolicy,
+    approval: ApprovalMode,
+) -> Assertion {
+    match assertion_route(approval) {
+        AssertionRoute::Nearby => {
+            Assertion::nearby(nearby::authenticate_nearby(name, storage_policy))
+        }
+    }
 }
 
 fn derive_key(prf_output: &[u8]) -> Zeroizing<Vec<u8>> {
@@ -565,12 +628,13 @@ pub(crate) fn note(line: &str) {
 
 #[cfg(test)]
 mod registration_route_tests {
-    use super::{registration_route, RegistrationRoute};
+    use super::{assertion_route, registration_route, AssertionRoute, RegistrationRoute};
+    use keytap_cli_spec::ApprovalMode;
 
     #[test]
     fn explicit_nearby_registration_always_selects_nearby() {
         assert!(matches!(
-            registration_route(true),
+            registration_route(ApprovalMode::NearbyOnly),
             RegistrationRoute::Nearby
         ));
     }
@@ -579,8 +643,21 @@ mod registration_route_tests {
     #[test]
     fn native_build_defaults_registration_to_native() {
         assert!(matches!(
-            registration_route(false),
+            registration_route(ApprovalMode::Automatic),
             RegistrationRoute::Native
+        ));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn explicit_nearby_assertion_does_not_start_the_native_race() {
+        assert!(matches!(
+            assertion_route(ApprovalMode::NearbyOnly),
+            AssertionRoute::Nearby
+        ));
+        assert!(matches!(
+            assertion_route(ApprovalMode::Automatic),
+            AssertionRoute::ConcurrentNativeAndNearby
         ));
     }
 
@@ -588,8 +665,16 @@ mod registration_route_tests {
     #[test]
     fn nearby_only_build_has_only_the_nearby_registration_route() {
         assert!(matches!(
-            registration_route(false),
+            registration_route(ApprovalMode::Automatic),
             RegistrationRoute::Nearby
         ));
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn nearby_only_build_routes_every_assertion_to_nearby() {
+        for approval in [ApprovalMode::Automatic, ApprovalMode::NearbyOnly] {
+            assert!(matches!(assertion_route(approval), AssertionRoute::Nearby));
+        }
     }
 }

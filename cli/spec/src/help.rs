@@ -79,7 +79,7 @@ pub fn overview(cli: &Command) -> String {
 /// is the built-in opt-in hold (no TTL; OS keychain or a plain file, see
 /// REMEMBER). Agent and variable patterns are bounded alternatives: they
 /// expire, while remembered keys do not.
-pub(crate) const REUSE: &str = "Reusing a key without re-authenticating each time\n  By default keytap derives on demand and does not retain the named derived\n  key. The built-in way to stop repeated prompts is to remember the key on\n  this machine (no expiry \u{2014} see `keytap remember --help` for where it lands\n  and the exact trade-off):\n\n    keytap remember deploy    # one ceremony; 'deploy' stops prompting on this machine\n    keytap forget deploy      # back to prompting (or `keytap forget --all`)\n\n  Prefer a hold that expires on its own? Hand the key to a standard holder:\n\n  SSH (many connections, one prompt, self-expiring):\n    eval \"$(ssh-agent -s)\"\n    keytap reveal ha --as ssh | ssh-add -t 900 -    # 15-min hold, then gone\n\n  A secret reused within one script (bounded to the process):\n    KEY=$(keytap reveal deploy --as hex); use \"$KEY\"; unset KEY\n\n  A secret another tool reads from the OS keychain: remember it, then let the\n  tool call keytap \u{2014} `keytap reveal deploy` no longer prompts once remembered.\n\n  CI and other headless jobs ($CI set): a command that would need a passkey\n  ceremony fails instead (`--prompt` permits that ceremony). It can read the\n  derived key from $KEYTAP_KEY_<NAME> \u{2014} the key name uppercased, everything\n  outside A-Z0-9 flattened to _ (my-app -> KEYTAP_KEY_MY_APP). The value is\n  exactly the age encoding below \u{2014} its checksum makes a mangled secret fail\n  loudly instead of deriving a different key. A set variable beats remembered\n  keys and ceremonies. If it leaks, that name is burned: derivation is\n  deterministic, so retire the name.\n    keytap reveal ci --as age | gh secret set KEYTAP_KEY_CI   # once, locally\n    # job env: KEYTAP_KEY_CI=<that secret>, then `keytap decrypt ci` just works\n\n  Whatever holds the key\u{2014}keychain entry, agent, variable\u{2014}must be trusted accordingly.";
+pub(crate) const REUSE: &str = "Reusing a key without re-authenticating each time\n  By default keytap derives on demand and does not retain the named derived\n  key. The built-in way to stop repeated prompts is to remember the key on\n  this machine (no expiry \u{2014} see `keytap remember --help` for where it lands\n  and the exact trade-off):\n\n    keytap remember deploy    # one ceremony; 'deploy' stops prompting on this machine\n    keytap forget deploy      # back to prompting (or `keytap forget --all`)\n\n  Prefer a hold that expires on its own? Hand the key to a standard holder:\n\n  SSH (many connections, one prompt, self-expiring):\n    eval \"$(ssh-agent -s)\"\n    keytap reveal ha --as ssh | ssh-add -t 900 -    # 15-min hold, then gone\n\n  A secret reused within one script (bounded to the process):\n    KEY=$(keytap reveal deploy --as hex); use \"$KEY\"; unset KEY\n\n  A secret another tool reads from the OS keychain: remember it, then let the\n  tool call keytap \u{2014} `keytap reveal deploy` no longer prompts once remembered.\n\n  CI and other headless jobs ($CI set): a command that would need a passkey\n  ceremony fails instead (`--prompt` permits that ceremony). It can read the\n  derived key from $KEYTAP_KEY_<NAME> \u{2014} the key name uppercased, everything\n  outside A-Z0-9 flattened to _ (my-app -> KEYTAP_KEY_MY_APP). The value is\n  exactly the age encoding below \u{2014} its checksum makes a mangled secret fail\n  loudly instead of deriving a different key. In automatic mode, a set variable\n  beats remembered keys and ceremonies; `--nearby` forces a fresh nearby\n  ceremony instead. If it leaks, that name is burned: derivation is\n  deterministic, so retire the name.\n    keytap reveal ci --as age | gh secret set KEYTAP_KEY_CI   # once, locally\n    # job env: KEYTAP_KEY_CI=<that secret>, then `keytap decrypt ci` just works\n\n  Whatever holds the key\u{2014}keychain entry, agent, variable\u{2014}must be trusted accordingly.";
 
 /// The remembered-keys contract, shown by `keytap remember --help`. States
 /// plainly what is stored, where, for how long, and what the trade-off is, so
@@ -177,7 +177,7 @@ fn build_legend(commands: &[(&Command, String, String)]) -> String {
 
     let lines: Vec<(String, String)> = order
         .into_iter()
-        .map(|key| {
+        .filter_map(|key| {
             // Fold in concrete choices and the default so the reader never has
             // to open a subcommand's help to learn the accepted values.
             let mut desc = help.remove(&key).unwrap_or_default();
@@ -188,7 +188,9 @@ fn build_legend(commands: &[(&Command, String, String)]) -> String {
             if let Some(Some(d)) = default.remove(&key) {
                 desc.push_str(&format!("  [default: {d}]"));
             }
-            (key, desc)
+            // Self-explanatory switches still belong in the inline command
+            // signature, but do not need a blank entry in the legend.
+            (!desc.is_empty()).then_some((key, desc))
         })
         .collect();
 
