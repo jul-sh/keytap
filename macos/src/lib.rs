@@ -9,9 +9,9 @@ pub enum RegistrationOutcome {
         credential_id: Vec<u8>,
     },
     Cancelled,
-    /// The native request produced no credential result, so another
-    /// authenticator may safely be tried.
-    Unavailable {
+    /// Native registration failed in a way for which product policy prefers
+    /// offering a nearby-device registration over stopping.
+    FallbackToNearby {
         message: String,
     },
     /// Native registration may have created a credential. Starting another
@@ -178,7 +178,7 @@ extern "C" {
 const STATUS_SUCCESS: i32 = 0;
 const STATUS_ERROR: i32 = 1;
 const STATUS_CANCELLED: i32 = 2;
-const STATUS_UNAVAILABLE: i32 = 3;
+const STATUS_FALLBACK_TO_NEARBY: i32 = 3;
 const CREDENTIAL_DISCOVERABLE: i32 = 0;
 const CREDENTIAL_CONSTRAINED: i32 = 1;
 
@@ -417,8 +417,8 @@ fn registration_outcome_from_callback(
         STATUS_CANCELLED => RegistrationOutcome::Indeterminate {
             message: "native passkey bridge returned an unexpected cancellation payload".into(),
         },
-        STATUS_UNAVAILABLE => match copy_registration_message(data, data_len) {
-            Ok(message) => RegistrationOutcome::Unavailable { message },
+        STATUS_FALLBACK_TO_NEARBY => match copy_registration_message(data, data_len) {
+            Ok(message) => RegistrationOutcome::FallbackToNearby { message },
             Err(message) => RegistrationOutcome::Indeterminate { message },
         },
         STATUS_ERROR => RegistrationOutcome::Indeterminate {
@@ -623,16 +623,16 @@ mod tests {
     }
 
     #[test]
-    fn registration_unavailable_is_distinct_from_indeterminate_failure() {
-        let unavailable_message = b"provider unavailable";
+    fn nearby_fallback_is_distinct_from_indeterminate_failure() {
+        let fallback_message = b"provider unavailable";
         assert_eq!(
             registration_outcome_from_callback(
-                STATUS_UNAVAILABLE,
-                unavailable_message.as_ptr(),
-                unavailable_message.len(),
+                STATUS_FALLBACK_TO_NEARBY,
+                fallback_message.as_ptr(),
+                fallback_message.len(),
                 0,
             ),
-            RegistrationOutcome::Unavailable {
+            RegistrationOutcome::FallbackToNearby {
                 message: "provider unavailable".into(),
             }
         );
@@ -662,12 +662,12 @@ mod tests {
             RegistrationOutcome::Indeterminate { .. }
         ));
         assert!(matches!(
-            registration_outcome_from_callback(STATUS_UNAVAILABLE, std::ptr::null(), 0, 0),
+            registration_outcome_from_callback(STATUS_FALLBACK_TO_NEARBY, std::ptr::null(), 0, 0,),
             RegistrationOutcome::Indeterminate { .. }
         ));
         assert!(matches!(
             registration_outcome_from_callback(
-                STATUS_UNAVAILABLE,
+                STATUS_FALLBACK_TO_NEARBY,
                 b"provider unavailable".as_ptr(),
                 b"provider unavailable".len(),
                 1,

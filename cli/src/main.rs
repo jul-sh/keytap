@@ -485,9 +485,9 @@ fn register(pending_init: nearby_identity::PendingInit) -> nearby_identity::Pers
             }
         }
         keytap_macos::RegistrationOutcome::Cancelled => die("cancelled"),
-        keytap_macos::RegistrationOutcome::Unavailable { message } => {
+        keytap_macos::RegistrationOutcome::FallbackToNearby { message } => {
             note(&format!(
-                "Native passkey registration is unavailable ({message}); continuing with a nearby device."
+                "Native passkey registration failed ({message}); continuing with a nearby device."
             ));
             nearby::register_nearby(pending_init)
         }

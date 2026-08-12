@@ -88,9 +88,10 @@ gh attestation verify keytap-*.zip -R jul-sh/keytap
 
 On macOS, commands using an existing passkey open the native prompt and show a
 QR code plus a forwardable approval URL; the first verified approval wins.
-`keytap init` creates the passkey natively; if macOS confirms that this device
-cannot create passkeys, it shows a QR code for creation on a nearby device.
-Other platforms use nearby approval.
+`keytap init` tries native passkey creation first and shows a QR code if macOS
+reports that request failed or is unavailable. It stops on malformed or unknown
+results, or after macOS returns a credential Keytap cannot safely accept. Other
+platforms use nearby approval.
 
 Nearby approval sends one outbound secure WebSocket from each device to a
 short-lived relay. The URL fragment carries a fresh P-256 public key whose

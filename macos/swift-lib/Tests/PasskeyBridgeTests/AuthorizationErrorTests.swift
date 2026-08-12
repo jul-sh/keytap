@@ -12,8 +12,8 @@ final class AuthorizationErrorTests: XCTestCase {
       userInfo: [NSLocalizedDescriptionKey: underlyingDescription]
     )
 
-    guard case .indeterminate(let message) = authorizationErrorOutcome(for: error) else {
-      XCTFail("expected a generic failed authorization to remain indeterminate")
+    guard case .fallbackToNearby(let message) = authorizationErrorOutcome(for: error) else {
+      XCTFail("expected a failed native attempt to permit nearby fallback")
       return
     }
 
@@ -21,6 +21,24 @@ final class AuthorizationErrorTests: XCTestCase {
     XCTAssertTrue(message.contains("registered with LaunchServices"))
     XCTAssertTrue(message.contains("webcredentials association with keytap.jul.sh"))
     XCTAssertTrue(message.contains("passkey provider"))
+  }
+
+  func testUnserviceableNativeRequestsPermitNearbyFallback() {
+    for code in [
+      ASAuthorizationError.Code.notHandled.rawValue,
+      ASAuthorizationError.Code.notInteractive.rawValue,
+    ] {
+      let error = NSError(
+        domain: ASAuthorizationError.errorDomain,
+        code: code,
+        userInfo: [NSLocalizedDescriptionKey: "native request unavailable"]
+      )
+
+      guard case .fallbackToNearby = authorizationErrorOutcome(for: error) else {
+        XCTFail("expected authorization error \(code) to permit nearby fallback")
+        continue
+      }
+    }
   }
 
   func testCanceledAuthorizationRemainsCancellation() {
@@ -59,7 +77,7 @@ final class AuthorizationErrorTests: XCTestCase {
       userInfo: [NSLocalizedDescriptionKey: description]
     )
 
-    guard case .unavailable(let message) = authorizationErrorOutcome(for: error) else {
+    guard case .fallbackToNearby(let message) = authorizationErrorOutcome(for: error) else {
       XCTFail("expected an unconfigured device to make native registration unavailable")
       return
     }
@@ -86,14 +104,14 @@ final class AuthorizationErrorTests: XCTestCase {
     }
   }
 
-  func testRegistrationUnavailableHasADistinctFFIStatus() {
-    let unavailable = TerminalCompletion.registrationUnavailable(message: "provider unavailable")
+  func testNearbyFallbackHasADistinctFFIStatus() {
+    let fallback = TerminalCompletion.registrationFallbackToNearby(message: "provider unavailable")
     let indeterminate = TerminalCompletion.registrationIndeterminate(
       message: "credential result malformed"
     )
     let assertionFailure = TerminalCompletion.assertionFailure(message: "assertion failed")
 
-    XCTAssertEqual(unavailable.callbackStatus, 3)
+    XCTAssertEqual(fallback.callbackStatus, 3)
     XCTAssertEqual(indeterminate.callbackStatus, 1)
     XCTAssertEqual(assertionFailure.callbackStatus, 1)
   }

@@ -23,7 +23,7 @@ typealias CompletionCallback =
 private let statusSuccess: Int32 = 0
 private let statusError: Int32 = 1
 private let statusCancelled: Int32 = 2
-private let statusUnavailable: Int32 = 3
+private let statusFallbackToNearby: Int32 = 3
 private let credentialDiscoverable: Int32 = 0
 private let credentialConstrained: Int32 = 1
 
@@ -50,7 +50,7 @@ func keytapRegister(
   callback: sending CompletionCallback
 ) {
   guard Thread.isMainThread else {
-    deliverDirectUnavailable(
+    deliverDirectFallbackToNearby(
       "native passkey operations must run on the process main thread",
       context: context,
       callback: callback
@@ -300,7 +300,7 @@ private enum OperationLifecycle {
 
 enum TerminalCompletion {
   case registration(credentialID: Data)
-  case registrationUnavailable(message: String)
+  case registrationFallbackToNearby(message: String)
   case registrationIndeterminate(message: String)
   case assertion(credentialID: Data, prfOutput: Data)
   case assertionFailure(message: String)
@@ -310,8 +310,8 @@ enum TerminalCompletion {
     switch self {
     case .registration, .assertion:
       return statusSuccess
-    case .registrationUnavailable:
-      return statusUnavailable
+    case .registrationFallbackToNearby:
+      return statusFallbackToNearby
     case .registrationIndeterminate, .assertionFailure:
       return statusError
     case .cancelled:
@@ -322,7 +322,7 @@ enum TerminalCompletion {
 
 enum AuthorizationErrorOutcome {
   case cancelled
-  case unavailable(message: String)
+  case fallbackToNearby(message: String)
   case indeterminate(message: String)
 }
 
@@ -336,7 +336,7 @@ func authorizationErrorOutcome(for error: Error) -> AuthorizationErrorOutcome {
   // explicitly says the device is not configured to create passkeys. Compare
   // the raw value so this package can retain its macOS 15 deployment target.
   if nsError.code == 1010 {
-    return .unavailable(message: nsError.localizedDescription)
+    return .fallbackToNearby(message: nsError.localizedDescription)
   }
 
   guard let code = ASAuthorizationError.Code(rawValue: nsError.code) else {
@@ -347,12 +347,14 @@ func authorizationErrorOutcome(for error: Error) -> AuthorizationErrorOutcome {
   case .canceled:
     return .cancelled
   case .failed:
-    return .indeterminate(
+    return .fallbackToNearby(
       message: "native passkey authorization failed: \(nsError.localizedDescription). "
         + "Possible causes include Keytap.app not being registered with LaunchServices, "
         + "a missing webcredentials association with keytap.jul.sh, or an unavailable "
         + "passkey provider."
     )
+  case .notHandled, .notInteractive:
+    return .fallbackToNearby(message: nsError.localizedDescription)
   default:
     return .indeterminate(message: nsError.localizedDescription)
   }
@@ -530,10 +532,10 @@ private final class PasskeyOperation: NSObject, ASAuthorizationControllerDelegat
     switch authorizationErrorOutcome(for: error) {
     case .cancelled:
       finish(.cancelled)
-    case .unavailable(let message):
+    case .fallbackToNearby(let message):
       switch expectedCeremony {
       case .registration:
-        finish(.registrationUnavailable(message: message))
+        finish(.registrationFallbackToNearby(message: message))
       case .assertion:
         finish(.assertionFailure(message: message))
       }
@@ -611,7 +613,7 @@ private final class PasskeyOperation: NSObject, ASAuthorizationControllerDelegat
     case .cancelled:
       callback(context, status, nil, 0, nil, 0)
 
-    case .registrationUnavailable(let message),
+    case .registrationFallbackToNearby(let message),
       .registrationIndeterminate(let message),
       .assertionFailure(let message):
       withBorrowedBytes(Data(message.utf8)) { messagePointer, messageLength in
@@ -640,13 +642,13 @@ private func deliverDirectError(
   }
 }
 
-private func deliverDirectUnavailable(
+private func deliverDirectFallbackToNearby(
   _ message: String,
   context: UnsafeMutableRawPointer?,
   callback: CompletionCallback
 ) {
   withBorrowedBytes(Data(message.utf8)) { pointer, length in
-    callback(context, statusUnavailable, pointer, length, nil, 0)
+    callback(context, statusFallbackToNearby, pointer, length, nil, 0)
   }
 }
 
