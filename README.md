@@ -87,8 +87,9 @@ gh attestation verify keytap-*.zip -R jul-sh/keytap
 
 ## Approval
 
-On macOS, commands using an existing passkey open the native prompt and print a
-forwardable approval URL at the same time; the first verified approval wins.
+When a command needs a passkey ceremony on macOS, Keytap opens the native
+prompt and shows a QR code plus a forwardable approval URL; the first verified
+approval wins.
 Registration uses one route: `keytap init` is native, while
 `keytap init --nearby` uses a nearby device. Other platforms use nearby
 approval.

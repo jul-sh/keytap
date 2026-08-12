@@ -186,7 +186,7 @@ pub fn authenticate_nearby(name: &str, storage_policy: StoragePolicy) -> NearbyA
         name,
         storage_policy,
         cancellation.clone(),
-        InvitationPresentation::QrAndUrl,
+        InvitationPresentation::NearbyOnly,
     )
     .unwrap_or_else(|error| crate::die(&error));
     cancellation.finish();
@@ -203,7 +203,7 @@ pub(crate) fn prepare_nearby_assertion(
         name,
         storage_policy,
         cancellation,
-        InvitationPresentation::ForwardableUrl,
+        InvitationPresentation::ConcurrentNativeAndNearby,
     )
 }
 
@@ -287,9 +287,9 @@ struct ConnectedNearby {
 
 #[derive(Clone, Copy)]
 enum InvitationPresentation {
-    QrAndUrl,
-    #[cfg(target_os = "macos")]
-    ForwardableUrl,
+    NearbyOnly,
+    #[cfg(any(target_os = "macos", test))]
+    ConcurrentNativeAndNearby,
 }
 
 fn build_plan(operation: Operation<'_>) -> Result<FlowPlan, String> {
@@ -354,11 +354,7 @@ fn connect_nearby(
 
     let url = format!("{PAGE_URL}#key={}", handshake.fragment_value());
     let present = || {
-        match presentation {
-            InvitationPresentation::QrAndUrl => print_qr(&url)?,
-            #[cfg(target_os = "macos")]
-            InvitationPresentation::ForwardableUrl => print_forwardable_url(&url)?,
-        }
+        print_invitation(&url, presentation)?;
         Ok(())
     };
     if let Some(cancellation) = cancellation {
@@ -481,7 +477,7 @@ fn run_nearby_registration(
     } = connect_nearby(
         Operation::Register { pending_init },
         None,
-        InvitationPresentation::QrAndUrl,
+        InvitationPresentation::NearbyOnly,
     )?;
     let FlowPlan::Registration {
         request,
@@ -1022,31 +1018,33 @@ fn set_write_timeout(socket: &WebSocket<MaybeTlsStream<TcpStream>>, timeout: Opt
     };
 }
 
-fn print_qr(url: &str) -> Result<(), String> {
-    eprintln!();
-    eprintln!("Scan to approve with a passkey on a nearby device (end-to-end encrypted):");
-    eprintln!();
+fn print_invitation(url: &str, presentation: InvitationPresentation) -> Result<(), String> {
+    use std::io::Write;
+
     let qr = qr2term::generate_qr_string(url)
         .map_err(|error| format!("failed to render QR code: {error}"))?;
-    eprint!("{qr}");
-    eprintln!();
-    eprintln!("Or open: {url}");
-    eprintln!();
-    eprintln!("Waiting for the nearby device (timeout: 5 minutes)…");
-    Ok(())
-}
-
-#[cfg(target_os = "macos")]
-fn print_forwardable_url(url: &str) -> Result<(), String> {
-    use std::io::Write;
-    eprintln!();
-    eprintln!("Approve on this Mac, or forward this end-to-end encrypted URL:");
-    eprintln!("keytap-nearby-approval-url: {url}");
-    eprintln!("The first accepted approval wins. Press Ctrl-C to cancel both.");
-    eprintln!();
+    eprint!("{}", invitation_text(url, &qr, presentation));
     std::io::stderr()
         .flush()
-        .map_err(|error| format!("could not show nearby approval URL: {error}"))
+        .map_err(|error| format!("could not show nearby approval invitation: {error}"))
+}
+
+fn invitation_text(url: &str, qr: &str, presentation: InvitationPresentation) -> String {
+    match presentation {
+        InvitationPresentation::NearbyOnly => format!(
+            "\nScan to approve with a passkey on a nearby device (end-to-end encrypted):\n\n\
+             {qr}\nOr open: {url}\n\n\
+             Waiting for the nearby device (timeout: 5 minutes)…\n"
+        ),
+        #[cfg(any(target_os = "macos", test))]
+        InvitationPresentation::ConcurrentNativeAndNearby => format!(
+            "\nApprove on this Mac, or scan to approve with a passkey on a nearby device \
+             (end-to-end encrypted):\n\n\
+             {qr}\nOr forward this end-to-end encrypted URL:\n\
+             keytap-nearby-approval-url: {url}\n\
+             The first accepted approval wins. Press Ctrl-C to cancel both.\n\n"
+        ),
+    }
 }
 
 #[derive(Clone, Serialize)]
@@ -1289,6 +1287,38 @@ fn identity_error_message(error: IdentityVerificationError) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nearby_only_invitation_shows_qr_and_openable_url() {
+        let url = "https://keytap.example/nearby#key=invitation";
+
+        assert_eq!(
+            invitation_text(url, "<QR>\n", InvitationPresentation::NearbyOnly),
+            "\nScan to approve with a passkey on a nearby device (end-to-end encrypted):\n\n\
+             <QR>\n\n\
+             Or open: https://keytap.example/nearby#key=invitation\n\n\
+             Waiting for the nearby device (timeout: 5 minutes)…\n"
+        );
+    }
+
+    #[test]
+    fn concurrent_native_invitation_shows_qr_and_forwardable_url() {
+        let url = "https://keytap.example/nearby#key=invitation";
+
+        assert_eq!(
+            invitation_text(
+                url,
+                "<QR>\n",
+                InvitationPresentation::ConcurrentNativeAndNearby,
+            ),
+            "\nApprove on this Mac, or scan to approve with a passkey on a nearby device \
+             (end-to-end encrypted):\n\n\
+             <QR>\n\n\
+             Or forward this end-to-end encrypted URL:\n\
+             keytap-nearby-approval-url: https://keytap.example/nearby#key=invitation\n\
+             The first accepted approval wins. Press Ctrl-C to cancel both.\n\n"
+        );
+    }
 
     #[test]
     fn superseding_during_relay_setup_is_sticky() {

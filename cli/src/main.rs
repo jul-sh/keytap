@@ -147,7 +147,7 @@ fn with_derived_key(
             "$CI is set and there is no key for '{name}': refusing to start a passkey ceremony \
              (it would hang this job). Set ${var} to the output of \
              `keytap reveal {name} --as age`, or pass --prompt to run the ceremony anyway \
-             (the approval URL lands in the job log).",
+             (the QR code and approval URL land in the job log).",
             var = env_keys::var_name(name)
         ));
     }
