@@ -12,8 +12,8 @@ final class AuthorizationErrorTests: XCTestCase {
       userInfo: [NSLocalizedDescriptionKey: underlyingDescription]
     )
 
-    guard case .failure(let message) = authorizationErrorOutcome(for: error) else {
-      XCTFail("expected failed authorization to map to a failure")
+    guard case .indeterminate(let message) = authorizationErrorOutcome(for: error) else {
+      XCTFail("expected a generic failed authorization to remain indeterminate")
       return
     }
 
@@ -43,11 +43,58 @@ final class AuthorizationErrorTests: XCTestCase {
       userInfo: [NSLocalizedDescriptionKey: description]
     )
 
-    guard case .failure(let message) = authorizationErrorOutcome(for: error) else {
-      XCTFail("expected foreign error to map to a failure")
+    guard case .indeterminate(let message) = authorizationErrorOutcome(for: error) else {
+      XCTFail("expected a foreign error to remain indeterminate")
       return
     }
 
     XCTAssertEqual(message, description)
+  }
+
+  func testDeviceNotConfiguredMakesNativeRegistrationUnavailable() {
+    let description = "This device is not set up to create passkeys"
+    let error = NSError(
+      domain: ASAuthorizationError.errorDomain,
+      code: 1010,
+      userInfo: [NSLocalizedDescriptionKey: description]
+    )
+
+    guard case .unavailable(let message) = authorizationErrorOutcome(for: error) else {
+      XCTFail("expected an unconfigured device to make native registration unavailable")
+      return
+    }
+
+    XCTAssertEqual(message, description)
+  }
+
+  func testInvalidAndUnknownAuthorizationErrorsRemainIndeterminate() {
+    for code in [
+      ASAuthorizationError.Code.invalidResponse.rawValue,
+      ASAuthorizationError.Code.unknown.rawValue,
+      9_999,
+    ] {
+      let error = NSError(
+        domain: ASAuthorizationError.errorDomain,
+        code: code,
+        userInfo: [NSLocalizedDescriptionKey: "indeterminate failure"]
+      )
+
+      guard case .indeterminate = authorizationErrorOutcome(for: error) else {
+        XCTFail("expected authorization error \(code) to remain indeterminate")
+        continue
+      }
+    }
+  }
+
+  func testRegistrationUnavailableHasADistinctFFIStatus() {
+    let unavailable = TerminalCompletion.registrationUnavailable(message: "provider unavailable")
+    let indeterminate = TerminalCompletion.registrationIndeterminate(
+      message: "credential result malformed"
+    )
+    let assertionFailure = TerminalCompletion.assertionFailure(message: "assertion failed")
+
+    XCTAssertEqual(unavailable.callbackStatus, 3)
+    XCTAssertEqual(indeterminate.callbackStatus, 1)
+    XCTAssertEqual(assertionFailure.callbackStatus, 1)
   }
 }

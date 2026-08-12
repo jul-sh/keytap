@@ -201,33 +201,6 @@ fn invalid_key_name_is_rejected_before_environment_resolution() {
     assert!(!stderr(&out).contains("passkey not consulted"));
 }
 
-/// An explicit approval route asks for a fresh ceremony, even when a key is
-/// already available from the highest-priority non-ceremony source. Under CI
-/// the ceremony guard makes that observable without opening a browser or
-/// touching an authenticator.
-#[test]
-fn nearby_forces_a_ceremony_past_an_environment_key() {
-    let key = age_encoding(&RAW);
-    let envs: &[(&str, &str)] = &[("KEYTAP_KEY_CI", &key)];
-
-    for args in [
-        vec!["public", "ci", "--nearby"],
-        vec!["reveal", "ci", "--nearby"],
-        vec!["encrypt", "ci", "--nearby"],
-        vec!["decrypt", "ci", "--nearby"],
-    ] {
-        let out = keytap(envs, &args, b"");
-        assert!(!out.status.success(), "{args:?} must require a ceremony");
-        assert!(out.stdout.is_empty(), "argv: {args:?}");
-        let err = stderr(&out);
-        assert!(err.contains("--prompt"), "argv: {args:?}; stderr: {err}");
-        assert!(
-            !err.contains("passkey not consulted"),
-            "{args:?} incorrectly used the environment key; stderr: {err}"
-        );
-    }
-}
-
 /// The refusal rung: under $CI with no env key (and nothing remembered),
 /// keytap must fail fast instead of starting a ceremony. Linux-only: on
 /// macOS the remembered-key lookup would touch the developer's real

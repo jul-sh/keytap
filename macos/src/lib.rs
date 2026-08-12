@@ -1,6 +1,7 @@
 use std::ffi::c_void;
 use std::sync::{Arc, Mutex};
 
+#[derive(Debug, Eq, PartialEq)]
 pub enum RegistrationOutcome {
     Success {
         /// WebAuthn credential ID of the newly registered passkey. Stable
@@ -8,7 +9,16 @@ pub enum RegistrationOutcome {
         credential_id: Vec<u8>,
     },
     Cancelled,
-    Error(String),
+    /// The native request produced no credential result, so another
+    /// authenticator may safely be tried.
+    Unavailable {
+        message: String,
+    },
+    /// Native registration may have created a credential. Starting another
+    /// registration automatically could therefore create a second root.
+    Indeterminate {
+        message: String,
+    },
 }
 
 pub enum AssertionOutcome {
@@ -135,10 +145,8 @@ pub fn register() -> RegistrationOutcome {
         keytap_register(ffi_context_ptr(&mut context), on_registration);
     }
 
-    context.into_outcome(|| {
-        RegistrationOutcome::Error(
-            "native passkey bridge returned without a terminal callback".into(),
-        )
+    context.into_outcome(|| RegistrationOutcome::Indeterminate {
+        message: "native passkey bridge returned without a terminal callback".into(),
     })
 }
 
@@ -170,6 +178,7 @@ extern "C" {
 const STATUS_SUCCESS: i32 = 0;
 const STATUS_ERROR: i32 = 1;
 const STATUS_CANCELLED: i32 = 2;
+const STATUS_UNAVAILABLE: i32 = 3;
 const CREDENTIAL_DISCOVERABLE: i32 = 0;
 const CREDENTIAL_CONSTRAINED: i32 = 1;
 
@@ -369,13 +378,28 @@ unsafe extern "C" fn on_registration(
         return;
     };
 
-    context.complete_with(|| match status {
+    context.complete_with(|| registration_outcome_from_callback(status, data, data_len, extra_len));
+
+    // `extra` is intentionally not dereferenced: registration has no secondary
+    // payload. A non-zero length is classified as an indeterminate malformed
+    // response above.
+    let _ = extra;
+}
+
+fn registration_outcome_from_callback(
+    status: i32,
+    data: *const u8,
+    data_len: usize,
+    extra_len: usize,
+) -> RegistrationOutcome {
+    if extra_len != 0 {
+        return RegistrationOutcome::Indeterminate {
+            message: "native passkey bridge returned unexpected registration payload".into(),
+        };
+    }
+
+    match status {
         STATUS_SUCCESS => {
-            if extra_len != 0 {
-                return RegistrationOutcome::Error(
-                    "native passkey bridge returned unexpected registration payload".into(),
-                );
-            }
             match copy_bytes(
                 data,
                 data_len,
@@ -386,19 +410,24 @@ unsafe extern "C" fn on_registration(
                 },
             ) {
                 Ok(credential_id) => RegistrationOutcome::Success { credential_id },
-                Err(error) => RegistrationOutcome::Error(error),
+                Err(message) => RegistrationOutcome::Indeterminate { message },
             }
         }
-        STATUS_CANCELLED => RegistrationOutcome::Cancelled,
-        STATUS_ERROR => RegistrationOutcome::Error(copy_error(data, data_len)),
-        status => RegistrationOutcome::Error(format!(
-            "native passkey bridge returned unknown status {status}"
-        )),
-    });
-
-    // `extra` is intentionally not dereferenced: registration has no secondary
-    // success payload, and a non-zero length was rejected above.
-    let _ = extra;
+        STATUS_CANCELLED if data_len == 0 => RegistrationOutcome::Cancelled,
+        STATUS_CANCELLED => RegistrationOutcome::Indeterminate {
+            message: "native passkey bridge returned an unexpected cancellation payload".into(),
+        },
+        STATUS_UNAVAILABLE => match copy_registration_message(data, data_len) {
+            Ok(message) => RegistrationOutcome::Unavailable { message },
+            Err(message) => RegistrationOutcome::Indeterminate { message },
+        },
+        STATUS_ERROR => RegistrationOutcome::Indeterminate {
+            message: copy_error(data, data_len),
+        },
+        status => RegistrationOutcome::Indeterminate {
+            message: format!("native passkey bridge returned unknown status {status}"),
+        },
+    }
 }
 
 unsafe extern "C" fn on_assertion(
@@ -468,10 +497,16 @@ enum ExpectedLength {
 
 fn validate_length(length: usize, label: &str, expected: ExpectedLength) -> Result<(), String> {
     match expected {
-        ExpectedLength::Inclusive { minimum, maximum } if length < minimum => Err(format!(
+        ExpectedLength::Inclusive {
+            minimum,
+            maximum: _,
+        } if length < minimum => Err(format!(
             "native passkey bridge returned a {label} shorter than {minimum} bytes"
         )),
-        ExpectedLength::Inclusive { minimum, maximum } if length > maximum => Err(format!(
+        ExpectedLength::Inclusive {
+            minimum: _,
+            maximum,
+        } if length > maximum => Err(format!(
             "native passkey bridge returned a {label} longer than {maximum} bytes"
         )),
         ExpectedLength::Inclusive { .. } => Ok(()),
@@ -517,6 +552,20 @@ fn copy_error(pointer: *const u8, length: usize) -> String {
     // SAFETY: The length is bounded and the pointer is non-null. Swift keeps
     // callback storage alive until this callback returns; copy it now.
     String::from_utf8_lossy(unsafe { std::slice::from_raw_parts(pointer, length) }).into_owned()
+}
+
+fn copy_registration_message(pointer: *const u8, length: usize) -> Result<String, String> {
+    let bytes = copy_bytes(
+        pointer,
+        length,
+        "registration error message",
+        ExpectedLength::Inclusive {
+            minimum: 1,
+            maximum: MAX_ERROR_BYTES,
+        },
+    )?;
+    String::from_utf8(bytes)
+        .map_err(|_| "native passkey bridge returned a non-UTF-8 registration error".into())
 }
 
 #[cfg(test)]
@@ -571,6 +620,64 @@ mod tests {
         context.complete_with(|| 7);
         context.complete_with(|| 11);
         assert_eq!(context.into_outcome(|| 13), 7);
+    }
+
+    #[test]
+    fn registration_unavailable_is_distinct_from_indeterminate_failure() {
+        let unavailable_message = b"provider unavailable";
+        assert_eq!(
+            registration_outcome_from_callback(
+                STATUS_UNAVAILABLE,
+                unavailable_message.as_ptr(),
+                unavailable_message.len(),
+                0,
+            ),
+            RegistrationOutcome::Unavailable {
+                message: "provider unavailable".into(),
+            }
+        );
+
+        let indeterminate_message = b"credential result malformed";
+        assert_eq!(
+            registration_outcome_from_callback(
+                STATUS_ERROR,
+                indeterminate_message.as_ptr(),
+                indeterminate_message.len(),
+                0,
+            ),
+            RegistrationOutcome::Indeterminate {
+                message: "credential result malformed".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn malformed_registration_responses_are_indeterminate() {
+        assert!(matches!(
+            registration_outcome_from_callback(STATUS_SUCCESS, std::ptr::null(), 0, 0),
+            RegistrationOutcome::Indeterminate { .. }
+        ));
+        assert!(matches!(
+            registration_outcome_from_callback(STATUS_CANCELLED, b"x".as_ptr(), 1, 0),
+            RegistrationOutcome::Indeterminate { .. }
+        ));
+        assert!(matches!(
+            registration_outcome_from_callback(STATUS_UNAVAILABLE, std::ptr::null(), 0, 0),
+            RegistrationOutcome::Indeterminate { .. }
+        ));
+        assert!(matches!(
+            registration_outcome_from_callback(
+                STATUS_UNAVAILABLE,
+                b"provider unavailable".as_ptr(),
+                b"provider unavailable".len(),
+                1,
+            ),
+            RegistrationOutcome::Indeterminate { .. }
+        ));
+        assert!(matches!(
+            registration_outcome_from_callback(99, std::ptr::null(), 0, 0),
+            RegistrationOutcome::Indeterminate { .. }
+        ));
     }
 
     #[test]

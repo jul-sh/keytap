@@ -23,6 +23,7 @@ typealias CompletionCallback =
 private let statusSuccess: Int32 = 0
 private let statusError: Int32 = 1
 private let statusCancelled: Int32 = 2
+private let statusUnavailable: Int32 = 3
 private let credentialDiscoverable: Int32 = 0
 private let credentialConstrained: Int32 = 1
 
@@ -49,7 +50,7 @@ func keytapRegister(
   callback: sending CompletionCallback
 ) {
   guard Thread.isMainThread else {
-    deliverDirectError(
+    deliverDirectUnavailable(
       "native passkey operations must run on the process main thread",
       context: context,
       callback: callback
@@ -238,6 +239,8 @@ private func ensureOperationSlotAvailable(
   case .none:
     return true
   case .some:
+    // The active operation may itself be creating a credential, so this is
+    // never evidence that registration can safely switch authenticators.
     deliverDirectError(
       "another native passkey operation is already running",
       context: context,
@@ -295,39 +298,63 @@ private enum OperationLifecycle {
   case finished
 }
 
-private enum TerminalCompletion {
+enum TerminalCompletion {
   case registration(credentialID: Data)
+  case registrationUnavailable(message: String)
+  case registrationIndeterminate(message: String)
   case assertion(credentialID: Data, prfOutput: Data)
+  case assertionFailure(message: String)
   case cancelled
-  case failure(message: String)
+
+  var callbackStatus: Int32 {
+    switch self {
+    case .registration, .assertion:
+      return statusSuccess
+    case .registrationUnavailable:
+      return statusUnavailable
+    case .registrationIndeterminate, .assertionFailure:
+      return statusError
+    case .cancelled:
+      return statusCancelled
+    }
+  }
 }
 
 enum AuthorizationErrorOutcome {
   case cancelled
-  case failure(message: String)
+  case unavailable(message: String)
+  case indeterminate(message: String)
 }
 
 func authorizationErrorOutcome(for error: Error) -> AuthorizationErrorOutcome {
   let nsError = error as NSError
   guard nsError.domain == ASAuthorizationError.errorDomain else {
-    return .failure(message: nsError.localizedDescription)
+    return .indeterminate(message: nsError.localizedDescription)
   }
+
+  // Added in macOS 16 as the one registration error whose documented meaning
+  // explicitly says the device is not configured to create passkeys. Compare
+  // the raw value so this package can retain its macOS 15 deployment target.
+  if nsError.code == 1010 {
+    return .unavailable(message: nsError.localizedDescription)
+  }
+
   guard let code = ASAuthorizationError.Code(rawValue: nsError.code) else {
-    return .failure(message: nsError.localizedDescription)
+    return .indeterminate(message: nsError.localizedDescription)
   }
 
   switch code {
   case .canceled:
     return .cancelled
   case .failed:
-    return .failure(
+    return .indeterminate(
       message: "native passkey authorization failed: \(nsError.localizedDescription). "
         + "Possible causes include Keytap.app not being registered with LaunchServices, "
         + "a missing webcredentials association with keytap.jul.sh, or an unavailable "
         + "passkey provider."
     )
   default:
-    return .failure(message: nsError.localizedDescription)
+    return .indeterminate(message: nsError.localizedDescription)
   }
 }
 
@@ -428,11 +455,13 @@ private final class PasskeyOperation: NSObject, ASAuthorizationControllerDelegat
     case .prepared(let controller),
       .awaitingResult(let controller, _),
       .cancellationRequested(let controller):
-      finish(
-        .failure(
-          message: "native passkey application run loop stopped before authorization completed"
-        )
-      )
+      let message = "native passkey application run loop stopped before authorization completed"
+      switch expectedCeremony {
+      case .registration:
+        finish(.registrationIndeterminate(message: message))
+      case .assertion:
+        finish(.assertionFailure(message: message))
+      }
       controller.cancel()
     }
   }
@@ -448,7 +477,7 @@ private final class PasskeyOperation: NSObject, ASAuthorizationControllerDelegat
           as? ASAuthorizationPlatformPublicKeyCredentialRegistration
       else {
         finish(
-          .failure(
+          .registrationIndeterminate(
             message: "registration completed with an unexpected credential type"
           )
         )
@@ -456,7 +485,7 @@ private final class PasskeyOperation: NSObject, ASAuthorizationControllerDelegat
       }
       guard let prf = registration.prf, prf.isSupported else {
         finish(
-          .failure(
+          .registrationIndeterminate(
             message: "passkey created but PRF is not supported by this authenticator"
           )
         )
@@ -470,7 +499,7 @@ private final class PasskeyOperation: NSObject, ASAuthorizationControllerDelegat
           as? ASAuthorizationPlatformPublicKeyCredentialAssertion
       else {
         finish(
-          .failure(
+          .assertionFailure(
             message: "assertion completed with an unexpected credential type"
           )
         )
@@ -478,7 +507,7 @@ private final class PasskeyOperation: NSObject, ASAuthorizationControllerDelegat
       }
       guard let prfResult = assertion.prf else {
         finish(
-          .failure(
+          .assertionFailure(
             message: "PRF output not available. Your passkey may not support the PRF extension."
           )
         )
@@ -501,8 +530,20 @@ private final class PasskeyOperation: NSObject, ASAuthorizationControllerDelegat
     switch authorizationErrorOutcome(for: error) {
     case .cancelled:
       finish(.cancelled)
-    case .failure(let message):
-      finish(.failure(message: message))
+    case .unavailable(let message):
+      switch expectedCeremony {
+      case .registration:
+        finish(.registrationUnavailable(message: message))
+      case .assertion:
+        finish(.assertionFailure(message: message))
+      }
+    case .indeterminate(let message):
+      switch expectedCeremony {
+      case .registration:
+        finish(.registrationIndeterminate(message: message))
+      case .assertion:
+        finish(.assertionFailure(message: message))
+      }
     }
   }
 
@@ -539,12 +580,13 @@ private final class PasskeyOperation: NSObject, ASAuthorizationControllerDelegat
   }
 
   private func deliver(_ completion: TerminalCompletion) {
+    let status = completion.callbackStatus
     switch completion {
     case .registration(let credentialID):
       withBorrowedBytes(credentialID) { credentialPointer, credentialLength in
         callback(
           context,
-          statusSuccess,
+          status,
           credentialPointer,
           credentialLength,
           nil,
@@ -557,7 +599,7 @@ private final class PasskeyOperation: NSObject, ASAuthorizationControllerDelegat
         withBorrowedBytes(prfOutput) { prfPointer, prfLength in
           callback(
             context,
-            statusSuccess,
+            status,
             credentialPointer,
             credentialLength,
             prfPointer,
@@ -567,13 +609,15 @@ private final class PasskeyOperation: NSObject, ASAuthorizationControllerDelegat
       }
 
     case .cancelled:
-      callback(context, statusCancelled, nil, 0, nil, 0)
+      callback(context, status, nil, 0, nil, 0)
 
-    case .failure(let message):
+    case .registrationUnavailable(let message),
+      .registrationIndeterminate(let message),
+      .assertionFailure(let message):
       withBorrowedBytes(Data(message.utf8)) { messagePointer, messageLength in
         callback(
           context,
-          statusError,
+          status,
           messagePointer,
           messageLength,
           nil,
@@ -593,6 +637,16 @@ private func deliverDirectError(
 ) {
   withBorrowedBytes(Data(message.utf8)) { pointer, length in
     callback(context, statusError, pointer, length, nil, 0)
+  }
+}
+
+private func deliverDirectUnavailable(
+  _ message: String,
+  context: UnsafeMutableRawPointer?,
+  callback: CompletionCallback
+) {
+  withBorrowedBytes(Data(message.utf8)) { pointer, length in
+    callback(context, statusUnavailable, pointer, length, nil, 0)
   }
 }
 

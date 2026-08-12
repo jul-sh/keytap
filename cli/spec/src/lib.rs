@@ -45,14 +45,6 @@ pub enum Command {
         // reproducible. Each frontend refuses a detected re-init without this.
         #[arg(long)]
         force: bool,
-
-        /// Run the passkey ceremony on a nearby device only
-        #[arg(
-            long = "nearby",
-            action = clap::ArgAction::SetTrue,
-            value_parser = parse_approval_mode
-        )]
-        approval: ApprovalMode,
     },
 
     /// Output the public key
@@ -64,14 +56,6 @@ pub enum Command {
         /// Output format
         #[arg(long = "as", value_name = "FORMAT", default_value = "hex")]
         format: Format,
-
-        /// Run the passkey ceremony on a nearby device only
-        #[arg(
-            long = "nearby",
-            action = clap::ArgAction::SetTrue,
-            value_parser = parse_approval_mode
-        )]
-        approval: ApprovalMode,
     },
 
     /// Reveal private key material
@@ -84,14 +68,6 @@ pub enum Command {
         /// Output format
         #[arg(long = "as", value_name = "FORMAT", default_value = "hex")]
         format: Format,
-
-        /// Run the passkey ceremony on a nearby device only
-        #[arg(
-            long = "nearby",
-            action = clap::ArgAction::SetTrue,
-            value_parser = parse_approval_mode
-        )]
-        approval: ApprovalMode,
     },
 
     /// Encrypt stdin to stdout with the derived age identity
@@ -111,14 +87,6 @@ pub enum Command {
         /// Don't include self as a recipient when encrypting
         #[arg(long)]
         no_self: bool,
-
-        /// Run the passkey ceremony on a nearby device only
-        #[arg(
-            long = "nearby",
-            action = clap::ArgAction::SetTrue,
-            value_parser = parse_approval_mode
-        )]
-        approval: ApprovalMode,
     },
 
     /// Decrypt age input from stdin to stdout with the derived age identity
@@ -126,14 +94,6 @@ pub enum Command {
         /// Key name for domain separation
         #[arg(default_value = "default")]
         name: String,
-
-        /// Run the passkey ceremony on a nearby device only
-        #[arg(
-            long = "nearby",
-            action = clap::ArgAction::SetTrue,
-            value_parser = parse_approval_mode
-        )]
-        approval: ApprovalMode,
     },
 
     /// Remember a derived key on this machine (no more prompts for it)
@@ -142,14 +102,6 @@ pub enum Command {
         /// Key name for domain separation. Required: persisting a key should
         /// name it deliberately, never land on 'default' by accident.
         name: String,
-
-        /// Run the passkey ceremony on a nearby device only
-        #[arg(
-            long = "nearby",
-            action = clap::ArgAction::SetTrue,
-            value_parser = parse_approval_mode
-        )]
-        approval: ApprovalMode,
     },
 
     /// Forget a remembered key
@@ -164,26 +116,6 @@ pub enum Command {
 
     /// List keys remembered on this machine (never prints key material)
     Remembered,
-}
-
-/// Which authenticator route a command may use if it needs a ceremony.
-///
-/// The parser maps the presence or absence of the `--nearby` switch directly
-/// into these exclusive states, so execution never has to interpret a loose
-/// boolean alongside the command mode.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub enum ApprovalMode {
-    Automatic,
-    NearbyOnly,
-}
-
-fn parse_approval_mode(value: &str) -> Result<ApprovalMode, String> {
-    match value {
-        "false" => Ok(ApprovalMode::Automatic),
-        "true" => Ok(ApprovalMode::NearbyOnly),
-        _ => Err("the --nearby switch did not resolve to an approval mode".to_string()),
-    }
 }
 
 #[derive(Clone, Copy, ValueEnum, serde::Serialize)]
@@ -368,7 +300,7 @@ mod tests {
     }
 
     #[test]
-    fn nearby_selects_nearby_only_for_every_command_that_can_start_a_ceremony() {
+    fn removed_nearby_switch_is_rejected_by_every_command() {
         for line in [
             "init --nearby",
             "public --nearby",
@@ -376,31 +308,19 @@ mod tests {
             "encrypt --nearby",
             "decrypt --nearby",
             "remember deploy --nearby",
+            "forget --nearby",
+            "remembered --nearby",
         ] {
-            let cli = match invoke(argv(line)) {
-                Invocation::Parsed(Ok(cli)) => cli,
-                _ => panic!("expected {line:?} to parse"),
-            };
-            let approval = match cli.command {
-                Command::Init { approval, .. }
-                | Command::Public { approval, .. }
-                | Command::Reveal { approval, .. }
-                | Command::Encrypt { approval, .. }
-                | Command::Decrypt { approval, .. }
-                | Command::Remember { approval, .. } => approval,
-                Command::Forget { .. } | Command::Remembered => {
-                    panic!("{line:?} parsed as a command without a ceremony")
-                }
-            };
-            assert_eq!(approval, ApprovalMode::NearbyOnly, "argv: {line:?}");
-        }
-    }
-
-    #[test]
-    fn commands_without_ceremonies_reject_nearby() {
-        for line in ["forget --nearby", "remembered --nearby"] {
             match invoke(argv(line)) {
-                Invocation::Parsed(Err(_)) => {}
+                Invocation::Parsed(Err(error)) => {
+                    assert!(
+                        error
+                            .render()
+                            .to_string()
+                            .contains("unexpected argument '--nearby'"),
+                        "argv: {line:?}"
+                    );
+                }
                 _ => panic!("expected {line:?} to reject --nearby"),
             }
         }
@@ -410,25 +330,13 @@ mod tests {
     fn init_requires_an_explicit_force() {
         match invoke(argv("init")) {
             Invocation::Parsed(Ok(cli)) => {
-                assert!(matches!(
-                    cli.command,
-                    Command::Init {
-                        force: false,
-                        approval: ApprovalMode::Automatic
-                    }
-                ))
+                assert!(matches!(cli.command, Command::Init { force: false }))
             }
             _ => panic!("expected parse"),
         }
         match invoke(argv("init --force")) {
             Invocation::Parsed(Ok(cli)) => {
-                assert!(matches!(
-                    cli.command,
-                    Command::Init {
-                        force: true,
-                        approval: ApprovalMode::Automatic
-                    }
-                ))
+                assert!(matches!(cli.command, Command::Init { force: true }))
             }
             _ => panic!("expected parse"),
         }
@@ -440,35 +348,17 @@ mod tests {
         for cmd in completions() {
             assert!(text.contains(&cmd.0), "overview missing {}", cmd.0);
         }
-        for command in ["init", "public", "reveal", "encrypt", "decrypt", "remember"] {
-            let line = text
-                .lines()
-                .find(|line| line.trim_start().starts_with(command))
-                .unwrap_or_else(|| panic!("overview missing {command}"));
-            assert!(line.contains("[--nearby]"), "overview line: {line}");
-        }
+        assert!(
+            !text.contains("--nearby"),
+            "overview still exposes --nearby"
+        );
     }
 
     #[test]
-    fn completions_offer_nearby_only_where_a_ceremony_can_run() {
-        let completions = completions();
-        let flags_for = |command: &str| {
-            completions
-                .iter()
-                .find(|(name, _)| name == command)
-                .map(|(_, flags)| flags.as_slice())
-                .expect("command should have completions")
-        };
-
-        for command in ["init", "public", "reveal", "encrypt", "decrypt", "remember"] {
+    fn completions_never_offer_removed_nearby_switch() {
+        for (command, flags) in completions() {
             assert!(
-                flags_for(command).iter().any(|flag| flag == "--nearby"),
-                "completions missing --nearby for {command}"
-            );
-        }
-        for command in ["forget", "remembered", "help"] {
-            assert!(
-                !flags_for(command).iter().any(|flag| flag == "--nearby"),
+                !flags.iter().any(|flag| flag == "--nearby"),
                 "completions unexpectedly offer --nearby for {command}"
             );
         }

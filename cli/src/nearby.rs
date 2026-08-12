@@ -180,13 +180,14 @@ pub enum StorageOutcome {
     Unavailable,
 }
 
+#[cfg(not(target_os = "macos"))]
 pub fn authenticate_nearby(name: &str, storage_policy: StoragePolicy) -> NearbyAssertion {
     let cancellation = NearbyCancellation::new();
     let prepared = prepare_nearby_assertion_with_presentation(
         name,
         storage_policy,
         cancellation.clone(),
-        InvitationPresentation::NearbyOnly,
+        InvitationPresentation::StandaloneNearby,
     )
     .unwrap_or_else(|error| crate::die(&error));
     cancellation.finish();
@@ -287,7 +288,7 @@ struct ConnectedNearby {
 
 #[derive(Clone, Copy)]
 enum InvitationPresentation {
-    NearbyOnly,
+    StandaloneNearby,
     #[cfg(any(target_os = "macos", test))]
     ConcurrentNativeAndNearby,
 }
@@ -477,7 +478,7 @@ fn run_nearby_registration(
     } = connect_nearby(
         Operation::Register { pending_init },
         None,
-        InvitationPresentation::NearbyOnly,
+        InvitationPresentation::StandaloneNearby,
     )?;
     let FlowPlan::Registration {
         request,
@@ -1031,7 +1032,7 @@ fn print_invitation(url: &str, presentation: InvitationPresentation) -> Result<(
 
 fn invitation_text(url: &str, qr: &str, presentation: InvitationPresentation) -> String {
     match presentation {
-        InvitationPresentation::NearbyOnly => format!(
+        InvitationPresentation::StandaloneNearby => format!(
             "\nScan to approve with a passkey on a nearby device (end-to-end encrypted):\n\n\
              {qr}\nOr open: {url}\n\n\
              Waiting for the nearby device (timeout: 5 minutes)…\n"
@@ -1289,11 +1290,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn nearby_only_invitation_shows_qr_and_openable_url() {
+    fn standalone_invitation_shows_qr_and_openable_url() {
         let url = "https://keytap.example/nearby#key=invitation";
 
         assert_eq!(
-            invitation_text(url, "<QR>\n", InvitationPresentation::NearbyOnly),
+            invitation_text(url, "<QR>\n", InvitationPresentation::StandaloneNearby,),
             "\nScan to approve with a passkey on a nearby device (end-to-end encrypted):\n\n\
              <QR>\n\n\
              Or open: https://keytap.example/nearby#key=invitation\n\n\

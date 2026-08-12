@@ -19,17 +19,16 @@ Derive keys and encrypt files from a passkey.
 Usage: keytap <COMMAND> [ARGS]
 
 Commands
-  init [--nearby]                                Create a keytap passkey, if you do not already have one
-  public [NAME] [--as VAL] [--nearby]            Output the public key
-  reveal [NAME] [--as VAL] [--nearby]            Reveal private key material
-  encrypt [NAME] [--to VAL] [-R VAL] [--nearby]  Encrypt stdin to stdout with the derived age identity
-  decrypt [NAME] [--nearby]                      Decrypt age input from stdin to stdout with the derived age identity
-  remember NAME [--nearby]                       Remember a derived key on this machine (no more prompts for it)
-  forget [NAME] [--all]                          Forget a remembered key
-  remembered                                     List keys remembered on this machine (never prints key material)
+  init                                Create a keytap passkey, if you do not already have one
+  public [NAME] [--as VAL]            Output the public key
+  reveal [NAME] [--as VAL]            Reveal private key material
+  encrypt [NAME] [--to VAL] [-R VAL]  Encrypt stdin to stdout with the derived age identity
+  decrypt [NAME]                      Decrypt age input from stdin to stdout with the derived age identity
+  remember NAME                       Remember a derived key on this machine (no more prompts for it)
+  forget [NAME] [--all]               Forget a remembered key
+  remembered                          List keys remembered on this machine (never prints key material)
 
 Arguments & options
-  --nearby  Run the passkey ceremony on a nearby device only
   NAME      Key name for domain separation  [default: default]
   --as VAL  Output format  (hex | base64 | age | ssh)  [default: hex]
   --to VAL  Additional age recipient (can be repeated)
@@ -87,12 +86,11 @@ gh attestation verify keytap-*.zip -R jul-sh/keytap
 
 ## Approval
 
-When a command needs a passkey ceremony on macOS, Keytap opens the native
-prompt and shows a QR code plus a forwardable approval URL; the first verified
-approval wins.
-Registration uses one route: `keytap init` is native, while
-`keytap init --nearby` uses a nearby device. Other platforms use nearby
-approval.
+On macOS, commands using an existing passkey open the native prompt and show a
+QR code plus a forwardable approval URL; the first verified approval wins.
+`keytap init` creates the passkey natively; if macOS confirms that this device
+cannot create passkeys, it shows a QR code for creation on a nearby device.
+Other platforms use nearby approval.
 
 Nearby approval sends one outbound secure WebSocket from each device to a
 short-lived relay. The URL fragment carries a fresh P-256 public key whose

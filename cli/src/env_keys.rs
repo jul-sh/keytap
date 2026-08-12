@@ -8,13 +8,12 @@
 //! secret fail loudly at parse time instead of silently deriving a
 //! different key.
 //!
-//! Automatic resolution is per name and puts a variable above every other
-//! source: a present variable wins over remembered keys and ceremonies, while
-//! an absent variable falls through to them. Explicit `--nearby` instead asks
-//! for a fresh nearby ceremony and bypasses non-ceremony sources. The ceremony
-//! rung remains guarded under `$CI`. In automatic mode, a variable that is
-//! present but unusable — empty, wrong encoding — is always a hard error,
-//! never a silent fall-through to a prompt no one can answer.
+//! Resolution is per name and puts a variable above every other source: a
+//! present variable wins over remembered keys and ceremonies, while an absent
+//! variable falls through to them. The ceremony rung remains guarded under
+//! `$CI`. A variable that is present but unusable — empty, wrong encoding — is
+//! always a hard error, never a silent fall-through to a prompt no one can
+//! answer.
 
 use zeroize::Zeroizing;
 
