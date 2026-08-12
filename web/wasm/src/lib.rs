@@ -1,5 +1,5 @@
 use js_sys::Uint8Array;
-use keytap_cli_spec::{Cli, Command, Invocation};
+use keytap_cli_spec::{ApprovalMode, Cli, Command, Invocation};
 use wasm_bindgen::prelude::*;
 
 // ─── The CLI, compiled to wasm ───
@@ -113,12 +113,63 @@ pub async fn cli_run(argv: Vec<String>, stdin: &[u8], host: Host) -> Result<JsVa
     };
 
     let command = cli.command;
+    match &command {
+        Command::Init {
+            approval: ApprovalMode::NearbyOnly,
+            ..
+        }
+        | Command::Public {
+            approval: ApprovalMode::NearbyOnly,
+            ..
+        }
+        | Command::Reveal {
+            approval: ApprovalMode::NearbyOnly,
+            ..
+        }
+        | Command::Encrypt {
+            approval: ApprovalMode::NearbyOnly,
+            ..
+        }
+        | Command::Decrypt {
+            approval: ApprovalMode::NearbyOnly,
+            ..
+        }
+        | Command::Remember {
+            approval: ApprovalMode::NearbyOnly,
+            ..
+        } => {
+            host.stderr("error: --nearby is only available in the installed keytap CLI");
+            return done(Vec::new(), 1, None);
+        }
+        Command::Init {
+            approval: ApprovalMode::Automatic,
+            ..
+        }
+        | Command::Public {
+            approval: ApprovalMode::Automatic,
+            ..
+        }
+        | Command::Reveal {
+            approval: ApprovalMode::Automatic,
+            ..
+        }
+        | Command::Encrypt {
+            approval: ApprovalMode::Automatic,
+            ..
+        }
+        | Command::Decrypt {
+            approval: ApprovalMode::Automatic,
+            ..
+        }
+        | Command::Remember {
+            approval: ApprovalMode::Automatic,
+            ..
+        }
+        | Command::Forget { .. }
+        | Command::Remembered => {}
+    }
     let stdout: Vec<u8> = match &command {
-        Command::Init { force, nearby } => {
-            if *nearby {
-                host.stderr("error: init --nearby is only available in the installed keytap CLI");
-                return done(Vec::new(), 1, None);
-            }
+        Command::Init { force, .. } => {
             if !force && host.has_credential_id() {
                 return Err(fail(
                     "this browser has a saved keytap credential ID. Running init creates a \
@@ -139,14 +190,14 @@ pub async fn cli_run(argv: Vec<String>, stdin: &[u8], host: Host) -> Result<JsVa
             Vec::new()
         }
 
-        Command::Public { name, format } => {
+        Command::Public { name, format, .. } => {
             let raw_key = obtain_key(&host, name).await?;
             keytap_core::format_public_key_display(&raw_key, format.public_key_format(name))
                 .map_err(|e| fail(&format!("format error: {e}")))?
                 .into_bytes()
         }
 
-        Command::Reveal { name, format } => {
+        Command::Reveal { name, format, .. } => {
             let raw_key = obtain_key(&host, name).await?;
             keytap_core::format_private_key_display(&raw_key, (*format).into())
                 .map_err(|e| fail(&format!("format error: {e}")))?
@@ -157,6 +208,7 @@ pub async fn cli_run(argv: Vec<String>, stdin: &[u8], host: Host) -> Result<JsVa
             recipients,
             recipients_file,
             no_self,
+            ..
         } => {
             let mut files = Vec::new();
             for file in recipients_file {
@@ -180,7 +232,7 @@ pub async fn cli_run(argv: Vec<String>, stdin: &[u8], host: Host) -> Result<JsVa
             out
         }
 
-        Command::Decrypt { name } => {
+        Command::Decrypt { name, .. } => {
             let raw_key = obtain_key(&host, name).await?;
             let mut reader: &[u8] = stdin;
             let mut out = Vec::new();
@@ -330,10 +382,15 @@ mod plan_tests {
                         "cmd": "reveal",
                         "name": "github",
                         "format": "ssh",
+                        "approval": "automatic",
                     })
                 );
                 match cli.command {
-                    Command::Reveal { name, format } => {
+                    Command::Reveal {
+                        name,
+                        format,
+                        approval: ApprovalMode::Automatic,
+                    } => {
                         assert_eq!(name, "github");
                         assert!(matches!(format, keytap_cli_spec::Format::Ssh));
                     }
@@ -352,7 +409,7 @@ mod plan_tests {
                     cli.command,
                     Command::Init {
                         force: true,
-                        nearby: false
+                        approval: ApprovalMode::Automatic
                     }
                 ))
             }
@@ -361,14 +418,41 @@ mod plan_tests {
     }
 
     #[test]
-    fn nearby_is_an_init_only_installed_cli_route() {
-        assert!(matches!(plan(argv("init --nearby")), Plan::Run(_)));
-        match plan(argv("reveal --nearby")) {
-            Plan::Output { stderr, exit, .. } => {
-                assert!(stderr.contains("unexpected argument '--nearby'"));
-                assert_eq!(exit, 2);
+    fn nearby_parses_for_every_installed_cli_ceremony() {
+        for line in [
+            "init --nearby",
+            "public --nearby",
+            "reveal --nearby",
+            "encrypt --nearby",
+            "decrypt --nearby",
+            "remember deploy --nearby",
+        ] {
+            let cli = match plan(argv(line)) {
+                Plan::Run(cli) => cli,
+                _ => panic!("expected {line:?} to parse for installed-CLI routing"),
+            };
+            let approval = match cli.command {
+                Command::Init { approval, .. }
+                | Command::Public { approval, .. }
+                | Command::Reveal { approval, .. }
+                | Command::Encrypt { approval, .. }
+                | Command::Decrypt { approval, .. }
+                | Command::Remember { approval, .. } => approval,
+                Command::Forget { .. } | Command::Remembered => {
+                    panic!("{line:?} parsed as a command without a ceremony")
+                }
+            };
+            assert_eq!(approval, ApprovalMode::NearbyOnly, "argv: {line:?}");
+        }
+
+        for line in ["forget --nearby", "remembered --nearby"] {
+            match plan(argv(line)) {
+                Plan::Output { stderr, exit, .. } => {
+                    assert!(stderr.contains("unexpected argument '--nearby'"));
+                    assert_eq!(exit, 2);
+                }
+                _ => panic!("expected {line:?} to reject --nearby"),
             }
-            _ => panic!("expected assertion --nearby to be rejected"),
         }
     }
 
@@ -389,6 +473,7 @@ mod plan_tests {
                 "recipients": ["age1x"],
                 "recipientsFile": ["friends.txt"],
                 "noSelf": true,
+                "approval": "automatic",
             })
         );
     }

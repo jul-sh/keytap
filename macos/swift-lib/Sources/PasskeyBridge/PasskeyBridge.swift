@@ -302,6 +302,35 @@ private enum TerminalCompletion {
   case failure(message: String)
 }
 
+enum AuthorizationErrorOutcome {
+  case cancelled
+  case failure(message: String)
+}
+
+func authorizationErrorOutcome(for error: Error) -> AuthorizationErrorOutcome {
+  let nsError = error as NSError
+  guard nsError.domain == ASAuthorizationError.errorDomain else {
+    return .failure(message: nsError.localizedDescription)
+  }
+  guard let code = ASAuthorizationError.Code(rawValue: nsError.code) else {
+    return .failure(message: nsError.localizedDescription)
+  }
+
+  switch code {
+  case .canceled:
+    return .cancelled
+  case .failed:
+    return .failure(
+      message: "native passkey authorization failed: \(nsError.localizedDescription). "
+        + "Possible causes include Keytap.app not being registered with LaunchServices, "
+        + "a missing webcredentials association with keytap.jul.sh, or an unavailable "
+        + "passkey provider."
+    )
+  default:
+    return .failure(message: nsError.localizedDescription)
+  }
+}
+
 // MARK: - Authorization delegate
 
 @MainActor
@@ -469,23 +498,11 @@ private final class PasskeyOperation: NSObject, ASAuthorizationControllerDelegat
     controller _: ASAuthorizationController,
     didCompleteWithError error: Error
   ) {
-    let nsError = error as NSError
-    guard nsError.domain == ASAuthorizationError.errorDomain else {
-      finish(.failure(message: nsError.localizedDescription))
-      return
-    }
-    guard let code = ASAuthorizationError.Code(rawValue: nsError.code) else {
-      finish(.failure(message: nsError.localizedDescription))
-      return
-    }
-
-    switch code {
-    case .canceled:
+    switch authorizationErrorOutcome(for: error) {
+    case .cancelled:
       finish(.cancelled)
-    case .failed:
-      finish(.failure(message: "authentication failed: \(nsError.localizedDescription)"))
-    default:
-      finish(.failure(message: nsError.localizedDescription))
+    case .failure(let message):
+      finish(.failure(message: message))
     }
   }
 

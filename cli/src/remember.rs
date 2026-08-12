@@ -294,14 +294,28 @@ pub fn forget_all() {
     }
 }
 
-/// Print the names remembered under the authoritative root, one per line, across
-/// every store (each name once, even when stores overlap).
+/// Print the names remembered under the authoritative root, one per line,
+/// across every store (each name once, even when stores overlap). An
+/// uninitialized machine has no authoritative root and reports an empty state
+/// without inspecting orphaned entries.
 pub fn remembered() {
-    let authority = crate::nearby_identity::remember_authority().unwrap_or_else(|error| {
+    let scope = crate::nearby_identity::remembered_scope().unwrap_or_else(|error| {
         crate::die(&format!(
             "could not determine the current passkey identity: {error}"
         ))
     });
+    let authority = match scope {
+        crate::nearby_identity::RememberedScope::Uninitialized(scope) => {
+            scope
+                .ensure_unchanged()
+                .unwrap_or_else(|error| crate::die(&error));
+            eprintln!(
+                "No local passkey identity yet; no remembered keys are available. Run `keytap remember NAME` to remember one."
+            );
+            return;
+        }
+        crate::nearby_identity::RememberedScope::Current(authority) => authority,
+    };
     let root = root_id(authority.credential_id());
     let stores = open_stores().unwrap_or_else(|e| crate::die(&e.to_string()));
     let mut names: Vec<String> = Vec::new();

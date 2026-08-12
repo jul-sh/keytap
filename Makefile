@@ -1,10 +1,14 @@
 APP_NAME = Keytap
 BUNDLE = $(APP_NAME).app
 BIN = $(BUNDLE)/Contents/MacOS/keytap
+LAUNCHER_SOURCE = distribution/keytap-launcher.sh
+BUNDLE_LAUNCHER = $(BUNDLE)/Contents/Resources/keytap-launcher
 IDENTITY ?= $(shell security find-identity -v -p codesigning 2>/dev/null | grep -q "Developer ID Application" && echo "Developer ID Application" || echo "-")
 PROVISIONING_PROFILE ?=
+UNAME_S := $(shell uname -s)
+MACOS_TEST_TARGET := $(if $(filter Darwin,$(UNAME_S)),test-macos,)
 
-.PHONY: all build build-wasm sign notarize setup-signing install verify package test test-core test-spec test-cli test-wasm test-web clean
+.PHONY: all build build-wasm sign notarize setup-signing install verify package test test-core test-spec test-cli test-macos test-wasm test-web clean
 
 all: build sign notarize
 
@@ -29,6 +33,7 @@ build:
 		--app-icon keytap --include-all-app-icons \
 		--output-partial-info-plist /dev/null > /dev/null
 	@cp target/release/keytap $(BIN)
+	@install -m 755 $(LAUNCHER_SOURCE) $(BUNDLE_LAUNCHER)
 	@echo "Built $(BUNDLE)"
 
 sign:
@@ -49,16 +54,19 @@ notarize:
 
 INSTALL_DIR = $(HOME)/.local/share/keytap
 INSTALL_BUNDLE = $(INSTALL_DIR)/$(BUNDLE)
-INSTALL_BIN = $(INSTALL_BUNDLE)/Contents/MacOS/keytap
+INSTALL_LAUNCHER = $(HOME)/.local/bin/keytap
 
 install: setup-signing all
 	@mkdir -p $(HOME)/.local/bin
 	@rm -rf $(INSTALL_BUNDLE)
 	@mkdir -p $(INSTALL_DIR)
 	@cp -R $(BUNDLE) $(INSTALL_BUNDLE)
-	@ln -sf $(INSTALL_BIN) $(HOME)/.local/bin/keytap
+	@rm -f $(INSTALL_LAUNCHER)
+	@install -m 755 $(INSTALL_BUNDLE)/Contents/Resources/keytap-launcher $(INSTALL_LAUNCHER)
+	@KEYTAP_APP_BUNDLE="$(INSTALL_BUNDLE)" KEYTAP_LAUNCHER_REGISTER_ONLY=1 $(INSTALL_LAUNCHER)
 	@echo "Installed: $(INSTALL_BUNDLE)"
-	@echo "Symlinked: ~/.local/bin/keytap -> $(INSTALL_BIN)"
+	@echo "Registered with LaunchServices"
+	@echo "Installed launcher: ~/.local/bin/keytap"
 
 verify:
 	codesign -dvv $(BUNDLE) 2>&1
@@ -68,7 +76,7 @@ verify:
 build-wasm:
 	wasm-pack build --target web web/wasm --out-dir ../pkg --out-name keytap_web
 
-test: test-core test-spec test-cli test-wasm test-web
+test: test-core test-spec test-cli $(MACOS_TEST_TARGET) test-wasm test-web
 	@echo "All tests passed."
 
 test-core:
@@ -79,6 +87,10 @@ test-spec:
 
 test-cli:
 	cargo test -p keytap
+
+test-macos:
+	swift test --package-path macos/swift-lib
+	./distribution/keytap-launcher.test.sh
 
 test-wasm:
 	cargo test -p keytap-web

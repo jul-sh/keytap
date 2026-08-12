@@ -2,16 +2,15 @@
 
 <img src="macos/keytap.icon/Assets/icon.png" width="128" alt="keytap icon" />
 
-Keytap derives reproducible `age` identities, SSH keys, and 32-byte secrets
-from a passkey using WebAuthn PRF. The same passkey and name produce the same
-key wherever that passkey is available; different names produce independent
-keys. Derived keys are not stored unless you choose `remember`.
+Keytap is a CLI for deriving reproducible SSH keys and `age` identities
+anywhere you can unlock your passkey.
+
+Unlock with Touch ID; or approve using a passkey on a nearby device.
 
 > **Pre-release:** Expect breaking changes. Do not make Keytap the only way to
 > recover important secrets.
 
-[Try the web demo](https://keytap.jul.sh). It supports key derivation; nearby
-approval, remembered keys, and CI behavior require the installed CLI.
+[Try the web demo](https://keytap.jul.sh).
 
 <!--HELP:BEGIN-->
 ```
@@ -20,22 +19,21 @@ Derive keys and encrypt files from a passkey.
 Usage: keytap <COMMAND> [ARGS]
 
 Commands
-  init [--nearby]                     Create a keytap passkey, if you do not already have one
-  public [NAME] [--as VAL]            Output the public key
-  reveal [NAME] [--as VAL]            Reveal private key material
-  encrypt [NAME] [--to VAL] [-R VAL]  Encrypt stdin to stdout with the derived age identity
-  decrypt [NAME]                      Decrypt age input from stdin to stdout with the derived age identity
-  remember NAME                       Remember a derived key on this machine (no more prompts for it)
-  forget [NAME] [--all]               Forget a remembered key
-  remembered                          List keys remembered on this machine (never prints key material)
+  init [--nearby]                                Create a keytap passkey, if you do not already have one
+  public [NAME] [--as VAL] [--nearby]            Output the public key
+  reveal [NAME] [--as VAL] [--nearby]            Reveal private key material
+  encrypt [NAME] [--to VAL] [-R VAL] [--nearby]  Encrypt stdin to stdout with the derived age identity
+  decrypt [NAME] [--nearby]                      Decrypt age input from stdin to stdout with the derived age identity
+  remember NAME [--nearby]                       Remember a derived key on this machine (no more prompts for it)
+  forget [NAME] [--all]                          Forget a remembered key
+  remembered                                     List keys remembered on this machine (never prints key material)
 
 Arguments & options
-  --nearby  Register the passkey on a nearby device instead of this machine
+  --nearby  Run the passkey ceremony on a nearby device only
   NAME      Key name for domain separation  [default: default]
   --as VAL  Output format  (hex | base64 | age | ssh)  [default: hex]
   --to VAL  Additional age recipient (can be repeated)
   -R VAL    File containing age recipients (one per line)
-  --all     Forget every remembered key, including ones from previous passkeys
 
 Options
   --prompt  Allow passkey ceremonies under $CI (only affects commands that need one)
@@ -55,13 +53,26 @@ case "$(uname -s)/$(uname -m)" in
   Linux/x86_64) ASSET='linux-x86_64.zip' ;;
   *) echo 'Keytap has no release for this platform.' >&2; exit 1 ;;
 esac
-URL=$(curl -fsSL https://api.github.com/repos/jul-sh/keytap/releases/latest \
+URL=$(curl -fsSL 'https://api.github.com/repos/jul-sh/keytap/releases?per_page=1' \
   | grep -o '"browser_download_url": *"[^"]*"' | cut -d '"' -f 4 \
   | grep "$ASSET$") \
   && curl -fLO "$URL" && mkdir -p ~/.local/bin \
   && if [ "$(uname -s)" = Darwin ]; then
        mkdir -p ~/.local/share/keytap && unzip -o keytap-*-arm64.zip -d ~/.local/share/keytap \
-       && ln -sf ~/.local/share/keytap/Keytap.app/Contents/MacOS/keytap ~/.local/bin/keytap
+       && rm -f ~/.local/bin/keytap \
+       && if [ -x ~/.local/share/keytap/Keytap.app/Contents/Resources/keytap-launcher ]; then
+            install -m 755 ~/.local/share/keytap/Keytap.app/Contents/Resources/keytap-launcher \
+              ~/.local/bin/keytap \
+            && KEYTAP_LAUNCHER_REGISTER_ONLY=1 ~/.local/bin/keytap
+          else
+            printf '%s\n' '#!/bin/sh' \
+              'exec "$HOME/.local/share/keytap/Keytap.app/Contents/MacOS/keytap" "$@"' \
+              > ~/.local/bin/keytap \
+            && chmod 755 ~/.local/bin/keytap \
+            && /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister \
+              -f ~/.local/share/keytap/Keytap.app \
+            && sleep 2
+          fi
      else
        unzip -o keytap-*-linux-x86_64.zip keytap -d ~/.local/bin
      fi

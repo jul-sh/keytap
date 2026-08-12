@@ -180,7 +180,6 @@ pub enum StorageOutcome {
     Unavailable,
 }
 
-#[cfg(not(target_os = "macos"))]
 pub fn authenticate_nearby(name: &str, storage_policy: StoragePolicy) -> NearbyAssertion {
     let cancellation = NearbyCancellation::new();
     let prepared = prepare_nearby_assertion_with_presentation(
