@@ -294,8 +294,10 @@ pub fn forget_all() {
     }
 }
 
-/// Print the names remembered under the authoritative root, one per line, across
-/// every store (each name once, even when stores overlap).
+/// Print the names remembered under the authoritative root, one per line,
+/// across every store (each name once, even when stores overlap). An
+/// uninitialized machine has no authoritative root and reports an empty state
+/// without inspecting orphaned entries.
 pub fn remembered() {
     let scope = crate::nearby_identity::remembered_scope().unwrap_or_else(|error| {
         crate::die(&format!(
@@ -307,7 +309,9 @@ pub fn remembered() {
             scope
                 .ensure_unchanged()
                 .unwrap_or_else(|error| crate::die(&error));
-            eprintln!("No local passkey identity yet; no remembered keys are available.");
+            eprintln!(
+                "No local passkey identity yet; no remembered keys are available. Run `keytap remember NAME` to remember one."
+            );
             return;
         }
         crate::nearby_identity::RememberedScope::Current(authority) => authority,

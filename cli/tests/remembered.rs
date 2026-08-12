@@ -46,7 +46,7 @@ fn missing_identity_is_empty_even_when_orphaned_entries_exist() {
     assert!(output.stdout.is_empty());
     assert_eq!(
         String::from_utf8(output.stderr).unwrap(),
-        "No local passkey identity yet; no remembered keys are available.\n"
+        "No local passkey identity yet; no remembered keys are available. Run `keytap remember NAME` to remember one.\n"
     );
 
     let _ = std::fs::remove_dir_all(&dir);
