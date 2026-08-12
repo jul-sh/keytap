@@ -212,20 +212,18 @@ fn ci_refuses_the_ceremony_and_names_the_fix() {
     assert!(!out.status.success());
     let err = stderr(&out);
     assert!(err.contains("$KEYTAP_KEY_DEPLOY"), "stderr: {err}");
-    assert!(err.contains("--prompt"), "stderr: {err}");
+    assert!(!err.contains("--prompt"), "stderr: {err}");
 }
 
 /// Same guard for the commands whose whole purpose is a ceremony.
 #[cfg(target_os = "linux")]
 #[test]
-fn ci_refuses_init_and_remember_without_prompt() {
+fn ci_refuses_init_and_remember() {
     for args in [vec!["init"], vec!["remember", "deploy"]] {
         let out = keytap(&[], &args, b"");
         assert!(!out.status.success(), "{args:?} must refuse under $CI");
-        assert!(
-            stderr(&out).contains("--prompt"),
-            "stderr: {}",
-            stderr(&out)
-        );
+        let err = stderr(&out);
+        assert!(err.contains("$CI is set"), "stderr: {err}");
+        assert!(!err.contains("--prompt"), "stderr: {err}");
     }
 }

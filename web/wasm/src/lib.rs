@@ -250,11 +250,6 @@ pub fn ed25519_public_key(mut seed: Vec<u8>) -> Result<Vec<u8>, JsError> {
 
 // ─── Terminal chrome inputs ───
 
-#[wasm_bindgen(js_name = cliVersion)]
-pub fn cli_version() -> String {
-    keytap_cli_spec::version().to_string()
-}
-
 /// Subcommand names with their visible flags, for tab completion; walked
 /// from the same clap metadata as the help, so completion can't drift.
 #[wasm_bindgen(js_name = cliCompletions)]
@@ -353,23 +348,25 @@ mod plan_tests {
     }
 
     #[test]
-    fn removed_nearby_switch_is_rejected_by_every_command() {
-        for line in [
-            "init --nearby",
-            "public --nearby",
-            "reveal --nearby",
-            "encrypt --nearby",
-            "decrypt --nearby",
-            "remember deploy --nearby",
-            "forget --nearby",
-            "remembered --nearby",
-        ] {
-            match plan(argv(line)) {
-                Plan::Output { stderr, exit, .. } => {
-                    assert!(stderr.contains("unexpected argument '--nearby'"));
-                    assert_eq!(exit, 2);
+    fn removed_switches_are_rejected_by_every_command() {
+        for removed in ["--nearby", "--prompt"] {
+            for line in [
+                format!("init {removed}"),
+                format!("public {removed}"),
+                format!("reveal {removed}"),
+                format!("encrypt {removed}"),
+                format!("decrypt {removed}"),
+                format!("remember deploy {removed}"),
+                format!("forget {removed}"),
+                format!("remembered {removed}"),
+            ] {
+                match plan(argv(&line)) {
+                    Plan::Output { stderr, exit, .. } => {
+                        assert!(stderr.contains(&format!("unexpected argument '{removed}'")));
+                        assert_eq!(exit, 2);
+                    }
+                    _ => panic!("expected {line:?} to reject {removed}"),
                 }
-                _ => panic!("expected {line:?} to reject --nearby"),
             }
         }
     }

@@ -32,7 +32,7 @@ fn main() {
 
     match cli.command {
         Command::Init { force } => {
-            guard_ceremony("init", cli.prompt);
+            guard_ceremony("init");
             let init_mode = if force {
                 nearby_identity::InitMode::Replace
             } else {
@@ -47,14 +47,10 @@ fn main() {
             remember::after_init();
         }
         Command::Public { ref name, format } => {
-            with_derived_key(name, cli.prompt, |raw_key| {
-                emit_public_key(raw_key, format, name)
-            });
+            with_derived_key(name, |raw_key| emit_public_key(raw_key, format, name));
         }
         Command::Reveal { ref name, format } => {
-            with_derived_key(name, cli.prompt, |raw_key| {
-                emit_private_key(raw_key, format)
-            });
+            with_derived_key(name, |raw_key| emit_private_key(raw_key, format));
         }
         Command::Encrypt {
             ref name,
@@ -62,12 +58,12 @@ fn main() {
             ref recipients_file,
             no_self,
         } => {
-            with_derived_key(name, cli.prompt, |raw_key| {
+            with_derived_key(name, |raw_key| {
                 encrypt::encrypt(raw_key, recipients, recipients_file, !no_self)
             });
         }
         Command::Decrypt { ref name } => {
-            with_derived_key(name, cli.prompt, encrypt::decrypt);
+            with_derived_key(name, encrypt::decrypt);
         }
         Command::Remember { ref name } => {
             // Fail fast on invalid names or unavailable local storage before
@@ -75,7 +71,7 @@ fn main() {
             if let Err(e) = keytap_core::prf_salt_for_name(name) {
                 die(&e.to_string());
             }
-            guard_ceremony("remember", cli.prompt);
+            guard_ceremony("remember");
             let mut target = remember::write_target();
             let assertion = authenticate(name, nearby::StoragePolicy::Remember);
             match assertion.into_remember_disposition() {
@@ -103,12 +99,12 @@ fn main() {
 /// Resolve the raw key for `name` and hand it to `use_key`: first the
 /// environment (`$KEYTAP_KEY_<NAME>`, the CI path), then a key remembered on
 /// this machine, then a fresh ceremony. Under `$CI`, a fresh ceremony is
-/// refused unless `--prompt` asks for it.
+/// refused.
 ///
 /// The named derived key is retained only when the user explicitly chooses to
 /// remember it. First approval may still establish the local credential record
 /// used to constrain later passkey ceremonies.
-fn with_derived_key(name: &str, allow_prompt: bool, use_key: impl FnOnce(&[u8])) {
+fn with_derived_key(name: &str, use_key: impl FnOnce(&[u8])) {
     if let Err(error) = keytap_core::prf_salt_for_name(name) {
         die(&error.to_string());
     }
@@ -118,12 +114,11 @@ fn with_derived_key(name: &str, allow_prompt: bool, use_key: impl FnOnce(&[u8]))
     if let Some(raw_key) = remember::lookup(name) {
         return use_key(&raw_key);
     }
-    if in_ci() && !allow_prompt {
+    if in_ci() {
         die(&format!(
             "$CI is set and there is no key for '{name}': refusing to start a passkey ceremony \
              (it would hang this job). Set ${var} to the output of \
-             `keytap reveal {name} --as age`, or pass --prompt to run the ceremony anyway \
-             (the QR code and approval URL land in the job log).",
+             `keytap reveal {name} --as age` before running this job.",
             var = env_keys::var_name(name)
         ));
     }
@@ -135,13 +130,12 @@ fn with_derived_key(name: &str, allow_prompt: bool, use_key: impl FnOnce(&[u8]))
     use_key(&raw_key);
 }
 
-/// `init` and `remember` exist to run a ceremony; under `$CI` that still
-/// needs the same explicit opt-in as the derivation commands.
-fn guard_ceremony(command: &str, allow_prompt: bool) {
-    if in_ci() && !allow_prompt {
+/// `init` and `remember` exist to run a ceremony, so they fail under `$CI`.
+fn guard_ceremony(command: &str) {
+    if in_ci() {
         die(&format!(
             "$CI is set: refusing to start the passkey ceremony `keytap {command}` needs \
-             (it would hang this job). Pass --prompt to run it anyway."
+             (it would hang this job). Run this command outside CI."
         ));
     }
 }

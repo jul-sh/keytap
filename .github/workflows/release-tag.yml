@@ -127,6 +127,7 @@ jobs:
       - name: Update flake.nix with new release
         run: |
           TAG="${{ needs.build-macos.outputs.tag }}"
+          VERSION="${TAG#v}"
           MACOS_ZIP="${{ needs.build-macos.outputs.zip_name }}"
           LINUX_ZIP="${{ needs.build-linux.outputs.zip_name }}"
 
@@ -140,21 +141,30 @@ jobs:
           git fetch origin main
           git checkout main
 
-          # The package version is derived from the artifact URL in flake.nix,
-          # so rewriting the release blocks below is the whole update.
           python3 -c "
           import re, sys
           with open('flake.nix') as f: s = f.read()
-          s = re.sub(
+          s, count = re.subn(
+              r'(?m)^(            version = )\"[^\"]+\";$',
+              r'\1\"${VERSION}\";',
+              s
+          )
+          if count != 1:
+              sys.exit(f'expected one package version, updated {count}')
+          s, count = re.subn(
               r'aarch64-darwin = \{[^}]+\}',
               'aarch64-darwin = {\n            url = \"${MACOS_URL}\";\n            hash = \"${MACOS_HASH}\";\n          }',
               s
           )
-          s = re.sub(
+          if count != 1:
+              sys.exit(f'expected one macOS release block, updated {count}')
+          s, count = re.subn(
               r'x86_64-linux = \{[^}]+\}',
               'x86_64-linux = {\n            url = \"${LINUX_URL}\";\n            hash = \"${LINUX_HASH}\";\n          }',
               s
           )
+          if count != 1:
+              sys.exit(f'expected one Linux release block, updated {count}')
           with open('flake.nix', 'w') as f: f.write(s)
           "
 

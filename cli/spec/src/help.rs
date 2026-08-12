@@ -9,7 +9,7 @@ use clap::{Arg, ArgAction, Command};
 /// Unlike clap's default top-level help (which only lists command names and
 /// forces a `keytap <cmd> --help` round-trip to discover the optional name arg
 /// and format flags), this shows every command inline with its arguments,
-/// then a short legend explaining the shared options and their choices.
+/// then a short legend explaining the shared options and their defaults.
 pub fn overview(cli: &Command) -> String {
     let mut out = String::new();
 
@@ -40,7 +40,7 @@ pub fn overview(cli: &Command) -> String {
     }
 
     // Second pass: collect the shared arguments once and describe them as a
-    // legend, folding in the concrete choices from each ValueEnum.
+    // legend. ValueEnum choices already appear in each command's signature.
     let legend = build_legend(&commands);
     if !legend.is_empty() {
         out.push('\n');
@@ -79,7 +79,7 @@ pub fn overview(cli: &Command) -> String {
 /// is the built-in opt-in hold (no TTL; OS keychain or a plain file, see
 /// REMEMBER). Agent and variable patterns are bounded alternatives: they
 /// expire, while remembered keys do not.
-pub(crate) const REUSE: &str = "Reusing a key without re-authenticating each time\n  By default keytap derives on demand and does not retain the named derived\n  key. The built-in way to stop repeated prompts is to remember the key on\n  this machine (no expiry \u{2014} see `keytap remember --help` for where it lands\n  and the exact trade-off):\n\n    keytap remember deploy    # one ceremony; 'deploy' stops prompting on this machine\n    keytap forget deploy      # back to prompting (or `keytap forget --all`)\n\n  Prefer a hold that expires on its own? Hand the key to a standard holder:\n\n  SSH (many connections, one prompt, self-expiring):\n    eval \"$(ssh-agent -s)\"\n    keytap reveal ha --as ssh | ssh-add -t 900 -    # 15-min hold, then gone\n\n  A secret reused within one script (bounded to the process):\n    KEY=$(keytap reveal deploy --as hex); use \"$KEY\"; unset KEY\n\n  A secret another tool reads from the OS keychain: remember it, then let the\n  tool call keytap \u{2014} `keytap reveal deploy` no longer prompts once remembered.\n\n  CI and other headless jobs ($CI set): a command that would need a passkey\n  ceremony fails instead (`--prompt` permits that ceremony). It can read the\n  derived key from $KEYTAP_KEY_<NAME> \u{2014} the key name uppercased, everything\n  outside A-Z0-9 flattened to _ (my-app -> KEYTAP_KEY_MY_APP). The value is\n  exactly the age encoding below \u{2014} its checksum makes a mangled secret fail\n  loudly instead of deriving a different key. A set variable beats remembered\n  keys and ceremonies. If it leaks, that name is burned: derivation is\n  deterministic, so retire the name.\n    keytap reveal ci --as age | gh secret set KEYTAP_KEY_CI   # once, locally\n    # job env: KEYTAP_KEY_CI=<that secret>, then `keytap decrypt ci` just works\n\n  Whatever holds the key\u{2014}keychain entry, agent, variable\u{2014}must be trusted accordingly.";
+pub(crate) const REUSE: &str = "Reusing a key without re-authenticating each time\n  By default keytap derives on demand and does not retain the named derived\n  key. The built-in way to stop repeated prompts is to remember the key on\n  this machine (no expiry \u{2014} see `keytap remember --help` for where it lands\n  and the exact trade-off):\n\n    keytap remember deploy    # one ceremony; 'deploy' stops prompting on this machine\n    keytap forget deploy      # back to prompting (or `keytap forget --all`)\n\n  Prefer a hold that expires on its own? Hand the key to a standard holder:\n\n  SSH (many connections, one prompt, self-expiring):\n    eval \"$(ssh-agent -s)\"\n    keytap reveal ha --as ssh | ssh-add -t 900 -    # 15-min hold, then gone\n\n  A secret reused within one script (bounded to the process):\n    KEY=$(keytap reveal deploy --as hex); use \"$KEY\"; unset KEY\n\n  A secret another tool reads from the OS keychain: remember it, then let the\n  tool call keytap \u{2014} `keytap reveal deploy` no longer prompts once remembered.\n\n  CI and other headless jobs ($CI set): a command that would need a passkey\n  ceremony fails instead. It can read the derived key from $KEYTAP_KEY_<NAME>\n  \u{2014} the key name uppercased, everything outside A-Z0-9 flattened to _\n  (my-app -> KEYTAP_KEY_MY_APP). The value is exactly the age encoding below\n  \u{2014} its checksum makes a mangled secret fail loudly instead of deriving a\n  different key. A set variable beats remembered keys and ceremonies. If it\n  leaks, that name is burned: derivation is deterministic, so retire the name.\n    keytap reveal ci --as age | gh secret set KEYTAP_KEY_CI   # once, locally\n    # job env: KEYTAP_KEY_CI=<that secret>, then `keytap decrypt ci` just works\n\n  Whatever holds the key\u{2014}keychain entry, agent, variable\u{2014}must be trusted accordingly.";
 
 /// The remembered-keys contract, shown by `keytap remember --help`. States
 /// plainly what is stored, where, for how long, and what the trade-off is, so
@@ -98,7 +98,8 @@ fn in_overview(arg: &Arg) -> bool {
     !arg.is_hide_set() && !is_builtin(arg) && !OVERVIEW_SKIP.contains(&arg.get_id().as_str())
 }
 
-/// A command's inline signature, e.g. `reveal [NAME] [--as VAL]`.
+/// A command's inline signature, e.g.
+/// `reveal [NAME] [--as <hex|base64|age|ssh>]`.
 fn command_usage(cmd: &Command) -> String {
     let mut parts = vec![cmd.get_name().to_string()];
 
@@ -115,34 +116,44 @@ fn command_usage(cmd: &Command) -> String {
 /// The bracketed token for a single argument.
 fn token(arg: &Arg) -> String {
     let name = arg.get_id().as_str().to_uppercase();
+    let values = possible_values(arg);
+    let value = if values.is_empty() {
+        name.clone()
+    } else {
+        format!("<{}>", values.join("|"))
+    };
 
     if arg.is_positional() {
         // Required positionals stay bare (FILE); optional ones get brackets.
         if arg.is_required_set() {
-            name
+            value
         } else {
-            format!("[{name}]")
+            format!("[{value}]")
         }
     } else {
-        // A long flag; show `--flag` for switches, `--flag VAL` when it takes a value.
+        // A long flag; enum choices are concrete while unconstrained values
+        // retain the compact generic placeholder.
         let flag = flag_name(arg);
         if takes_value(arg) {
-            format!("[{flag} VAL]")
+            let value = if values.is_empty() {
+                "VAL".to_string()
+            } else {
+                format!("<{}>", values.join("|"))
+            };
+            format!("[{flag} {value}]")
         } else {
             format!("[{flag}]")
         }
     }
 }
 
-/// Build the legend describing each distinct optional argument once. When the
-/// same argument appears on several commands (e.g. `--as` on both `public`
-/// and `reveal`), its accepted values are merged into the union so the overview
-/// never understates the choices a command actually supports.
+/// Build the legend describing each distinct optional argument once. Concrete
+/// ValueEnum choices live in the command signatures; repeating them here would
+/// make the at-a-glance help noisier without adding information.
 fn build_legend(commands: &[(&Command, String, String)]) -> String {
     // Preserve first-seen order while accumulating across commands.
     let mut order: Vec<String> = Vec::new();
     let mut help: std::collections::HashMap<String, String> = Default::default();
-    let mut choices: std::collections::HashMap<String, Vec<String>> = Default::default();
     let mut default: std::collections::HashMap<String, Option<String>> = Default::default();
 
     for (cmd, _, _) in commands {
@@ -160,14 +171,6 @@ fn build_legend(commands: &[(&Command, String, String)]) -> String {
                 );
                 default.insert(key.clone(), default_value(arg));
             }
-
-            // Union the accepted values across every command sharing this key.
-            let bucket = choices.entry(key).or_default();
-            for value in possible_values(arg) {
-                if !bucket.contains(&value) {
-                    bucket.push(value);
-                }
-            }
         }
     }
 
@@ -178,13 +181,7 @@ fn build_legend(commands: &[(&Command, String, String)]) -> String {
     let lines: Vec<(String, String)> = order
         .into_iter()
         .filter_map(|key| {
-            // Fold in concrete choices and the default so the reader never has
-            // to open a subcommand's help to learn the accepted values.
             let mut desc = help.remove(&key).unwrap_or_default();
-            let values = choices.remove(&key).unwrap_or_default();
-            if !values.is_empty() {
-                desc.push_str(&format!("  ({})", values.join(" | ")));
-            }
             if let Some(Some(d)) = default.remove(&key) {
                 desc.push_str(&format!("  [default: {d}]"));
             }
@@ -208,7 +205,7 @@ fn legend_key(arg: &Arg) -> String {
         arg.get_id().as_str().to_uppercase()
     } else {
         let mut key = flag_name(arg);
-        if takes_value(arg) {
+        if takes_value(arg) && possible_values(arg).is_empty() {
             key.push_str(" VAL");
         }
         key
@@ -266,4 +263,40 @@ fn takes_value(arg: &Arg) -> bool {
 /// clap injects `--help`/`--version`; keep them out of the per-command usage.
 fn is_builtin(arg: &Arg) -> bool {
     matches!(arg.get_action(), ArgAction::Help | ArgAction::Version)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    #[test]
+    fn value_enum_choices_are_exactly_inlined_in_command_usage() {
+        let cli = crate::Cli::command();
+        let public = cli
+            .get_subcommands()
+            .find(|command| command.get_name() == "public")
+            .unwrap();
+        let reveal = cli
+            .get_subcommands()
+            .find(|command| command.get_name() == "reveal")
+            .unwrap();
+
+        assert_eq!(
+            command_usage(public),
+            "public [NAME] [--as <hex|base64|age|ssh>]"
+        );
+        assert_eq!(
+            command_usage(reveal),
+            "reveal [NAME] [--as <hex|base64|age|ssh>]"
+        );
+    }
+
+    #[test]
+    fn legend_keeps_enum_help_and_default_without_repeating_choices() {
+        let text = overview(&crate::Cli::command());
+        assert!(text.contains("\n  --as      Output format  [default: hex]\n"));
+        assert!(text.contains("\n  --to VAL  Additional age recipient (can be repeated)\n"));
+        assert!(!text.contains("(hex | base64 | age | ssh)"));
+    }
 }

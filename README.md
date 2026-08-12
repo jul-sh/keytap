@@ -19,23 +19,20 @@ Derive keys and encrypt files from a passkey.
 Usage: keytap <COMMAND> [ARGS]
 
 Commands
-  init                                Create a keytap passkey, if you do not already have one
-  public [NAME] [--as VAL]            Output the public key
-  reveal [NAME] [--as VAL]            Reveal private key material
-  encrypt [NAME] [--to VAL] [-R VAL]  Encrypt stdin to stdout with the derived age identity
-  decrypt [NAME]                      Decrypt age input from stdin to stdout with the derived age identity
-  remember NAME                       Remember a derived key on this machine (no more prompts for it)
-  forget [NAME] [--all]               Forget a remembered key
-  remembered                          List keys remembered on this machine (never prints key material)
+  init                                       Create a keytap passkey, if you do not already have one
+  public [NAME] [--as <hex|base64|age|ssh>]  Output the public key
+  reveal [NAME] [--as <hex|base64|age|ssh>]  Reveal private key material
+  encrypt [NAME] [--to VAL] [-R VAL]         Encrypt stdin to stdout with the derived age identity
+  decrypt [NAME]                             Decrypt age input from stdin to stdout with the derived age identity
+  remember NAME                              Remember a derived key on this machine (no more prompts for it)
+  forget [NAME] [--all]                      Forget a remembered key
+  remembered                                 List keys remembered on this machine (never prints key material)
 
 Arguments & options
   NAME      Key name for domain separation  [default: default]
-  --as VAL  Output format  (hex | base64 | age | ssh)  [default: hex]
+  --as      Output format  [default: hex]
   --to VAL  Additional age recipient (can be repeated)
   -R VAL    File containing age recipients (one per line)
-
-Options
-  --prompt  Allow passkey ceremonies under $CI (only affects commands that need one)
 
 Skip repeated prompts for a key: `keytap remember NAME` (see `keytap remember --help`).
 Holds that expire instead (ssh-agent, TTLs): see `keytap reveal --help`.
@@ -118,7 +115,7 @@ Secret Service when available; the fallback is an owner-only, unencrypted state
 file. Treat remembered keys like private keys. **Use once** skips storing the
 named key, but nearby pairing metadata is still retained.
 
-By default, Keytap does not open an interactive ceremony when `$CI` is set. Set
+Keytap does not open an interactive ceremony when `$CI` is set. Set
 `KEYTAP_KEY_<NAME>` to `keytap reveal <name> --as age` output; names are
 uppercased and non-alphanumeric characters become `_`.
 

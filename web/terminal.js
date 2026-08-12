@@ -8,7 +8,7 @@
 // aria-hidden mirror of it. Native editing (backspace, arrows, selection,
 // IME) therefore just works, and assistive tech sees a real text field.
 
-import init, { cliVersion, cliCompletions } from './pkg/keytap_web.js';
+import init, { cliCompletions } from './pkg/keytap_web.js';
 import { createFs, runPipeline, decode, builtins, ShellError } from './shell.js';
 import { createKeytapCommand } from './keytap-cli.js';
 
@@ -598,7 +598,7 @@ async function main() {
   completionsSpec = cliCompletions();
   commands.keytap = createKeytapCommand(ceremony, io);
 
-  io.out(`keytap ${cliVersion()} · one passkey becomes reproducible SSH keys, age identities, and app secrets.`);
+  io.out('keytap · one passkey becomes reproducible SSH keys, age identities, and app secrets.');
   io.out('');
   printSuggestions();
   io.out('');

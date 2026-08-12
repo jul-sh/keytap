@@ -62,9 +62,9 @@ fn reinit_is_refused_without_force() {
     let dir = initialized_state_dir("refuse");
     let state = dir.to_str().unwrap();
 
-    // --prompt gets past the CI ceremony guard, so what dies is the reinit
-    // guard: before any ceremony, naming the flag that overrides it.
-    let out = keytap(&[("XDG_STATE_HOME", state)], &["init", "--prompt"]);
+    // Disable the CI guard so the file-only reinit guard is the next boundary.
+    // If it regresses and opens a ceremony, the timeout still catches it.
+    let out = keytap(&[("XDG_STATE_HOME", state), ("CI", "false")], &["init"]);
     assert!(!out.status.success());
     let err = stderr(&out);
     assert!(err.contains("already stored"), "stderr: {err}");
@@ -78,14 +78,12 @@ fn reinit_is_refused_without_force() {
 }
 
 /// --force overrides the reinit guard, never the CI one: headless jobs still
-/// refuse the ceremony itself unless --prompt asks for it.
+/// refuse the ceremony itself.
 #[test]
 fn force_does_not_bypass_the_ci_guard() {
     let out = keytap(&[], &["init", "--force"]);
     assert!(!out.status.success());
-    assert!(
-        stderr(&out).contains("--prompt"),
-        "stderr: {}",
-        stderr(&out)
-    );
+    let err = stderr(&out);
+    assert!(err.contains("$CI is set"), "stderr: {err}");
+    assert!(err.contains("outside CI"), "stderr: {err}");
 }

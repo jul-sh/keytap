@@ -24,13 +24,6 @@ mod help;
 pub struct Cli {
     #[command(subcommand)]
     pub command: Command,
-
-    /// Allow passkey ceremonies under $CI (only affects commands that need one)
-    // With $CI set, a command that needs a ceremony fails fast instead of
-    // prompting — a prompt in a headless job is a hung runner, not a question.
-    // This is the override for the rare run where someone is watching the log.
-    #[arg(long, global = true)]
-    pub prompt: bool,
 }
 
 // Serialization and clap use the same variant and field definitions.
@@ -204,11 +197,6 @@ pub fn overview() -> String {
     help::overview(&Cli::command())
 }
 
-/// The version string baked into the CLI (`keytap --version` prints it).
-pub fn version() -> &'static str {
-    env!("CARGO_PKG_VERSION")
-}
-
 /// The command surface as data — subcommand names with their visible flags —
 /// for frontends that offer completion. Walks the same clap metadata the help
 /// is generated from, so completions can't drift either.
@@ -300,28 +288,30 @@ mod tests {
     }
 
     #[test]
-    fn removed_nearby_switch_is_rejected_by_every_command() {
-        for line in [
-            "init --nearby",
-            "public --nearby",
-            "reveal --nearby",
-            "encrypt --nearby",
-            "decrypt --nearby",
-            "remember deploy --nearby",
-            "forget --nearby",
-            "remembered --nearby",
-        ] {
-            match invoke(argv(line)) {
-                Invocation::Parsed(Err(error)) => {
-                    assert!(
-                        error
-                            .render()
-                            .to_string()
-                            .contains("unexpected argument '--nearby'"),
-                        "argv: {line:?}"
-                    );
+    fn removed_switches_are_rejected_by_every_command() {
+        for removed in ["--nearby", "--prompt"] {
+            for line in [
+                format!("init {removed}"),
+                format!("public {removed}"),
+                format!("reveal {removed}"),
+                format!("encrypt {removed}"),
+                format!("decrypt {removed}"),
+                format!("remember deploy {removed}"),
+                format!("forget {removed}"),
+                format!("remembered {removed}"),
+            ] {
+                match invoke(argv(&line)) {
+                    Invocation::Parsed(Err(error)) => {
+                        assert!(
+                            error
+                                .render()
+                                .to_string()
+                                .contains(&format!("unexpected argument '{removed}'")),
+                            "argv: {line:?}"
+                        );
+                    }
+                    _ => panic!("expected {line:?} to reject {removed}"),
                 }
-                _ => panic!("expected {line:?} to reject --nearby"),
             }
         }
     }
@@ -352,15 +342,21 @@ mod tests {
             !text.contains("--nearby"),
             "overview still exposes --nearby"
         );
+        assert!(
+            !text.contains("--prompt"),
+            "overview still exposes --prompt"
+        );
     }
 
     #[test]
-    fn completions_never_offer_removed_nearby_switch() {
+    fn completions_never_offer_removed_switches() {
         for (command, flags) in completions() {
-            assert!(
-                !flags.iter().any(|flag| flag == "--nearby"),
-                "completions unexpectedly offer --nearby for {command}"
-            );
+            for removed in ["--nearby", "--prompt"] {
+                assert!(
+                    !flags.iter().any(|flag| flag == removed),
+                    "completions unexpectedly offer {removed} for {command}"
+                );
+            }
         }
     }
 }
