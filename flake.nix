@@ -39,6 +39,9 @@
             sourceRoot = ".";
             nativeBuildInputs = [ pkgs.unzip ]
               ++ pkgs.lib.optionals isDarwin [ pkgs.makeWrapper ];
+            # The app bundle is already signed and notarized. Rewriting script
+            # shebangs inside the sealed bundle invalidates its signature.
+            dontPatchShebangs = isDarwin;
             unpackPhase = "unzip $src";
             installPhase = if isDarwin then ''
               mkdir -p $out/share/keytap $out/bin
@@ -49,6 +52,10 @@
               mkdir -p $out/bin
               cp keytap $out/bin/keytap
               chmod +x $out/bin/keytap
+            '';
+            doInstallCheck = isDarwin;
+            installCheckPhase = pkgs.lib.optionalString isDarwin ''
+              /usr/bin/codesign --verify --deep --strict $out/share/keytap/Keytap.app
             '';
           };
         };
