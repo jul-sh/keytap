@@ -11,6 +11,7 @@ let package = Package(
     .target(
       name: "PasskeyBridge",
       path: "Sources/PasskeyBridge"
-    )
+    ),
+    .testTarget(name: "PasskeyBridgeTests", dependencies: ["PasskeyBridge"]),
   ]
 )

@@ -79,13 +79,13 @@ fn main() {
             guard_ceremony("remember", cli.prompt);
             let mut target = remember::write_target();
             let assertion = authenticate(name, nearby::StoragePolicy::Remember);
-            match assertion.storage {
-                nearby::StorageOutcome::Once => {
+            match assertion.into_remember_disposition() {
+                RememberDisposition::StoreLocally(assertion) => {
                     let raw_key = derive_key(&assertion.prf_output);
                     remember::remember(&mut target, name, &assertion.credential_id, &raw_key);
                 }
-                nearby::StorageOutcome::Stored => {}
-                nearby::StorageOutcome::Unavailable => {
+                RememberDisposition::AlreadyStored => {}
+                RememberDisposition::Unavailable => {
                     die("the nearby assertion succeeded, but this key could not be remembered")
                 }
             }
@@ -130,6 +130,9 @@ fn with_derived_key(name: &str, allow_prompt: bool, use_key: impl FnOnce(&[u8]))
         ));
     }
     let assertion = authenticate(name, nearby::StoragePolicy::Choose);
+    let assertion = match assertion {
+        Assertion::Native(assertion) | Assertion::Nearby { assertion, .. } => assertion,
+    };
     let raw_key = derive_key(&assertion.prf_output);
     use_key(&raw_key);
 }
@@ -178,15 +181,14 @@ fn default_registration_route() -> RegistrationRoute {
     RegistrationRoute::Nearby
 }
 
-/// A completed passkey ceremony: the PRF output plus the ID of the credential
-/// that produced it (the latter identifies the root for remembered keys).
-struct Assertion {
+/// The data shared by every completed passkey assertion. The credential ID
+/// identifies the root for remembered keys.
+struct AssertionData {
     prf_output: Zeroizing<Vec<u8>>,
     credential_id: Vec<u8>,
-    storage: nearby::StorageOutcome,
 }
 
-impl Assertion {
+impl AssertionData {
     #[cfg(any(target_os = "macos", test))]
     fn native(prf_output: Vec<u8>, credential_id: Vec<u8>) -> Result<Self, String> {
         let prf_output = Zeroizing::new(prf_output);
@@ -202,32 +204,107 @@ impl Assertion {
                 credential_id.len()
             ));
         }
-        Ok(Assertion {
+        Ok(Self {
             prf_output,
             credential_id,
-            storage: nearby::StorageOutcome::Once,
         })
     }
+}
 
+/// A completed passkey ceremony. Only nearby assertions carry a storage
+/// outcome because native assertions never perform storage during approval.
+enum Assertion {
+    Native(AssertionData),
+    Nearby {
+        assertion: AssertionData,
+        storage: nearby::StorageOutcome,
+    },
+}
+
+impl Assertion {
     fn nearby(assertion: nearby::NearbyAssertion) -> Self {
-        Assertion {
-            prf_output: Zeroizing::new(assertion.prf_output),
-            credential_id: assertion.credential_id,
+        Self::Nearby {
+            assertion: AssertionData {
+                prf_output: Zeroizing::new(assertion.prf_output),
+                credential_id: assertion.credential_id,
+            },
             storage: assertion.storage,
+        }
+    }
+
+    fn into_remember_disposition(self) -> RememberDisposition {
+        match self {
+            Self::Native(assertion)
+            | Self::Nearby {
+                assertion,
+                storage: nearby::StorageOutcome::Once,
+            } => RememberDisposition::StoreLocally(assertion),
+            Self::Nearby {
+                storage: nearby::StorageOutcome::Stored,
+                ..
+            } => RememberDisposition::AlreadyStored,
+            Self::Nearby {
+                storage: nearby::StorageOutcome::Unavailable,
+                ..
+            } => RememberDisposition::Unavailable,
         }
     }
 }
 
+enum RememberDisposition {
+    StoreLocally(AssertionData),
+    AlreadyStored,
+    Unavailable,
+}
+
 #[cfg(test)]
 mod assertion_candidate_tests {
-    use super::Assertion;
+    use super::{nearby, Assertion, AssertionData, RememberDisposition};
 
     #[test]
     fn native_candidate_is_bounded_before_it_can_claim_the_race() {
-        assert!(Assertion::native(vec![7; 32], vec![9; 20]).is_ok());
-        assert!(Assertion::native(vec![7; 31], vec![9; 20]).is_err());
-        assert!(Assertion::native(vec![7; 32], Vec::new()).is_err());
-        assert!(Assertion::native(vec![7; 32], vec![9; 1025]).is_err());
+        assert!(AssertionData::native(vec![7; 32], vec![9; 20]).is_ok());
+        assert!(AssertionData::native(vec![7; 31], vec![9; 20]).is_err());
+        assert!(AssertionData::native(vec![7; 32], Vec::new()).is_err());
+        assert!(AssertionData::native(vec![7; 32], vec![9; 1025]).is_err());
+    }
+
+    fn nearby_assertion(storage: nearby::StorageOutcome) -> Assertion {
+        Assertion::nearby(nearby::NearbyAssertion {
+            prf_output: vec![7; 32],
+            credential_id: vec![9; 20],
+            storage,
+        })
+    }
+
+    #[test]
+    fn native_and_one_time_nearby_assertions_are_stored_locally() {
+        let native = Assertion::Native(
+            AssertionData::native(vec![7; 32], vec![9; 20]).expect("valid native assertion"),
+        );
+        for assertion in [native, nearby_assertion(nearby::StorageOutcome::Once)] {
+            match assertion.into_remember_disposition() {
+                RememberDisposition::StoreLocally(assertion) => {
+                    assert_eq!(assertion.prf_output.as_slice(), &[7; 32]);
+                    assert_eq!(assertion.credential_id, vec![9; 20]);
+                }
+                RememberDisposition::AlreadyStored | RememberDisposition::Unavailable => {
+                    panic!("assertion should be stored locally")
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn nearby_storage_disposition_prevents_duplicate_or_impossible_local_write() {
+        assert!(matches!(
+            nearby_assertion(nearby::StorageOutcome::Stored).into_remember_disposition(),
+            RememberDisposition::AlreadyStored
+        ));
+        assert!(matches!(
+            nearby_assertion(nearby::StorageOutcome::Unavailable).into_remember_disposition(),
+            RememberDisposition::Unavailable
+        ));
     }
 }
 
@@ -352,7 +429,7 @@ fn authenticate(name: &str, storage_policy: nearby::StoragePolicy) -> Assertion 
         keytap_macos::AssertionOutcome::Success {
             prf_output,
             credential_id,
-        } => match Assertion::native(prf_output, credential_id) {
+        } => match AssertionData::native(prf_output, credential_id) {
             Ok(assertion) => match native_authority.prepare(&assertion.credential_id) {
                 Ok(prepared) => match race.claim(ApprovalRoute::Native) {
                     ClaimOutcome::Claimed => {
@@ -363,7 +440,7 @@ fn authenticate(name: &str, storage_policy: nearby::StoragePolicy) -> Assertion 
                             ));
                         }
                         note("Approved on this Mac; cancelled nearby approval.");
-                        return assertion;
+                        return Assertion::Native(assertion);
                     }
                     ClaimOutcome::Lost => {
                         "native approval finished after nearby approval had already won".to_string()

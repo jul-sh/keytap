@@ -55,13 +55,26 @@ case "$(uname -s)/$(uname -m)" in
   Linux/x86_64) ASSET='linux-x86_64.zip' ;;
   *) echo 'Keytap has no release for this platform.' >&2; exit 1 ;;
 esac
-URL=$(curl -fsSL https://api.github.com/repos/jul-sh/keytap/releases/latest \
+URL=$(curl -fsSL 'https://api.github.com/repos/jul-sh/keytap/releases?per_page=1' \
   | grep -o '"browser_download_url": *"[^"]*"' | cut -d '"' -f 4 \
   | grep "$ASSET$") \
   && curl -fLO "$URL" && mkdir -p ~/.local/bin \
   && if [ "$(uname -s)" = Darwin ]; then
        mkdir -p ~/.local/share/keytap && unzip -o keytap-*-arm64.zip -d ~/.local/share/keytap \
-       && ln -sf ~/.local/share/keytap/Keytap.app/Contents/MacOS/keytap ~/.local/bin/keytap
+       && rm -f ~/.local/bin/keytap \
+       && if [ -x ~/.local/share/keytap/Keytap.app/Contents/Resources/keytap-launcher ]; then
+            install -m 755 ~/.local/share/keytap/Keytap.app/Contents/Resources/keytap-launcher \
+              ~/.local/bin/keytap \
+            && KEYTAP_LAUNCHER_REGISTER_ONLY=1 ~/.local/bin/keytap
+          else
+            printf '%s\n' '#!/bin/sh' \
+              'exec "$HOME/.local/share/keytap/Keytap.app/Contents/MacOS/keytap" "$@"' \
+              > ~/.local/bin/keytap \
+            && chmod 755 ~/.local/bin/keytap \
+            && /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister \
+              -f ~/.local/share/keytap/Keytap.app \
+            && sleep 2
+          fi
      else
        unzip -o keytap-*-linux-x86_64.zip keytap -d ~/.local/bin
      fi
