@@ -84,6 +84,21 @@ pub struct RememberAuthority {
     credential_id: Vec<u8>,
 }
 
+/// The local identity state relevant to `keytap remembered`.
+///
+/// An uninitialized machine has no authoritative root, so no stored entry is
+/// available to list or use. Keeping that state distinct from a malformed or
+/// unreadable record lets the inventory command report an ordinary empty
+/// state without weakening lookup, remember, or forget authorization.
+pub enum RememberedScope {
+    Uninitialized(UninitializedRememberedScope),
+    Current(RememberAuthority),
+}
+
+pub struct UninitializedRememberedScope {
+    path: PathBuf,
+}
+
 /// The local identity snapshot that constrains a native assertion.
 ///
 /// A machine with no record asks AuthenticationServices to discover a
@@ -550,27 +565,47 @@ pub fn prf_salt() -> [u8; 32] {
     Sha256::digest(PRF_SALT_CONTEXT).into()
 }
 
-/// Snapshot the record revision that remembered-key lookup must obey.
-/// Without an identity file, remembered entries are deliberately unavailable.
-pub fn remember_authority() -> Result<RememberAuthority, String> {
+/// Snapshot the local identity state for read-only remembered-key inventory.
+/// A missing record is a valid uninitialized state; malformed or unreadable
+/// records remain errors.
+pub fn remembered_scope() -> Result<RememberedScope, String> {
     let path = default_path()?;
-    remember_authority_at(path)
+    remembered_scope_at(path)
 }
 
-pub(crate) fn remember_authority_at(path: PathBuf) -> Result<RememberAuthority, String> {
+pub(crate) fn remembered_scope_at(path: PathBuf) -> Result<RememberedScope, String> {
     let expected = read_revision(&path).map_err(|error| {
         format!(
             "reading local passkey record at {}: {error}",
             path.display()
         )
     })?;
-    let Revision::Present(bytes) = expected else {
-        return Err(format!(
+    match expected {
+        Revision::Missing => Ok(RememberedScope::Uninitialized(
+            UninitializedRememberedScope { path },
+        )),
+        Revision::Present(bytes) => {
+            remember_authority_from_bytes(path, bytes).map(RememberedScope::Current)
+        }
+    }
+}
+
+/// Snapshot the record revision that remembered-key use and mutation must
+/// obey. Without an identity file, remembered entries remain deliberately
+/// unavailable.
+pub fn remember_authority() -> Result<RememberAuthority, String> {
+    let path = default_path()?;
+    remember_authority_at(path)
+}
+
+pub(crate) fn remember_authority_at(path: PathBuf) -> Result<RememberAuthority, String> {
+    match remembered_scope_at(path)? {
+        RememberedScope::Uninitialized(scope) => Err(format!(
             "no local passkey record is stored at {}",
-            path.display()
-        ));
-    };
-    remember_authority_from_bytes(path, bytes)
+            scope.path.display()
+        )),
+        RememberedScope::Current(authority) => Ok(authority),
+    }
 }
 
 fn remember_authority_from_bytes(
@@ -699,6 +734,23 @@ impl RememberAuthority {
         read_revision(&self.path)
             .map(|revision| matches!(revision, Revision::Present(bytes) if bytes == self.expected))
             .map_err(|error| format!("reading {}: {error}", self.path.display()))
+    }
+}
+
+impl UninitializedRememberedScope {
+    /// Ensure an identity was not established concurrently after the empty
+    /// inventory snapshot. This mirrors current-root revalidation without
+    /// turning the missing state into a nullable authority.
+    pub fn ensure_unchanged(&self) -> Result<(), String> {
+        match read_revision(&self.path)
+            .map_err(|error| format!("reading {}: {error}", self.path.display()))?
+        {
+            Revision::Missing => Ok(()),
+            Revision::Present(_) => Err(
+                "the local passkey identity was established while remembered keys were being listed; retry"
+                    .to_string(),
+            ),
+        }
     }
 }
 
@@ -1202,6 +1254,28 @@ mod tests {
         let path = temp_path("missing-remember-authority");
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
         assert!(remember_authority_at(path).is_err());
+    }
+
+    #[test]
+    fn missing_identity_is_an_explicit_uninitialized_inventory_scope() {
+        let path = temp_path("missing-remembered-scope");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+        let scope = remembered_scope_at(path.clone()).unwrap();
+        let RememberedScope::Uninitialized(scope) = scope else {
+            panic!("a missing identity must not produce a current root")
+        };
+        scope.ensure_unchanged().unwrap();
+
+        pending_init_at(path.clone())
+            .commit(b"credential-one")
+            .unwrap();
+        assert!(scope.ensure_unchanged().is_err());
+        assert!(matches!(
+            remembered_scope_at(path.clone()).unwrap(),
+            RememberedScope::Current(authority)
+                if authority.credential_id() == b"credential-one"
+        ));
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
     #[test]
