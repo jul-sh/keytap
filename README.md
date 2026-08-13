@@ -17,6 +17,8 @@ Arguments & options
 Run `keytap <COMMAND> --help` for command details.
 ```
 
+To encrypt existing environment secrets for Git, use [Envtap](https://github.com/jul-sh/envtap).
+
 ## Approval
 
 On macOS, Keytap uses native passkey support.
