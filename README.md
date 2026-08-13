@@ -1,14 +1,5 @@
 # Keytap
 
-Keytap derives reproducible key material from a WebAuthn PRF-capable passkey.
-Its complete command surface is: create the passkey, print a named public key,
-or reveal the matching private key.
-
-> **Pre-release:** Expect breaking changes. Do not make Keytap the only way to
-> recover important keys.
-
-## Commands
-
 ```text
 Derive reproducible keys from a passkey.
 
@@ -25,37 +16,6 @@ Arguments & options
 
 Run `keytap <COMMAND> --help` for command details.
 ```
-
-`keytap init` creates the passkey and a local credential record. It refuses to
-replace an existing record; `keytap init --force` replaces it, which changes
-every derived key.
-
-`public` and `reveal` each require a fresh passkey assertion. Keytap derives the
-named key for that invocation and does not persist the derived key.
-
-Names must be non-empty ASCII strings of at most 128 characters. A name is
-domain separation, so one passkey can reproducibly produce independent keys:
-
-```sh
-keytap init
-keytap public
-keytap public deploy --as ssh
-keytap reveal backup --as age
-```
-
-## Formats
-
-Both output commands accept the same four format names:
-
-| `--as` | `public` | `reveal` |
-| --- | --- | --- |
-| `hex` | lowercase hex X25519 public key | lowercase hex 32-byte secret |
-| `base64` | standard Base64 X25519 public key | standard Base64 32-byte secret |
-| `age` | `age1...` X25519 recipient | `AGE-SECRET-KEY-...` identity |
-| `ssh` | OpenSSH Ed25519 public key | OpenSSH Ed25519 private key |
-
-The SSH public-key comment is `keytap:<name>`. All output is newline-terminated;
-the SSH private key uses LF line endings.
 
 ## Approval
 
@@ -79,47 +39,7 @@ passkey-derived Ed25519 public identity locally. A passkey created through the
 native macOS flow performs this pairing on its first nearby use. Later nearby
 results must carry a fresh signature from that pinned identity.
 
-## Build from source
-
-Rust is required everywhere. The macOS app additionally requires macOS 15 or
-later, Python 3, and the Xcode/Swift toolchain. Browser and relay tests require
-Node.js/npm; building the deployable nearby page additionally requires
-`wasm-pack`.
-
-Build, sign, and install the local macOS app bundle and launcher with:
-
-```sh
-make install
-```
-
-This installs `Keytap.app` under `~/.local/share/keytap` and the `keytap`
-launcher under `~/.local/bin`. The Makefile uses ad-hoc signing by default. It
-automatically embeds `Keytap.provisionprofile` when that file exists; set
-`IDENTITY` and `PROVISIONING_PROFILE=/path/to/profile` to override those
-defaults. A profile is optional for a nearby-only build, while native passkeys
-require signing that authorizes the associated-domain entitlement. If native
-approval is unavailable, `public` and `reveal` can still finish through nearby
-approval; `init` falls back only when macOS reports that doing so is safe.
-
-On Linux, build and install the nearby-only binary directly:
-
-```sh
-cargo build --release -p keytap --locked
-mkdir -p "$HOME/.local/bin"
-install -m 755 target/release/keytap "$HOME/.local/bin/keytap"
-```
-
-Build the nearby page's minimal identity WASM and stage its static deployment
-with `make build-web`. Run the available local suite with `make test`; on macOS
-it also runs the Swift bridge and launcher tests. Portable Rust and browser
-tests can be run separately:
-
-```sh
-cargo test -p keytap-core -p keytap -p keytap-web --locked
-npm --prefix web test
-```
-
-## Security model
+## Security
 
 Keytap is a convenience tool, not a high-assurance key manager.
 
@@ -144,7 +64,3 @@ Nearby approval trusts the browser, the code served at `keytap.jul.sh`, the
 passkey provider, WebAuthn PRF, and the first two-word comparison. Treat every
 QR code and URL as an invitation from the exact CLI process you intend to
 approve.
-
-## License
-
-MIT
