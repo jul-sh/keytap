@@ -41,26 +41,38 @@ results must carry a fresh signature from that pinned identity.
 
 ## Security
 
-Keytap is a convenience tool, not a high-assurance key manager.
+Keytap is a convenience utility, not a high-assurance security tool. It is
+designed to make passkey-derived keys easy to use across machines. If your
+threat model involves nation-state adversaries, targeted attacks, or secrets
+where compromise has severe consequences, use purpose-built tools instead.
 
-The passkey PRF output is expanded with HKDF-SHA-256 into a 32-byte named
-secret. The CLI holds the PRF output and raw key in zeroizing buffers, then
-writes the requested representation to stdout. Its local credential record
-contains the credential ID and, after nearby pairing, a public identity
-pin—not a named private key.
+With that said, here is how Keytap works within those constraints:
 
-Nearby invitations carry a fresh P-256 public key in the URL fragment; its
-private half remains in the CLI. P-256 key agreement and HKDF-SHA-256 produce
-directional AES-256-GCM channel keys. The relay sees public handshake data,
-timing, and message sizes, and can delay, drop, or close a room. It cannot read
-or silently alter an accepted request or result.
+- Keytap does not sync or cache derived keys. It derives on demand, writes the
+  requested output to stdout, and exits.
+- The local credential record contains a credential ID and, after nearby
+  pairing, a public identity pin—not derived private key material.
+- If you save the output, pipe it into another tool, or import it into an agent,
+  that destination now holds the key and must be trusted accordingly.
+- Losing or replacing the passkey can make every previously derived key
+  unrecoverable. Keep an independent recovery path.
 
-Key names are domain separators, not secrets. Anyone who receives `reveal`
-output receives that private key and must be trusted. Losing or replacing the
-passkey can make every previous key unrecoverable, so keep an independent
-recovery path.
+### Authentication via phone over relay (fallback)
 
-Nearby approval trusts the browser, the code served at `keytap.jul.sh`, the
-passkey provider, WebAuthn PRF, and the first two-word comparison. Treat every
-QR code and URL as an invitation from the exact CLI process you intend to
-approve.
+When Keytap authenticates via your phone, additional trust considerations
+apply:
+
+- **You trust the web page served to your phone.** The page served by
+  `keytap.jul.sh` performs the WebAuthn ceremony, receives the PRF output,
+  encrypts the result, and returns it to the CLI through the relay. Its source
+  is inspectable, but in practice you are unlikely to review it before every
+  approval.
+- **You do not need to trust the relay with plaintext key material.** The
+  Cloudflare relay at `keytap-relay.julsh.workers.dev` forwards opaque
+  encrypted messages. The channel uses P-256 ECDH, HKDF-SHA-256, and
+  AES-256-GCM end to end. A relay operator can observe connection metadata,
+  delay or drop messages, or deny service, but cannot decrypt or silently alter
+  an accepted result.
+- The first nearby pairing relies on matching the same two words on both
+  devices. It then pins the passkey's public identity; later approvals require
+  a fresh signature over the one-use request.
