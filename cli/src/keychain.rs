@@ -75,23 +75,33 @@ mod platform {
     /// (SSH, tmux attached from SSH, a sandboxed shell).
     const INTERACTION_NOT_ALLOWED: i32 = -25308;
 
+    /// `errSecAuthFailed`: macOS also reports a locked login keychain as an
+    /// authentication failure ("The user name or passphrase you entered is
+    /// not correct."). Unlocking the keychain resolves that case.
+    const AUTH_FAILED: i32 = -25293;
+
+    const UNLOCK_HINT: &str = "Run `security unlock-keychain`, then retry.";
+
     pub struct MacosKeychain;
 
     pub fn open() -> Result<MacosKeychain, KeychainError> {
         Ok(MacosKeychain)
     }
 
-    fn backend_err(e: security_framework::base::Error) -> KeychainError {
-        if e.code() == INTERACTION_NOT_ALLOWED {
-            return KeychainError::Backend(
+    fn backend_message(code: i32, message: &str) -> String {
+        match code {
+            INTERACTION_NOT_ALLOWED => format!(
                 "the keychain needs to show an unlock or approval dialog, and this session \
                  can't display one (running over SSH or in a sandbox?). Run keytap from a \
-                 terminal in your logged-in desktop session, or unlock the keychain here \
-                 first with `security unlock-keychain`"
-                    .to_string(),
-            );
+                 terminal in your logged-in desktop session. {UNLOCK_HINT}"
+            ),
+            AUTH_FAILED => format!("{message} {UNLOCK_HINT}"),
+            _ => message.to_string(),
         }
-        KeychainError::Backend(e.to_string())
+    }
+
+    fn backend_err(e: security_framework::base::Error) -> KeychainError {
+        KeychainError::Backend(backend_message(e.code(), &e.to_string()))
     }
 
     impl Keychain for MacosKeychain {
@@ -135,6 +145,39 @@ mod platform {
                 .filter_map(SearchResult::simplify_dict)
                 .filter_map(|attrs| attrs.get("acct").cloned())
                 .collect())
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn authentication_failure_suggests_unlocking_then_retrying() {
+            let message = backend_message(
+                AUTH_FAILED,
+                "The user name or passphrase you entered is not correct.",
+            );
+
+            assert_eq!(
+                message,
+                "The user name or passphrase you entered is not correct. \
+                 Run `security unlock-keychain`, then retry."
+            );
+        }
+
+        #[test]
+        fn unavailable_interaction_suggests_unlocking_then_retrying() {
+            let message = backend_message(INTERACTION_NOT_ALLOWED, "ignored system message");
+
+            assert!(message.contains(UNLOCK_HINT));
+        }
+
+        #[test]
+        fn unrelated_security_errors_are_unchanged() {
+            let message = "A different Security framework error.";
+
+            assert_eq!(backend_message(-50, message), message);
         }
     }
 }
