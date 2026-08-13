@@ -1,13 +1,10 @@
 Keytap.app/
 Keytap.provisionprofile
 target/
-.claude/
 macos/swift-lib/.build/
 .DS_Store
-*.zip
-.mcp.json
 .wrangler/
 .dev.vars*
 .env*
 web/pkg/
-result
+web/dist/

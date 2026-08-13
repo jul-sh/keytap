@@ -6,7 +6,7 @@
 //! result. A short authentication string establishes the first local pairing;
 //! later proofs are bound to the trusted one-use channel and exact request.
 //! This module pins the public identity and credential ID, then requires both
-//! to match a fresh signature over each returned key and storage disposition.
+//! to match a fresh signature over each returned key.
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
@@ -14,12 +14,13 @@ use ed25519_dalek::{Signature, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
+use zeroize::Zeroizing;
 
 use crate::nearby_sas::ConfirmedComparison;
 
 const FORMAT: &str = "keytap-nearby-identity-v3";
 const PRF_SALT_CONTEXT: &[u8] = b"keytap:nearby-identity-prf:v1";
-const PROOF_DOMAIN: &[u8] = b"keytap:nearby-identity-proof:v4\0";
+const PROOF_DOMAIN: &[u8] = b"keytap:nearby-identity-proof:v5\0";
 const REGISTRATION_PROOF_DOMAIN: &[u8] = b"keytap:nearby-registration-identity-proof:v1\0";
 
 enum PairingState {
@@ -76,27 +77,11 @@ enum Revision {
     Present(Vec<u8>),
 }
 
-/// An exact identity-file snapshot used to make the record revision the
-/// authority for remembered-key lookup.
-pub struct RememberAuthority {
+/// An exact identity-file snapshot used to constrain a native assertion.
+pub struct ExistingNativeIdentity {
     path: PathBuf,
     expected: Vec<u8>,
     credential_id: Vec<u8>,
-}
-
-/// The local identity state relevant to `keytap remembered`.
-///
-/// An uninitialized machine has no authoritative root, so no stored entry is
-/// available to list or use. Keeping that state distinct from a malformed or
-/// unreadable record lets the inventory command report an ordinary empty
-/// state without weakening lookup, remember, or forget authorization.
-pub enum RememberedScope {
-    Uninitialized(UninitializedRememberedScope),
-    Current(RememberAuthority),
-}
-
-pub struct UninitializedRememberedScope {
-    path: PathBuf,
 }
 
 /// The local identity snapshot that constrains a native assertion.
@@ -106,7 +91,7 @@ pub struct UninitializedRememberedScope {
 /// identity-file revision.
 pub enum NativeAssertionAuthority {
     New(PendingInit),
-    Existing(RememberAuthority),
+    Existing(ExistingNativeIdentity),
 }
 
 /// A native result that is valid for the credential selected at ceremony
@@ -116,7 +101,7 @@ pub enum PreparedNativeAssertion {
         pending_init: PendingInit,
         credential_id: Vec<u8>,
     },
-    Existing(RememberAuthority),
+    Existing(ExistingNativeIdentity),
 }
 
 /// A snapshot taken before an init ceremony. Consuming it is the only way to
@@ -152,22 +137,11 @@ pub struct ProofContext<'a> {
     pub challenge: &'a [u8],
     pub prf_output: &'a [u8; 32],
     pub key_name: &'a str,
-    pub disposition: AssertionDisposition,
 }
 
 pub struct RegistrationProofContext<'a> {
     pub confirmation: &'a ConfirmedComparison,
     pub challenge: &'a [u8],
-}
-
-/// The approver's choice for this exact assertion. It is part of the signed
-/// identity proof so an altered message cannot turn
-/// a one-time use into a local storage request.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
-#[serde(rename_all = "lowercase")]
-pub enum AssertionDisposition {
-    Once,
-    Remember,
 }
 
 #[derive(Clone, Copy)]
@@ -478,8 +452,8 @@ fn verified_pin_bytes(proof: &Proof) -> Result<Vec<u8>, String> {
     serde_json::to_vec_pretty(&stored).map_err(|error| error.to_string())
 }
 
-pub fn proof_message(proof: &Proof, context: &ProofContext<'_>) -> Vec<u8> {
-    let mut message = Vec::with_capacity(PROOF_DOMAIN.len() + 256);
+pub fn proof_message(proof: &Proof, context: &ProofContext<'_>) -> Zeroizing<Vec<u8>> {
+    let mut message = Zeroizing::new(Vec::with_capacity(PROOF_DOMAIN.len() + 256));
     message.extend_from_slice(PROOF_DOMAIN);
     match context.binding {
         ProofBinding::FirstPairSas { confirmation } => {
@@ -499,10 +473,6 @@ pub fn proof_message(proof: &Proof, context: &ProofContext<'_>) -> Vec<u8> {
     append_field(&mut message, &proof.credential_id);
     append_field(&mut message, context.prf_output);
     append_field(&mut message, context.key_name.as_bytes());
-    message.push(match context.disposition {
-        AssertionDisposition::Once => 0,
-        AssertionDisposition::Remember => 1,
-    });
     append_field(&mut message, &proof.public_key);
     message
 }
@@ -565,53 +535,10 @@ pub fn prf_salt() -> [u8; 32] {
     Sha256::digest(PRF_SALT_CONTEXT).into()
 }
 
-/// Snapshot the local identity state for read-only remembered-key inventory.
-/// A missing record is a valid uninitialized state; malformed or unreadable
-/// records remain errors.
-pub fn remembered_scope() -> Result<RememberedScope, String> {
-    let path = default_path()?;
-    remembered_scope_at(path)
-}
-
-pub(crate) fn remembered_scope_at(path: PathBuf) -> Result<RememberedScope, String> {
-    let expected = read_revision(&path).map_err(|error| {
-        format!(
-            "reading local passkey record at {}: {error}",
-            path.display()
-        )
-    })?;
-    match expected {
-        Revision::Missing => Ok(RememberedScope::Uninitialized(
-            UninitializedRememberedScope { path },
-        )),
-        Revision::Present(bytes) => {
-            remember_authority_from_bytes(path, bytes).map(RememberedScope::Current)
-        }
-    }
-}
-
-/// Snapshot the record revision that remembered-key use and mutation must
-/// obey. Without an identity file, remembered entries remain deliberately
-/// unavailable.
-pub fn remember_authority() -> Result<RememberAuthority, String> {
-    let path = default_path()?;
-    remember_authority_at(path)
-}
-
-pub(crate) fn remember_authority_at(path: PathBuf) -> Result<RememberAuthority, String> {
-    match remembered_scope_at(path)? {
-        RememberedScope::Uninitialized(scope) => Err(format!(
-            "no local passkey record is stored at {}",
-            scope.path.display()
-        )),
-        RememberedScope::Current(authority) => Ok(authority),
-    }
-}
-
-fn remember_authority_from_bytes(
+fn existing_native_identity_from_bytes(
     path: PathBuf,
     bytes: Vec<u8>,
-) -> Result<RememberAuthority, String> {
+) -> Result<ExistingNativeIdentity, String> {
     let stored = parse_stored_file(&path, &bytes)?;
     let encoded = match stored.identity {
         StoredIdentity::Credential { credential_id } => credential_id,
@@ -629,7 +556,7 @@ fn remember_authority_from_bytes(
     };
     let credential_id = decode_bounded(&encoded, "credential ID", 1, 1024)
         .map_err(|error| format!("{}: {error}", path.display()))?;
-    Ok(RememberAuthority {
+    Ok(ExistingNativeIdentity {
         path,
         expected: bytes,
         credential_id,
@@ -657,7 +584,7 @@ fn native_assertion_authority_at(path: PathBuf) -> Result<NativeAssertionAuthori
             expected: Revision::Missing,
         })),
         Revision::Present(bytes) => {
-            remember_authority_from_bytes(path, bytes).map(NativeAssertionAuthority::Existing)
+            existing_native_identity_from_bytes(path, bytes).map(NativeAssertionAuthority::Existing)
         }
     }
 }
@@ -721,36 +648,10 @@ impl PreparedNativeAssertion {
     }
 }
 
-impl RememberAuthority {
-    /// The credential whose root namespace is authoritative.
+impl ExistingNativeIdentity {
+    /// The credential that the native provider must use.
     pub fn credential_id(&self) -> &[u8] {
         &self.credential_id
-    }
-
-    /// Re-read the exact identity revision after a candidate lookup/store.
-    /// A concurrent init therefore turns the operation into a fail-closed
-    /// miss/rejection instead of serving or acknowledging the old root.
-    pub fn revalidate(&self) -> Result<bool, String> {
-        read_revision(&self.path)
-            .map(|revision| matches!(revision, Revision::Present(bytes) if bytes == self.expected))
-            .map_err(|error| format!("reading {}: {error}", self.path.display()))
-    }
-}
-
-impl UninitializedRememberedScope {
-    /// Ensure an identity was not established concurrently after the empty
-    /// inventory snapshot. This mirrors current-root revalidation without
-    /// turning the missing state into a nullable authority.
-    pub fn ensure_unchanged(&self) -> Result<(), String> {
-        match read_revision(&self.path)
-            .map_err(|error| format!("reading {}: {error}", self.path.display()))?
-        {
-            Revision::Missing => Ok(()),
-            Revision::Present(_) => Err(
-                "the local passkey identity was established while remembered keys were being listed; retry"
-                    .to_string(),
-            ),
-        }
     }
 }
 
@@ -1145,7 +1046,6 @@ mod tests {
             challenge,
             prf_output: prf,
             key_name: "deploy",
-            disposition: AssertionDisposition::Once,
         }
     }
 
@@ -1163,7 +1063,6 @@ mod tests {
             challenge,
             prf_output: prf,
             key_name: "deploy",
-            disposition: AssertionDisposition::Once,
         }
     }
 
@@ -1247,35 +1146,6 @@ mod tests {
             prf_salt().as_slice(),
             keytap_core::prf_salt_for_name("nearby-identity-prf:v1").unwrap()
         );
-    }
-
-    #[test]
-    fn missing_identity_cannot_authorize_remembered_keys() {
-        let path = temp_path("missing-remember-authority");
-        let _ = std::fs::remove_dir_all(path.parent().unwrap());
-        assert!(remember_authority_at(path).is_err());
-    }
-
-    #[test]
-    fn missing_identity_is_an_explicit_uninitialized_inventory_scope() {
-        let path = temp_path("missing-remembered-scope");
-        let _ = std::fs::remove_dir_all(path.parent().unwrap());
-        let scope = remembered_scope_at(path.clone()).unwrap();
-        let RememberedScope::Uninitialized(scope) = scope else {
-            panic!("a missing identity must not produce a current root")
-        };
-        scope.ensure_unchanged().unwrap();
-
-        pending_init_at(path.clone())
-            .commit(b"credential-one")
-            .unwrap();
-        assert!(scope.ensure_unchanged().is_err());
-        assert!(matches!(
-            remembered_scope_at(path.clone()).unwrap(),
-            RememberedScope::Current(authority)
-                if authority.credential_id() == b"credential-one"
-        ));
-        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
     #[test]
@@ -1843,22 +1713,6 @@ mod tests {
     }
 
     #[test]
-    fn disposition_cannot_be_flipped_after_the_approver_signs() {
-        let proof = signed_proof([7; 32], b"credential-one", TestBinding::FirstPair);
-        let digest = [0x42; 32];
-        let confirmation = ConfirmedComparison::from_digest_for_test(digest);
-        let challenge = [0x24; 32];
-        let prf = [0x11; 32];
-        let mut context = first_pair_fields_for(&proof, &confirmation, &challenge, &prf);
-        context.disposition = AssertionDisposition::Remember;
-
-        assert!(matches!(
-            verify_proof(&proof, &context),
-            Err(VerificationError::InvalidProof)
-        ));
-    }
-
-    #[test]
     fn proof_bytes_are_deterministic_for_browser_interop() {
         let proof = signed_proof([7; 32], b"credential-one", TestBinding::FirstPair);
         assert_eq!(
@@ -1867,7 +1721,7 @@ mod tests {
         );
         assert_eq!(
             URL_SAFE_NO_PAD.encode(proof.signature),
-            "PYgkMisxDZMDucil0AhET2g5G7Ei2y_qvvBffVgrj0avbVMSXa2l6miyBkFBcHRMkXsCT8Dk5pTaA-OLTRwMDA"
+            "K6UQsJn0iaWzPHcScwnOl0jW-lxkJ6JxxohYLv76gtJV2iDA2j_nmqX1-ooxoTcs1TfwHqN1dfDljSDTURdPBw"
         );
 
         let registration = signed_registration_proof([7; 32], b"credential-one");

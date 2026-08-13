@@ -1,5 +1,4 @@
-pub fn public_key_line(seed: &[u8], name: Option<&str>) -> String {
-    let seed: &[u8; 32] = seed.try_into().unwrap();
+pub fn public_key_line(seed: &[u8; 32], name: Option<&str>) -> String {
     let vk = crate::ed25519::public_key(seed);
     let key = ssh_key::PublicKey::from(ssh_key::public::Ed25519PublicKey::from(vk));
     let openssh = key.to_openssh().unwrap();
@@ -10,8 +9,7 @@ pub fn public_key_line(seed: &[u8], name: Option<&str>) -> String {
     format!("{openssh} {comment}")
 }
 
-pub fn private_key_pem(seed: &[u8]) -> String {
-    let seed: &[u8; 32] = seed.try_into().unwrap();
+pub fn private_key_pem(seed: &[u8; 32]) -> String {
     let keypair = ssh_key::private::Ed25519Keypair::from_seed(seed);
     ssh_key::PrivateKey::from(keypair)
         .to_openssh(ssh_key::LineEnding::LF)

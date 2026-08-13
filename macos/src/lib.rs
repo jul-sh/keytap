@@ -448,28 +448,30 @@ unsafe extern "C" fn on_assertion(
     context.completion.complete_with(|| match status {
         STATUS_SUCCESS => {
             control.finish();
-            match (
-                copy_bytes(
-                    data,
-                    data_len,
-                    "credential ID",
-                    ExpectedLength::Inclusive {
-                        minimum: 1,
-                        maximum: MAX_CREDENTIAL_ID_BYTES,
-                    },
-                ),
-                copy_bytes(
-                    extra,
-                    extra_len,
-                    "PRF output",
-                    ExpectedLength::Exact(PRF_OUTPUT_BYTES),
-                ),
-            ) {
-                (Ok(credential_id), Ok(prf_output)) => AssertionOutcome::Success {
-                    prf_output,
-                    credential_id,
+            let credential_id = match copy_bytes(
+                data,
+                data_len,
+                "credential ID",
+                ExpectedLength::Inclusive {
+                    minimum: 1,
+                    maximum: MAX_CREDENTIAL_ID_BYTES,
                 },
-                (Err(error), _) | (_, Err(error)) => AssertionOutcome::Error(error),
+            ) {
+                Ok(credential_id) => credential_id,
+                Err(error) => return AssertionOutcome::Error(error),
+            };
+            let prf_output = match copy_bytes(
+                extra,
+                extra_len,
+                "PRF output",
+                ExpectedLength::Exact(PRF_OUTPUT_BYTES),
+            ) {
+                Ok(prf_output) => prf_output,
+                Err(error) => return AssertionOutcome::Error(error),
+            };
+            AssertionOutcome::Success {
+                prf_output,
+                credential_id,
             }
         }
         STATUS_CANCELLED => {

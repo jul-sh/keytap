@@ -12,7 +12,7 @@ const APPROVER_DIRECTION = encoder.encode('APP\0');
 const SAS_CONTEXT_DOMAIN = encoder.encode('keytap:nearby-sas-context:v1\0');
 const SAS_COMMIT_DOMAIN = encoder.encode('keytap:nearby-sas-commit:v1\0');
 const SAS_DIGEST_DOMAIN = encoder.encode('keytap:nearby-sas-digest:v1\0');
-const IDENTITY_PROOF_DOMAIN = encoder.encode('keytap:nearby-identity-proof:v4\0');
+const IDENTITY_PROOF_DOMAIN = encoder.encode('keytap:nearby-identity-proof:v5\0');
 const REGISTRATION_IDENTITY_PROOF_DOMAIN = encoder.encode(
   'keytap:nearby-registration-identity-proof:v1\0',
 );
@@ -398,15 +398,12 @@ function parseRequest(value) {
     case 'assert':
       expectExactObject(
         request,
-        ['kind', 'challenge', 'prfSalt', 'identitySalt', 'identity', 'keyName', 'storage'],
+        ['kind', 'challenge', 'prfSalt', 'identitySalt', 'identity', 'keyName'],
         'assertion request',
       );
       break;
     default:
       throw new ProtocolError('unsupported nearby request');
-  }
-  if (request.storage !== 'choose' && request.storage !== 'remember') {
-    throw new ProtocolError('invalid storage policy');
   }
   return {
     kind: 'assert',
@@ -415,7 +412,6 @@ function parseRequest(value) {
     identitySalt: expectBytes(request.identitySalt, 'identity PRF salt', 32, 32),
     identity: parseIdentityMode(request.identity),
     keyName: expectString(request.keyName, 'key name'),
-    storage: request.storage,
   };
 }
 
@@ -467,15 +463,8 @@ export function parseCliMessage(value, expectedType) {
       return expectExactObject(message, ['type', 'nonce'], 'CLI SAS reveal');
     case 'sas-cli-confirmed':
     case 'initial-accepted':
-      return expectExactObject(message, ['type'], `${expectedType} message`);
     case 'assertion-accepted':
-      expectExactObject(message, ['type', 'storage'], 'assertion acknowledgement');
-      if (message.storage !== 'once'
-          && message.storage !== 'stored'
-          && message.storage !== 'unavailable') {
-        throw new ProtocolError('invalid assertion acknowledgement');
-      }
-      return message;
+      return expectExactObject(message, ['type'], `${expectedType} message`);
     default:
       throw new ProtocolError('invalid expected CLI message type');
   }
@@ -589,7 +578,6 @@ export function nearbyIdentityProofMessage({
   credentialId,
   prfFirst,
   keyName,
-  disposition,
   publicKey,
 }) {
   if (!(challenge instanceof Uint8Array)
@@ -600,8 +588,7 @@ export function nearbyIdentityProofMessage({
       || credentialId.length < 1 || credentialId.length > 1024
       || prfFirst.length !== 32
       || publicKey.length !== 32
-      || typeof keyName !== 'string'
-      || (disposition !== 'once' && disposition !== 'remember')) {
+      || typeof keyName !== 'string') {
     throw new ProtocolError('invalid identity proof field');
   }
   const name = encoder.encode(keyName);
@@ -643,7 +630,6 @@ export function nearbyIdentityProofMessage({
     lengthPrefixed(credentialId),
     lengthPrefixed(prfFirst),
     lengthPrefixed(name),
-    new Uint8Array([disposition === 'once' ? 0 : 1]),
     lengthPrefixed(publicKey),
   );
 }
@@ -672,7 +658,7 @@ export function registrationIdentityProofMessage({
   );
 }
 
-/** Import a signing-only Ed25519 key without making it extractable. */
+/** Import the Ed25519 seed as a non-extractable signing-only key. */
 export async function importEd25519SigningKey(identitySeed) {
   if (!(identitySeed instanceof Uint8Array) || identitySeed.length !== 32) {
     throw new ProtocolError('invalid identity PRF output');
@@ -695,16 +681,16 @@ async function deriveIdentityPublicKey(identitySeed, publicKeyDeriver) {
   if (typeof publicKeyDeriver !== 'function') {
     throw new IdentityProofUnavailableError();
   }
-  let derived;
+  let publicKey;
   try {
-    derived = await publicKeyDeriver(identitySeed);
+    publicKey = await publicKeyDeriver(identitySeed);
   } catch {
     throw new IdentityProofUnavailableError();
   }
-  if (!(derived instanceof Uint8Array) || derived.length !== 32) {
+  if (!(publicKey instanceof Uint8Array) || publicKey.length !== 32) {
     throw new IdentityProofUnavailableError();
   }
-  return derived.slice();
+  return publicKey.slice();
 }
 
 async function createIdentityProof(fields, identitySeed, publicKeyDeriver, messageBuilder) {
@@ -727,12 +713,7 @@ async function createIdentityProof(fields, identitySeed, publicKeyDeriver, messa
 }
 
 export function createNearbyIdentityProof(fields, identitySeed, publicKeyDeriver) {
-  return createIdentityProof(
-    fields,
-    identitySeed,
-    publicKeyDeriver,
-    nearbyIdentityProofMessage,
-  );
+  return createIdentityProof(fields, identitySeed, publicKeyDeriver, nearbyIdentityProofMessage);
 }
 
 export function createRegistrationIdentityProof(fields, identitySeed, publicKeyDeriver) {

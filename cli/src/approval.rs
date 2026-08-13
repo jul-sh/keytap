@@ -3,7 +3,7 @@
 //! Both routes may produce a fully verified candidate, but exactly one route
 //! may cross the acceptance boundary. Cancellation only cleans up the losing
 //! UI/transport; the mutex-protected state transition is what prevents
-//! duplicate storage, output, or acknowledgements when both authenticators
+//! duplicate acceptance, output, or acknowledgements when both authenticators
 //! finish at nearly the same time.
 
 use std::sync::Mutex;

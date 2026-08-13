@@ -1,15 +1,12 @@
 #[cfg(any(target_os = "macos", test))]
 mod approval;
-mod encrypt;
-mod env_keys;
-mod keychain;
+mod cli;
 mod nearby;
 mod nearby_identity;
 mod nearby_protocol;
 mod nearby_sas;
-mod remember;
 
-use keytap_cli_spec::{Command, Invocation};
+use cli::{Command, Invocation};
 #[cfg(any(target_os = "macos", test))]
 use std::sync::mpsc;
 #[cfg(target_os = "macos")]
@@ -17,22 +14,17 @@ use std::sync::Arc;
 use zeroize::Zeroizing;
 
 fn main() {
-    // The whole CLI surface — clap definitions, the single-screen overview,
-    // the bare-`remember` special case — lives in keytap-cli-spec, shared
-    // with the web terminal's wasm build. This binary only executes.
-    let cli = match keytap_cli_spec::invoke(std::env::args_os()) {
+    let command = match cli::invoke(std::env::args_os()) {
         Invocation::Overview(text) => {
             print!("{text}");
             return;
         }
-        Invocation::Misuse(msg) => die(&msg),
-        Invocation::Parsed(Err(e)) => e.exit(),
-        Invocation::Parsed(Ok(cli)) => cli,
+        Invocation::Command(command) => command,
+        Invocation::Clap(error) => error.exit(),
     };
 
-    match cli.command {
+    match command {
         Command::Init { force } => {
-            guard_ceremony("init");
             let init_mode = if force {
                 nearby_identity::InitMode::Replace
             } else {
@@ -44,7 +36,6 @@ fn main() {
                 ))
             });
             register(pending_init);
-            remember::after_init();
         }
         Command::Public { ref name, format } => {
             with_derived_key(name, |raw_key| emit_public_key(raw_key, format, name));
@@ -52,115 +43,39 @@ fn main() {
         Command::Reveal { ref name, format } => {
             with_derived_key(name, |raw_key| emit_private_key(raw_key, format));
         }
-        Command::Encrypt {
-            ref name,
-            ref recipients,
-            ref recipients_file,
-            no_self,
-        } => {
-            with_derived_key(name, |raw_key| {
-                encrypt::encrypt(raw_key, recipients, recipients_file, !no_self)
-            });
-        }
-        Command::Decrypt { ref name } => {
-            with_derived_key(name, encrypt::decrypt);
-        }
-        Command::Remember { ref name } => {
-            // Fail fast on invalid names or unavailable local storage before
-            // asking either device to perform a ceremony.
-            if let Err(e) = keytap_core::prf_salt_for_name(name) {
-                die(&e.to_string());
-            }
-            guard_ceremony("remember");
-            let mut target = remember::write_target();
-            let assertion = authenticate(name, nearby::StoragePolicy::Remember);
-            match assertion.into_remember_disposition() {
-                RememberDisposition::StoreLocally(assertion) => {
-                    let raw_key = derive_key(&assertion.prf_output);
-                    remember::remember(&mut target, name, &assertion.credential_id, &raw_key);
-                }
-                RememberDisposition::AlreadyStored => {}
-                RememberDisposition::Unavailable => {
-                    die("the nearby assertion succeeded, but this key could not be remembered")
-                }
-            }
-        }
-        Command::Forget { ref name, all } => {
-            if all {
-                remember::forget_all();
-            } else {
-                remember::forget(name);
-            }
-        }
-        Command::Remembered => remember::remembered(),
     }
 }
 
-/// Resolve the raw key for `name` and hand it to `use_key`: first the
-/// environment (`$KEYTAP_KEY_<NAME>`, the CI path), then a key remembered on
-/// this machine, then a fresh ceremony. Under `$CI`, a fresh ceremony is
-/// refused.
-///
-/// The named derived key is retained only when the user explicitly chooses to
-/// remember it. First approval may still establish the local credential record
-/// used to constrain later passkey ceremonies.
-fn with_derived_key(name: &str, use_key: impl FnOnce(&[u8])) {
+/// Run a passkey ceremony, derive the named key, and hand it to the output
+/// formatter. Keytap never stores the derived key.
+fn with_derived_key(name: &str, use_key: impl FnOnce(&[u8; 32]) -> Result<(), String>) {
     if let Err(error) = keytap_core::prf_salt_for_name(name) {
         die(&error.to_string());
     }
-    if let Some(raw_key) = env_keys::resolve(name) {
-        return use_key(&raw_key);
-    }
-    if let Some(raw_key) = remember::lookup(name) {
-        return use_key(&raw_key);
-    }
-    if in_ci() {
-        die(&format!(
-            "$CI is set and there is no key for '{name}': refusing to start a passkey ceremony \
-             (it would hang this job). Set ${var} to the output of \
-             `keytap reveal {name} --as age` before running this job.",
-            var = env_keys::var_name(name)
-        ));
-    }
-    let assertion = authenticate(name, nearby::StoragePolicy::Choose);
-    let assertion = match assertion {
-        Assertion::Native(assertion) | Assertion::Nearby { assertion, .. } => assertion,
-    };
-    let raw_key = derive_key(&assertion.prf_output);
-    use_key(&raw_key);
-}
-
-/// `init` and `remember` exist to run a ceremony, so they fail under `$CI`.
-fn guard_ceremony(command: &str) {
-    if in_ci() {
-        die(&format!(
-            "$CI is set: refusing to start the passkey ceremony `keytap {command}` needs \
-             (it would hang this job). Run this command outside CI."
-        ));
+    let prf_output = authenticate(name);
+    let raw_key = derive_key(&prf_output);
+    let result = use_key(&raw_key);
+    drop(raw_key);
+    drop(prf_output);
+    if let Err(error) = result {
+        die(&error);
     }
 }
 
-/// Whether this is a CI environment: `$CI` set to anything but the explicit
-/// opt-outs — the convention every major CI platform follows.
-fn in_ci() -> bool {
-    std::env::var("CI").is_ok_and(|v| !v.is_empty() && v != "false" && v != "0")
-}
-
-/// The data shared by every completed passkey assertion. The credential ID
-/// identifies the root for remembered keys.
-struct AssertionData {
-    prf_output: Zeroizing<Vec<u8>>,
+#[cfg(any(target_os = "macos", test))]
+struct NativeAssertion {
+    prf_output: Zeroizing<[u8; 32]>,
     credential_id: Vec<u8>,
 }
 
-impl AssertionData {
-    #[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", test))]
+impl NativeAssertion {
     fn native(prf_output: Vec<u8>, credential_id: Vec<u8>) -> Result<Self, String> {
         let prf_output = Zeroizing::new(prf_output);
-        if prf_output.len() != 32 {
+        let actual = prf_output.len();
+        if actual != 32 {
             return Err(format!(
-                "native passkey provider returned {} bytes of PRF output; expected 32",
-                prf_output.len()
+                "native passkey provider returned {actual} bytes of PRF output; expected 32"
             ));
         }
         if credential_id.is_empty() || credential_id.len() > 1024 {
@@ -169,107 +84,25 @@ impl AssertionData {
                 credential_id.len()
             ));
         }
+        let mut fixed_prf_output = Zeroizing::new([0u8; 32]);
+        fixed_prf_output.copy_from_slice(&prf_output);
         Ok(Self {
-            prf_output,
+            prf_output: fixed_prf_output,
             credential_id,
         })
     }
 }
 
-/// A completed passkey ceremony. Only nearby assertions carry a storage
-/// outcome because native assertions never perform storage during approval.
-enum Assertion {
-    Native(AssertionData),
-    Nearby {
-        assertion: AssertionData,
-        storage: nearby::StorageOutcome,
-    },
-}
-
-impl Assertion {
-    fn nearby(assertion: nearby::NearbyAssertion) -> Self {
-        Self::Nearby {
-            assertion: AssertionData {
-                prf_output: Zeroizing::new(assertion.prf_output),
-                credential_id: assertion.credential_id,
-            },
-            storage: assertion.storage,
-        }
-    }
-
-    fn into_remember_disposition(self) -> RememberDisposition {
-        match self {
-            Self::Native(assertion)
-            | Self::Nearby {
-                assertion,
-                storage: nearby::StorageOutcome::Once,
-            } => RememberDisposition::StoreLocally(assertion),
-            Self::Nearby {
-                storage: nearby::StorageOutcome::Stored,
-                ..
-            } => RememberDisposition::AlreadyStored,
-            Self::Nearby {
-                storage: nearby::StorageOutcome::Unavailable,
-                ..
-            } => RememberDisposition::Unavailable,
-        }
-    }
-}
-
-enum RememberDisposition {
-    StoreLocally(AssertionData),
-    AlreadyStored,
-    Unavailable,
-}
-
 #[cfg(test)]
 mod assertion_candidate_tests {
-    use super::{nearby, Assertion, AssertionData, RememberDisposition};
+    use super::NativeAssertion;
 
     #[test]
     fn native_candidate_is_bounded_before_it_can_claim_the_race() {
-        assert!(AssertionData::native(vec![7; 32], vec![9; 20]).is_ok());
-        assert!(AssertionData::native(vec![7; 31], vec![9; 20]).is_err());
-        assert!(AssertionData::native(vec![7; 32], Vec::new()).is_err());
-        assert!(AssertionData::native(vec![7; 32], vec![9; 1025]).is_err());
-    }
-
-    fn nearby_assertion(storage: nearby::StorageOutcome) -> Assertion {
-        Assertion::nearby(nearby::NearbyAssertion {
-            prf_output: vec![7; 32],
-            credential_id: vec![9; 20],
-            storage,
-        })
-    }
-
-    #[test]
-    fn native_and_one_time_nearby_assertions_are_stored_locally() {
-        let native = Assertion::Native(
-            AssertionData::native(vec![7; 32], vec![9; 20]).expect("valid native assertion"),
-        );
-        for assertion in [native, nearby_assertion(nearby::StorageOutcome::Once)] {
-            match assertion.into_remember_disposition() {
-                RememberDisposition::StoreLocally(assertion) => {
-                    assert_eq!(assertion.prf_output.as_slice(), &[7; 32]);
-                    assert_eq!(assertion.credential_id, vec![9; 20]);
-                }
-                RememberDisposition::AlreadyStored | RememberDisposition::Unavailable => {
-                    panic!("assertion should be stored locally")
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn nearby_storage_disposition_prevents_duplicate_or_impossible_local_write() {
-        assert!(matches!(
-            nearby_assertion(nearby::StorageOutcome::Stored).into_remember_disposition(),
-            RememberDisposition::AlreadyStored
-        ));
-        assert!(matches!(
-            nearby_assertion(nearby::StorageOutcome::Unavailable).into_remember_disposition(),
-            RememberDisposition::Unavailable
-        ));
+        assert!(NativeAssertion::native(vec![7; 32], vec![9; 20]).is_ok());
+        assert!(NativeAssertion::native(vec![7; 31], vec![9; 20]).is_err());
+        assert!(NativeAssertion::native(vec![7; 32], Vec::new()).is_err());
+        assert!(NativeAssertion::native(vec![7; 32], vec![9; 1025]).is_err());
     }
 }
 
@@ -328,11 +161,11 @@ mod approval_startup_tests {
 
 /// Authenticate with a passkey ceremony.
 #[cfg(target_os = "macos")]
-fn authenticate(name: &str, storage_policy: nearby::StoragePolicy) -> Assertion {
+fn authenticate(name: &str) -> Zeroizing<[u8; 32]> {
     use approval::{ApprovalRace, ApprovalRoute, ClaimOutcome};
 
     enum NearbyWorkerOutcome {
-        Committed(nearby::NearbyAssertion),
+        Committed(Zeroizing<[u8; 32]>),
         CommitFailed(String),
         Failed(String),
         SupersededByNative,
@@ -353,9 +186,7 @@ fn authenticate(name: &str, storage_policy: nearby::StoragePolicy) -> Assertion 
         }
     };
     let native_prf_salt = keytap_core::prf_salt_for_name(name)
-        .expect("authenticate is called only after validating the key name")
-        .try_into()
-        .expect("keytap PRF salts are always 32 bytes");
+        .expect("authenticate is called only after validating the key name");
     let native_operation =
         keytap_macos::AssertionOperation::new(native_prf_salt, native_credential);
     let native_cancellation = native_operation.cancellation_handle();
@@ -364,11 +195,8 @@ fn authenticate(name: &str, storage_policy: nearby::StoragePolicy) -> Assertion 
     let worker_cancellation = nearby_cancellation.clone();
     let (native_outcome, nearby_rx) = run_native_while_nearby_starts(
         move || {
-            let prepared = nearby::prepare_nearby_assertion(
-                &nearby_name,
-                storage_policy,
-                worker_cancellation.clone(),
-            );
+            let prepared =
+                nearby::prepare_nearby_assertion(&nearby_name, worker_cancellation.clone());
             match prepared {
                 Ok(prepared) => match nearby_race.claim(ApprovalRoute::Nearby) {
                     ClaimOutcome::Claimed => {
@@ -394,18 +222,19 @@ fn authenticate(name: &str, storage_policy: nearby::StoragePolicy) -> Assertion 
         keytap_macos::AssertionOutcome::Success {
             prf_output,
             credential_id,
-        } => match AssertionData::native(prf_output, credential_id) {
+        } => match NativeAssertion::native(prf_output, credential_id) {
             Ok(assertion) => match native_authority.prepare(&assertion.credential_id) {
                 Ok(prepared) => match race.claim(ApprovalRoute::Native) {
                     ClaimOutcome::Claimed => {
                         nearby_cancellation.supersede();
                         if let Err(error) = prepared.commit() {
+                            drop(assertion);
                             die(&format!(
                                 "native approval won, but its local passkey record could not be committed: {error}"
                             ));
                         }
                         note("Approved on this Mac; cancelled nearby approval.");
-                        return Assertion::Native(assertion);
+                        return assertion.prf_output;
                     }
                     ClaimOutcome::Lost => {
                         "native approval finished after nearby approval had already won".to_string()
@@ -431,9 +260,9 @@ fn authenticate(name: &str, storage_policy: nearby::StoragePolicy) -> Assertion 
         NearbyWorkerOutcome::Failed("nearby approval stopped unexpectedly".into())
     });
     match nearby_outcome {
-        NearbyWorkerOutcome::Committed(assertion) => {
+        NearbyWorkerOutcome::Committed(prf_output) => {
             note("Approved on the nearby device; closed the native approval prompt.");
-            Assertion::nearby(assertion)
+            prf_output
         }
         NearbyWorkerOutcome::CommitFailed(error) => die(&format!(
             "nearby approval won but could not be committed: {error}"
@@ -448,14 +277,12 @@ fn authenticate(name: &str, storage_policy: nearby::StoragePolicy) -> Assertion 
 }
 
 #[cfg(not(target_os = "macos"))]
-fn authenticate(name: &str, storage_policy: nearby::StoragePolicy) -> Assertion {
-    Assertion::nearby(nearby::authenticate_nearby(name, storage_policy))
+fn authenticate(name: &str) -> Zeroizing<[u8; 32]> {
+    nearby::authenticate_nearby(name)
 }
 
-fn derive_key(prf_output: &[u8]) -> Zeroizing<Vec<u8>> {
-    Zeroizing::new(keytap_core::derive_raw_key(prf_output).unwrap_or_else(|e| {
-        die(&format!("key derivation failed: {e}"));
-    }))
+fn derive_key(prf_output: &[u8; 32]) -> Zeroizing<[u8; 32]> {
+    Zeroizing::new(keytap_core::derive_raw_key(prf_output))
 }
 
 #[cfg(target_os = "macos")]
@@ -471,7 +298,6 @@ fn register(pending_init: nearby_identity::PendingInit) -> nearby_identity::Pers
                     "passkey was created, but its local credential record could not be stored: {error}"
                 )),
                 Err(nearby_identity::InitCommitError::PublishedButNotDurable(error)) => {
-                    remember::after_init();
                     die(&format!(
                         "passkey was created and its local credential record is visible, but durable storage could not be confirmed: {error}. Rerun `keytap init --force` before relying on it"
                     ))
@@ -496,18 +322,29 @@ fn register(pending_init: nearby_identity::PendingInit) -> nearby_identity::Pers
     nearby::register_nearby(pending_init)
 }
 
-fn emit_private_key(raw_key: &[u8], format: keytap_cli_spec::Format) {
-    match keytap_core::format_private_key_display(raw_key, format.into()) {
-        Ok(bytes) => print!("{}", String::from_utf8(bytes).unwrap()),
-        Err(e) => die(&format!("format error: {e}")),
-    }
+fn emit_private_key(raw_key: &[u8; 32], format: cli::Format) -> Result<(), String> {
+    use std::io::Write;
+
+    let bytes = Zeroizing::new(keytap_core::format_private_key_display(
+        raw_key,
+        format.into(),
+    ));
+    let result = std::io::stdout()
+        .lock()
+        .write_all(&bytes)
+        .map_err(|error| format!("could not write private key: {error}"));
+    drop(bytes);
+    result
 }
 
-fn emit_public_key(raw_key: &[u8], format: keytap_cli_spec::Format, name: &str) {
-    match keytap_core::format_public_key_display(raw_key, format.public_key_format(name)) {
-        Ok(s) => print!("{s}"),
-        Err(e) => die(&format!("format error: {e}")),
-    }
+fn emit_public_key(raw_key: &[u8; 32], format: cli::Format, name: &str) -> Result<(), String> {
+    use std::io::Write;
+
+    let output = keytap_core::format_public_key_display(raw_key, format.public_key_format(name));
+    std::io::stdout()
+        .lock()
+        .write_all(output.as_bytes())
+        .map_err(|error| format!("could not write public key: {error}"))
 }
 
 pub(crate) fn die(msg: &str) -> ! {

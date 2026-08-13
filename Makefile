@@ -1,62 +1,58 @@
 APP_NAME = Keytap
 BUNDLE = $(APP_NAME).app
 BIN = $(BUNDLE)/Contents/MacOS/keytap
-LAUNCHER_SOURCE = distribution/keytap-launcher.sh
+LAUNCHER_SOURCE = macos/keytap-launcher.sh
 BUNDLE_LAUNCHER = $(BUNDLE)/Contents/Resources/keytap-launcher
-IDENTITY ?= $(shell security find-identity -v -p codesigning 2>/dev/null | grep -q "Developer ID Application" && echo "Developer ID Application" || echo "-")
-PROVISIONING_PROFILE ?=
+IDENTITY ?= -
+PROVISIONING_PROFILE ?= $(wildcard Keytap.provisionprofile)
 UNAME_S := $(shell uname -s)
 MACOS_TEST_TARGET := $(if $(filter Darwin,$(UNAME_S)),test-macos,)
 
-.PHONY: all build build-wasm sign notarize setup-signing install verify package test test-core test-spec test-cli test-macos test-wasm test-web clean
+.PHONY: all build build-wasm build-web sign install verify test test-cargo test-macos test-web clean
 
-all: build sign notarize
-
-package: setup-signing build sign verify notarize
-	xattr -cr $(BUNDLE)
-	@SHA=$$(git rev-parse --short=7 HEAD) && \
-		ZIP_NAME="keytap-$${SHA}-arm64.zip" && \
-		ditto -c -k --keepParent $(BUNDLE) "$$ZIP_NAME" && \
-		echo "Packaged $$ZIP_NAME"
-
-setup-signing:
-	@./distribution/setup-signing.sh
+all: sign
 
 build:
-	cargo build --release -p keytap
+	MACOSX_DEPLOYMENT_TARGET=15.0 cargo build --release -p keytap --locked
 	@mkdir -p $(BUNDLE)/Contents/MacOS $(BUNDLE)/Contents/Resources
 	@VERSION=$$(cargo metadata --no-deps --format-version 1 | \
 		python3 -c 'import json, sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "keytap"))') && \
 		sed "s/@VERSION@/$$VERSION/g" macos/Info.plist.in > $(BUNDLE)/Contents/Info.plist
-	@xcrun actool macos/keytap.icon --compile $(BUNDLE)/Contents/Resources \
-		--platform macosx --minimum-deployment-target 15.0 \
-		--app-icon keytap --include-all-app-icons \
-		--output-partial-info-plist /dev/null > /dev/null
 	@cp target/release/keytap $(BIN)
 	@install -m 755 $(LAUNCHER_SOURCE) $(BUNDLE_LAUNCHER)
 	@echo "Built $(BUNDLE)"
 
-sign:
+build-wasm:
+	@rm -rf web/pkg
+	wasm-pack build web/wasm --target web --out-dir ../pkg --out-name keytap_web --release --locked
+
+build-web:
+	@rm -rf web/dist
+	@$(MAKE) build-wasm
+	@mkdir -p web/dist/pkg web/dist/.well-known
+	@cp web/nearby.html web/nearby.js web/nearby-protocol.js \
+		web/nearby.css web/nearby-sas-words.txt web/theme.css web/CNAME web/dist/
+	@cp web/pkg/keytap_web.js web/pkg/keytap_web_bg.wasm web/dist/pkg/
+	@cp .well-known/apple-app-site-association web/dist/.well-known/
+	@echo "Built web/dist"
+
+sign: build
+	@rm -f $(BUNDLE)/Contents/embedded.provisionprofile
 	@if [ -n "$(PROVISIONING_PROFILE)" ]; then \
-		echo "Embedding provisioning profile..."; \
-		cp "$(PROVISIONING_PROFILE)" "$(BUNDLE)/Contents/embedded.provisionprofile"; \
-	elif [ -f Keytap.provisionprofile ]; then \
-		echo "Embedding provisioning profile..."; \
-		cp Keytap.provisionprofile "$(BUNDLE)/Contents/embedded.provisionprofile"; \
+		test -f "$(PROVISIONING_PROFILE)" || { echo "error: provisioning profile not found: $(PROVISIONING_PROFILE)" >&2; exit 1; }; \
+		cp "$(PROVISIONING_PROFILE)" $(BUNDLE)/Contents/embedded.provisionprofile; \
+		echo "Embedded $(PROVISIONING_PROFILE)"; \
 	fi
 	codesign --force --options runtime --timestamp \
 		--sign "$(IDENTITY)" \
 		--entitlements macos/keytap.entitlements $(BUNDLE)
 	@echo "Signed $(BUNDLE)"
 
-notarize:
-	@./distribution/notarize.sh $(BUNDLE)
-
 INSTALL_DIR = $(HOME)/.local/share/keytap
 INSTALL_BUNDLE = $(INSTALL_DIR)/$(BUNDLE)
 INSTALL_LAUNCHER = $(HOME)/.local/bin/keytap
 
-install: setup-signing all
+install: sign
 	@mkdir -p $(HOME)/.local/bin
 	@rm -rf $(INSTALL_BUNDLE)
 	@mkdir -p $(INSTALL_DIR)
@@ -69,36 +65,24 @@ install: setup-signing all
 	@echo "Installed launcher: ~/.local/bin/keytap"
 
 verify:
+	codesign --verify --deep --strict --verbose=2 $(BUNDLE)
 	codesign -dvv $(BUNDLE) 2>&1
 	@echo ""
-	codesign -d --entitlements :- $(BUNDLE)
+	codesign -d --entitlements - $(BUNDLE)
 
-build-wasm:
-	wasm-pack build --target web web/wasm --out-dir ../pkg --out-name keytap_web
-
-test: test-core test-spec test-cli $(MACOS_TEST_TARGET) test-wasm test-web
+test: test-cargo $(MACOS_TEST_TARGET) test-web
 	@echo "All tests passed."
 
-test-core:
-	cargo test -p keytap-core
-
-test-spec:
-	cargo test -p keytap-cli-spec
-
-test-cli:
-	cargo test -p keytap
+test-cargo:
+	cargo test -p keytap-core -p keytap -p keytap-web --locked
 
 test-macos:
 	swift test --package-path macos/swift-lib
-	./distribution/keytap-launcher.test.sh
-
-test-wasm:
-	cargo test -p keytap-web
-	wasm-pack test --node web/wasm
+	./macos/keytap-launcher.test.sh
 
 test-web:
 	npm --prefix web test
 
 clean:
 	cargo clean
-	rm -rf $(BUNDLE)
+	rm -rf $(BUNDLE) web/pkg web/dist

@@ -1,20 +1,16 @@
 # Keytap
 
-<img src="macos/keytap.icon/Assets/icon.png" width="128" alt="keytap icon" />
-
-Keytap is a CLI for deriving reproducible SSH keys and `age` identities
-anywhere you can unlock your passkey.
-
-Unlock with Touch ID; or approve using a passkey on a nearby device.
+Keytap derives reproducible key material from a WebAuthn PRF-capable passkey.
+Its complete command surface is: create the passkey, print a named public key,
+or reveal the matching private key.
 
 > **Pre-release:** Expect breaking changes. Do not make Keytap the only way to
-> recover important secrets.
+> recover important keys.
 
-[Try the web demo](https://keytap.jul.sh).
+## Commands
 
-<!--HELP:BEGIN-->
-```
-Derive keys and encrypt files from a passkey.
+```text
+Derive reproducible keys from a passkey.
 
 Usage: keytap <COMMAND> [ARGS]
 
@@ -22,135 +18,132 @@ Commands
   init                                       Create a keytap passkey, if you do not already have one
   public [NAME] [--as <hex|base64|age|ssh>]  Output the public key
   reveal [NAME] [--as <hex|base64|age|ssh>]  Reveal private key material
-  encrypt [NAME] [--to VAL] [-R VAL]         Encrypt stdin to stdout with the derived age identity
-  decrypt [NAME]                             Decrypt age input from stdin to stdout with the derived age identity
-  remember NAME                              Remember a derived key on this machine (no more prompts for it)
-  forget [NAME] [--all]                      Forget a remembered key
-  remembered                                 List keys remembered on this machine (never prints key material)
 
 Arguments & options
-  NAME      Key name for domain separation  [default: default]
-  --as      Output format  [default: hex]
-  --to VAL  Additional age recipient (can be repeated)
-  -R VAL    File containing age recipients (one per line)
+  NAME  Key name for domain separation  [default: default]
+  --as  Output format  [default: hex]
 
-Skip repeated prompts for a key: `keytap remember NAME` (see `keytap remember --help`).
-Holds that expire instead (ssh-agent, TTLs): see `keytap reveal --help`.
-CI (headless, $CI set): keys come from `$KEYTAP_KEY_<NAME>` — see `keytap reveal --help`.
-Run `keytap <COMMAND> --help` for the full details of any command.
-```
-<!--HELP:END-->
-
-## Install
-
-```bash
-case "$(uname -s)/$(uname -m)" in
-  Darwin/arm64) ASSET='arm64.zip' ;;
-  Linux/x86_64) ASSET='linux-x86_64.zip' ;;
-  *) echo 'Keytap has no release for this platform.' >&2; exit 1 ;;
-esac
-URL=$(curl -fsSL 'https://api.github.com/repos/jul-sh/keytap/releases?per_page=1' \
-  | grep -o '"browser_download_url": *"[^"]*"' | cut -d '"' -f 4 \
-  | grep "$ASSET$") \
-  && curl -fLO "$URL" && mkdir -p ~/.local/bin \
-  && if [ "$(uname -s)" = Darwin ]; then
-       mkdir -p ~/.local/share/keytap && unzip -o keytap-*-arm64.zip -d ~/.local/share/keytap \
-       && rm -f ~/.local/bin/keytap \
-       && if [ -x ~/.local/share/keytap/Keytap.app/Contents/Resources/keytap-launcher ]; then
-            install -m 755 ~/.local/share/keytap/Keytap.app/Contents/Resources/keytap-launcher \
-              ~/.local/bin/keytap \
-            && KEYTAP_LAUNCHER_REGISTER_ONLY=1 ~/.local/bin/keytap
-          else
-            printf '%s\n' '#!/bin/sh' \
-              'exec "$HOME/.local/share/keytap/Keytap.app/Contents/MacOS/keytap" "$@"' \
-              > ~/.local/bin/keytap \
-            && chmod 755 ~/.local/bin/keytap \
-            && /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister \
-              -f ~/.local/share/keytap/Keytap.app \
-            && sleep 2
-          fi
-     else
-       unzip -o keytap-*-linux-x86_64.zip keytap -d ~/.local/bin
-     fi
+Run `keytap <COMMAND> --help` for command details.
 ```
 
-Releases are built in CI with [build attestation](https://docs.github.com/en/actions/security-for-github-actions/using-artifact-attestations).
-To verify a downloaded release was built from this repository:
+`keytap init` creates the passkey and a local credential record. It refuses to
+replace an existing record; `keytap init --force` replaces it, which changes
+every derived key.
 
-```bash
-gh attestation verify keytap-*.zip -R jul-sh/keytap
+`public` and `reveal` each require a fresh passkey assertion. Keytap derives the
+named key for that invocation and does not persist the derived key.
+
+Names must be non-empty ASCII strings of at most 128 characters. A name is
+domain separation, so one passkey can reproducibly produce independent keys:
+
+```sh
+keytap init
+keytap public
+keytap public deploy --as ssh
+keytap reveal backup --as age
 ```
+
+## Formats
+
+Both output commands accept the same four format names:
+
+| `--as` | `public` | `reveal` |
+| --- | --- | --- |
+| `hex` | lowercase hex X25519 public key | lowercase hex 32-byte secret |
+| `base64` | standard Base64 X25519 public key | standard Base64 32-byte secret |
+| `age` | `age1...` X25519 recipient | `AGE-SECRET-KEY-...` identity |
+| `ssh` | OpenSSH Ed25519 public key | OpenSSH Ed25519 private key |
+
+The SSH public-key comment is `keytap:<name>`. All output is newline-terminated;
+the SSH private key uses LF line endings.
 
 ## Approval
 
-On macOS, commands using an existing passkey open the native prompt and show a
-QR code plus a forwardable approval URL; the first verified approval wins.
-`keytap init` tries native passkey creation first and shows a QR code if macOS
-reports that request failed or is unavailable. It stops on malformed or unknown
-results, or after macOS returns a credential Keytap cannot safely accept. Other
-platforms use nearby approval.
+On macOS 15 or later, `init` uses the native passkey registration UI. It falls
+back to nearby registration only when macOS reports a safe fallback; an
+indeterminate native result stops instead of risking a second credential.
 
-Nearby approval sends one outbound secure WebSocket from each device to a
-short-lived relay. The URL fragment carries a fresh P-256 public key whose
-private half stays in the CLI. The endpoints use P-256 key agreement and
-HKDF-SHA-256 to derive directional AES-256-GCM keys; the relay forwards only
-public handshake data and sequenced ciphertext. It sees connection timing and
-message sizes, but cannot read an approval or alter one without detection.
+For `public` and `reveal`, macOS starts native AuthenticationServices and nearby
+approval together. The first fully verified result wins and the other route is
+cancelled.
 
-The first nearby pairing uses a commit-reveal exchange to show the same two
-words on the approval page and in the terminal. Both sides must confirm them
-before the browser opens a WebAuthn prompt. That ceremony atomically pins the
-exact credential and an Ed25519 identity derived from the passkey PRF. A
-locally created passkey performs this pairing on its first nearby use. Later
-approvals need no word comparison: each uses a fresh, one-use encrypted
-invitation and must match the pinned passkey identity. Every key result is
-signed over the exact request, returned key material, credential, and
-one-time-versus-remember choice.
+On Linux, registration and assertions use nearby approval. The CLI prints a QR
+code and a one-use URL for a current browser and PRF-capable passkey device.
 
-## Remembered keys and CI
+The browser `/nearby` page and its relay are support infrastructure for those
+CLI invitations. They are not a standalone key tool or demo.
 
-`keytap remember NAME` stores that derived key on the current machine without a
-TTL, until `forget` or passkey replacement. It uses macOS Keychain or Linux
-Secret Service when available; the fallback is an owner-only, unencrypted state
-file. Treat remembered keys like private keys. **Use once** skips storing the
-named key, but nearby pairing metadata is still retained.
+The first nearby pairing displays the same two words in the terminal and
+browser. After both sides confirm them, Keytap pins the credential ID and a
+passkey-derived Ed25519 public identity locally. A passkey created through the
+native macOS flow performs this pairing on its first nearby use. Later nearby
+results must carry a fresh signature from that pinned identity.
 
-Keytap does not open an interactive ceremony when `$CI` is set. Set
-`KEYTAP_KEY_<NAME>` to `keytap reveal <name> --as age` output; names are
-uppercased and non-alphanumeric characters become `_`.
+## Build from source
 
-```bash
-keytap reveal ci --as age | gh secret set KEYTAP_KEY_CI
+Rust is required everywhere. The macOS app additionally requires macOS 15 or
+later, Python 3, and the Xcode/Swift toolchain. Browser and relay tests require
+Node.js/npm; building the deployable nearby page additionally requires
+`wasm-pack`.
+
+Build, sign, and install the local macOS app bundle and launcher with:
+
+```sh
+make install
 ```
 
-Leaking that value permanently compromises the named key; retire the name.
+This installs `Keytap.app` under `~/.local/share/keytap` and the `keytap`
+launcher under `~/.local/bin`. The Makefile uses ad-hoc signing by default. It
+automatically embeds `Keytap.provisionprofile` when that file exists; set
+`IDENTITY` and `PROVISIONING_PROFILE=/path/to/profile` to override those
+defaults. A profile is optional for a nearby-only build, while native passkeys
+require signing that authorizes the associated-domain entitlement. If native
+approval is unavailable, `public` and `reveal` can still finish through nearby
+approval; `init` falls back only when macOS reports that doing so is safe.
 
-## Security
+On Linux, build and install the nearby-only binary directly:
 
-Keytap is a convenience tool, not a high-assurance key manager. You trust your
-passkey provider, WebAuthn PRF, and the `keytap.jul.sh` relying party.
+```sh
+cargo build --release -p keytap --locked
+mkdir -p "$HOME/.local/bin"
+install -m 755 target/release/keytap "$HOME/.local/bin/keytap"
+```
 
-- Losing the passkey can make every derived key unrecoverable; replacing it
-  creates a different set of keys. Keep another recovery path.
-- Anything receiving private output receives the key and must be trusted.
-- Key names provide domain separation, not secrecy.
-- The relay is not trusted for secrecy or integrity. It can observe public
-  handshake data, timing, and message sizes, and it can delay, drop, or close a
-  room. Endpoint authentication and encryption prevent it from reading or
-  silently changing an accepted request or result.
-- Treat the QR code as a trusted invitation from the CLI you intend to approve.
-  Each invitation is fresh, encrypted, and usable once. Confirm the two words
-  on both displays during the first nearby pairing; that pairing pins the
-  passkey identity, and later approvals authenticate it without another word
-  comparison.
-- The approval page necessarily handles the PRF result and passkey-derived
-  identity material before encrypting them to the CLI. Trust the code served
-  by `keytap.jul.sh` and the browser running it.
+Build the nearby page's minimal identity WASM and stage its static deployment
+with `make build-web`. Run the available local suite with `make test`; on macOS
+it also runs the Swift bridge and launcher tests. Portable Rust and browser
+tests can be run separately:
 
-## Guides
+```sh
+cargo test -p keytap-core -p keytap -p keytap-web --locked
+npm --prefix web test
+```
 
-- [Share an encrypted `.env` through Git with multiple developers](docs/team-env.md)
-- [Deploy the Cloudflare approval relay](docs/relay.md)
+## Security model
+
+Keytap is a convenience tool, not a high-assurance key manager.
+
+The passkey PRF output is expanded with HKDF-SHA-256 into a 32-byte named
+secret. The CLI holds the PRF output and raw key in zeroizing buffers, then
+writes the requested representation to stdout. Its local credential record
+contains the credential ID and, after nearby pairing, a public identity
+pin—not a named private key.
+
+Nearby invitations carry a fresh P-256 public key in the URL fragment; its
+private half remains in the CLI. P-256 key agreement and HKDF-SHA-256 produce
+directional AES-256-GCM channel keys. The relay sees public handshake data,
+timing, and message sizes, and can delay, drop, or close a room. It cannot read
+or silently alter an accepted request or result.
+
+Key names are domain separators, not secrets. Anyone who receives `reveal`
+output receives that private key and must be trusted. Losing or replacing the
+passkey can make every previous key unrecoverable, so keep an independent
+recovery path.
+
+Nearby approval trusts the browser, the code served at `keytap.jul.sh`, the
+passkey provider, WebAuthn PRF, and the first two-word comparison. Treat every
+QR code and URL as an invitation from the exact CLI process you intend to
+approve.
 
 ## License
 

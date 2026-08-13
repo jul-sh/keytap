@@ -130,13 +130,10 @@ test('final acknowledgement remains consumable when close follows its frame', as
   socket.dispatch('close');
   assert.equal(controller.signal.aborted, false);
   finishDecrypt({
-    value: { type: 'assertion-accepted', storage: 'stored' },
-    bytes: new TextEncoder().encode('{"type":"assertion-accepted","storage":"stored"}'),
+    value: { type: 'assertion-accepted' },
+    bytes: new TextEncoder().encode('{"type":"assertion-accepted"}'),
   });
-  assert.deepEqual(await acknowledgement, {
-    type: 'assertion-accepted',
-    storage: 'stored',
-  });
+  assert.deepEqual(await acknowledgement, { type: 'assertion-accepted' });
   await flush();
   assert.equal(controller.signal.aborted, true);
   assert.match(controller.signal.reason.message, /relay closed/i);
@@ -167,7 +164,7 @@ test('failure outcomes never claim rollback after a result was sent', () => {
 
   const assertion = failureOutcome(new ProtocolError('closed'), {
     kind: 'sent',
-    result: { kind: 'assertion', keyName: 'deploy', disposition: 'once' },
+    result: { kind: 'assertion' },
   });
   assert.equal(assertion.kind, 'assertion-indeterminate');
   assert.match(assertion.message, /result was sent/i);
@@ -228,7 +225,6 @@ test('local PRF and identity-proof incompatibility do not blame the relay', () =
         kind: 'assertion',
         request: {},
         binding: {},
-        disposition: 'once',
       },
     });
     assert.equal(outcome.kind, 'capability-unavailable');
@@ -320,7 +316,7 @@ for (const { name, phase, title, message } of [
     phase: {
       kind: 'sent',
       session: {},
-      result: { kind: 'assertion', keyName: 'deploy', disposition: 'once' },
+      result: { kind: 'assertion' },
     },
     title: 'Approval status unknown',
     message: /result was sent.*check the terminal/i,
@@ -581,6 +577,25 @@ test('registration creation is modeled before PRF validation and relay send', as
   assert.match(source, /const WEBAUTHN_TIMEOUT_MS = 120_000/);
 });
 
+test('assertions proceed directly with no key-persistence choice or outcome', async () => {
+  const [application, protocol, page] = await Promise.all([
+    readFile(new URL('./nearby.js', import.meta.url), 'utf8'),
+    readFile(new URL('./nearby-protocol.js', import.meta.url), 'utf8'),
+    readFile(new URL('./nearby.html', import.meta.url), 'utf8'),
+  ]);
+  const source = `${application}\n${protocol}\n${page}`;
+  assert.doesNotMatch(source, /chooseDisposition|request\.storage|acknowledgement\.storage/);
+  assert.doesNotMatch(source, /\b(?:disposition|storage-unavailable)\b/i);
+  assert.doesNotMatch(application, /kind: '(?:choice|once|stored)'/);
+
+  const assertion = application.slice(
+    application.indexOf('async function completeAssertion'),
+    application.indexOf('export function failureOutcome'),
+  );
+  assert.ok(assertion.indexOf('await runAssertion(') < assertion.indexOf('await session.send('));
+  assert.match(assertion, /await nextCliMessage\(session, 'assertion-accepted'\)/);
+});
+
 test('approval shell defaults hidden and automatic startup is top-level gated', async () => {
   const [javascript, stylesheet] = await Promise.all([
     readFile(new URL('./nearby.js', import.meta.url), 'utf8'),
@@ -590,4 +605,17 @@ test('approval shell defaults hidden and automatic startup is top-level gated', 
   assert.match(stylesheet, /html\.approval-top-level \.shell\s*\{[^}]*visibility:\s*visible/s);
   assert.match(javascript, /if \(revealTopLevelPage\(window, document\.documentElement\)\) \{/);
   assert.match(javascript, /export async function main\(\) \{\s*if \(typeof window !== 'undefined' && !isTopLevelContext\(window\)\) return;/s);
+});
+
+test('nearby identity keeps WebCrypto private keys non-extractable and derives public keys in WASM', async () => {
+  const [application, protocol, page] = await Promise.all([
+    readFile(new URL('./nearby.js', import.meta.url), 'utf8'),
+    readFile(new URL('./nearby-protocol.js', import.meta.url), 'utf8'),
+    readFile(new URL('./nearby.html', import.meta.url), 'utf8'),
+  ]);
+  assert.match(protocol, /\{ name: 'Ed25519' \},\s*false,\s*\['sign'\]/s);
+  assert.doesNotMatch(protocol, /exportKey\('jwk'/);
+  assert.match(application, /import\('\.\/pkg\/keytap_web\.js'\)/);
+  assert.match(application, /wasm\.ed25519PublicKey\(identitySeed\)/);
+  assert.match(page, /script-src 'self' 'wasm-unsafe-eval'/);
 });

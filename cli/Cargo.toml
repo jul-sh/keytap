@@ -9,7 +9,7 @@ path = "src/main.rs"
 
 [dependencies]
 keytap-core = { path = "../core" }
-keytap-cli-spec = { path = "spec" }
+clap = { version = "4", features = ["derive"] }
 serde_json = "1"
 serde = { version = "1", features = ["derive"] }
 base64 = "0.22"
@@ -25,17 +25,5 @@ subtle = "2"
 ed25519-dalek = { version = "2", default-features = false }
 libc = "0.2"
 
-[dev-dependencies]
-# The encrypt_roundtrip integration test exercises age directly.
-age = { version = "0.11", default-features = false }
-
-# Platform integrations are target dependencies: native passkeys and Keychain
-# on macOS, and Secret Service (GNOME Keyring, KWallet, …) on Linux. `vendored`
-# builds libdbus from source so release builds need no system development
-# packages.
 [target.'cfg(target_os = "macos")'.dependencies]
 keytap-macos = { path = "../macos" }
-security-framework = "3"
-
-[target.'cfg(target_os = "linux")'.dependencies]
-dbus-secret-service = { version = "4", features = ["crypto-rust", "vendored"] }
