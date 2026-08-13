@@ -43,10 +43,10 @@ With that said, here is how Keytap works within those constraints:
 - Losing or replacing the passkey can make every previously derived key
   unrecoverable. Keep an independent recovery path.
 
-### Authentication via phone over relay (fallback)
+### Authentication via phone over relay via QR code
 
-When Keytap authenticates via your phone, additional trust considerations
-apply:
+When you scan Keytap's QR code and authenticate with your passkey on your
+phone, additional trust considerations apply:
 
 - **You trust the web page served to your phone.** The page served by
   `keytap.jul.sh` performs the WebAuthn ceremony, receives the PRF output,
