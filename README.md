@@ -19,25 +19,11 @@ Run `keytap <COMMAND> --help` for command details.
 
 ## Approval
 
-On macOS 15 or later, `init` uses the native passkey registration UI. It falls
-back to nearby registration only when macOS reports a safe fallback; an
-indeterminate native result stops instead of risking a second credential.
+On macOS, Keytap uses native passkey support.
 
-For `public` and `reveal`, macOS starts native AuthenticationServices and nearby
-approval together. The first fully verified result wins and the other route is
-cancelled.
-
-On Linux, registration and assertions use nearby approval. The CLI prints a QR
-code and a one-use URL for a current browser and PRF-capable passkey device.
-
-The browser `/nearby` page and its relay are support infrastructure for those
-CLI invitations. They are not a standalone key tool or demo.
-
-The first nearby pairing displays the same two words in the terminal and
-browser. After both sides confirm them, Keytap pins the credential ID and a
-passkey-derived Ed25519 public identity locally. A passkey created through the
-native macOS flow performs this pairing on its first nearby use. Later nearby
-results must carry a fresh signature from that pinned identity.
+For nearby approval, Keytap displays a QR code that opens a website on your
+phone. Use your passkey there, and the result is sent back to the machine over
+an end-to-end encrypted channel.
 
 ## Security
 
