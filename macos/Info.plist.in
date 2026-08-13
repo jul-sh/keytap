@@ -12,10 +12,6 @@
     <string>@VERSION@</string>
     <key>CFBundleShortVersionString</key>
     <string>@VERSION@</string>
-    <key>CFBundleIconName</key>
-    <string>keytap</string>
-    <key>CFBundleIconFile</key>
-    <string>keytap</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>LSMinimumSystemVersion</key>

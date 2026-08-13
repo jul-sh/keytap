@@ -36,6 +36,8 @@ test_launcher="$test_script_dir/keytap-launcher.sh"
 /bin/ln -s "$test_script" "$test_binary"
 /bin/ln -s "$test_script" "$test_lsregister"
 /bin/ln -s "$test_script" "$test_sleep"
+printf '%s\n' '<plist><dict><key>CFBundleVersion</key><string>9.0.0</string></dict></plist>' \
+  >"$test_bundle/Contents/Info.plist"
 
 KEYTAP_APP_BUNDLE="$test_bundle" \
   KEYTAP_CACHE_DIR="$test_cache" \
@@ -52,10 +54,28 @@ KEYTAP_APP_BUNDLE="$test_bundle" \
   KEYTAP_SLEEP="$test_sleep" \
   "$test_launcher" 'argument with spaces' --flag
 
+# Replacing bundle contents without changing CFBundleVersion must register the
+# new revision rather than trusting the previous marker.
+/bin/cp "$test_script" "$test_root/replacement-keytap"
+printf '\n' >>"$test_root/replacement-keytap"
+/bin/chmod 755 "$test_root/replacement-keytap"
+/bin/rm "$test_binary"
+/bin/mv "$test_root/replacement-keytap" "$test_binary"
+
+KEYTAP_APP_BUNDLE="$test_bundle" \
+  KEYTAP_CACHE_DIR="$test_cache" \
+  KEYTAP_LAUNCHER_REGISTER_ONLY=1 \
+  KEYTAP_LAUNCHER_TEST_LOG="$test_log" \
+  KEYTAP_LSREGISTER="$test_lsregister" \
+  KEYTAP_SLEEP="$test_sleep" \
+  "$test_launcher"
+
 expected_log="$test_root/expected"
 printf 'lsregister:-f %s\n' "$test_bundle" >"$expected_log"
 printf 'sleep:2\n' >>"$expected_log"
 printf 'argument:argument with spaces\nargument:--flag\n' >>"$expected_log"
+printf 'lsregister:-f %s\n' "$test_bundle" >>"$expected_log"
+printf 'sleep:2\n' >>"$expected_log"
 
 /usr/bin/diff -u "$expected_log" "$test_log"
 test "$(/usr/bin/find "$test_cache" -type f -name 'launchservices-*' | /usr/bin/wc -l | /usr/bin/tr -d ' ')" = 1

@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="referrer" content="no-referrer">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; font-src 'self'; connect-src 'self' wss://keytap-relay.julsh.workers.dev; form-action 'none'; base-uri 'none'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; connect-src 'self' wss://keytap-relay.julsh.workers.dev; form-action 'none'; base-uri 'none'">
   <meta name="theme-color" content="#000066">
   <title>keytap</title>
   <link rel="stylesheet" href="./theme.css">
@@ -18,7 +18,7 @@
     <p class="summary" id="summary"></p>
     <details class="details" id="details">
       <summary>How is this request protected?</summary>
-      <p>The approval link authenticates a one-time encryption key from your CLI. The relay carries application messages only as end-to-end encrypted ciphertext. Initial pairing requires matching two words and may ask for one extra passkey confirmation to pin its identity. Later prompts rely on the trusted one-use invitation and pinned identity.</p>
+      <p>The approval link authenticates a one-time encryption key from your CLI. The relay carries application messages only as end-to-end encrypted ciphertext. Initial pairing requires matching two words. Each approval uses your passkey and the trusted one-use invitation.</p>
     </details>
     <section class="content" id="content" aria-live="polite"></section>
     <p class="status" id="status" role="status" aria-live="polite"></p>

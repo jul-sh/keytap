@@ -7,7 +7,7 @@
 //! assertion results for the one-use channel and request.
 
 use crate::nearby_identity::{
-    Anchor as IdentityAnchor, AssertionDisposition, InitCommitError as IdentityInitCommitError,
+    Anchor as IdentityAnchor, InitCommitError as IdentityInitCommitError,
     PairingAnchor as IdentityPairingAnchor, PairingConstraint as IdentityPairingConstraint,
     PendingInit as PendingIdentityInit, PersistedInit as PersistedIdentityInit,
     PinnedAnchor as IdentityPinnedAnchor, PreparedPairingPin as PreparedIdentityPairingPin,
@@ -24,7 +24,7 @@ use crate::nearby_sas::{
 use crate::note;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::net::{Shutdown, TcpStream};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -158,34 +158,11 @@ impl NearbyCancellation {
     }
 }
 
-/// A completed nearby assertion ceremony.
-pub struct NearbyAssertion {
-    pub prf_output: Vec<u8>,
-    pub credential_id: Vec<u8>,
-    pub storage: StorageOutcome,
-}
-
-#[derive(Clone, Copy, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum StoragePolicy {
-    Choose,
-    Remember,
-}
-
-#[derive(Clone, Copy, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum StorageOutcome {
-    Once,
-    Stored,
-    Unavailable,
-}
-
 #[cfg(not(target_os = "macos"))]
-pub fn authenticate_nearby(name: &str, storage_policy: StoragePolicy) -> NearbyAssertion {
+pub fn authenticate_nearby(name: &str) -> Zeroizing<[u8; 32]> {
     let cancellation = NearbyCancellation::new();
     let prepared = prepare_nearby_assertion_with_presentation(
         name,
-        storage_policy,
         cancellation.clone(),
         InvitationPresentation::StandaloneNearby,
     )
@@ -197,12 +174,10 @@ pub fn authenticate_nearby(name: &str, storage_policy: StoragePolicy) -> NearbyA
 #[cfg(target_os = "macos")]
 pub(crate) fn prepare_nearby_assertion(
     name: &str,
-    storage_policy: StoragePolicy,
     cancellation: NearbyCancellation,
 ) -> Result<PreparedNearbyAssertion, String> {
     prepare_nearby_assertion_with_presentation(
         name,
-        storage_policy,
         cancellation,
         InvitationPresentation::ConcurrentNativeAndNearby,
     )
@@ -215,13 +190,8 @@ pub fn register_nearby(pending_init: PendingIdentityInit) -> PersistedIdentityIn
 }
 
 enum Operation<'a> {
-    Register {
-        pending_init: PendingIdentityInit,
-    },
-    Assert {
-        name: &'a str,
-        storage_policy: StoragePolicy,
-    },
+    Register { pending_init: PendingIdentityInit },
+    Assert { name: &'a str },
 }
 
 enum FlowPlan {
@@ -261,21 +231,19 @@ impl AssertionRoute {
 
 struct AssertionPlan {
     key_name: String,
-    prf_salt: Vec<u8>,
+    prf_salt: [u8; 32],
     identity_salt: [u8; 32],
     challenge: [u8; 32],
-    storage: StoragePolicy,
 }
 
 impl AssertionPlan {
     fn request(&self, route: &AssertionRoute) -> CeremonyRequest {
         CeremonyRequest::Assert {
             key_name: self.key_name.clone(),
-            prf_salt: URL_SAFE_NO_PAD.encode(&self.prf_salt),
+            prf_salt: URL_SAFE_NO_PAD.encode(self.prf_salt),
             identity_salt: URL_SAFE_NO_PAD.encode(self.identity_salt),
             challenge: URL_SAFE_NO_PAD.encode(self.challenge),
             identity: route.identity_request(),
-            storage: self.storage,
         }
     }
 }
@@ -308,12 +276,9 @@ fn build_plan(operation: Operation<'_>) -> Result<FlowPlan, String> {
             challenge,
             pending_init,
         }),
-        Operation::Assert {
-            name,
-            storage_policy,
-        } => {
-            let prf_salt = keytap_core::prf_salt_for_name(name)
-                .map_err(|error| format!("invalid key name: {error}"))?;
+        Operation::Assert { name } => {
+            let prf_salt =
+                keytap_core::prf_salt_for_name(name).map_err(|error| error.to_string())?;
             let anchor = IdentityAnchor::load()
                 .map_err(|error| format!("could not load the nearby passkey identity: {error}"))?;
             let route = match anchor {
@@ -326,7 +291,6 @@ fn build_plan(operation: Operation<'_>) -> Result<FlowPlan, String> {
                     prf_salt,
                     identity_salt: crate::nearby_identity::prf_salt(),
                     challenge,
-                    storage: storage_policy,
                 },
                 route,
             })
@@ -379,7 +343,6 @@ fn connect_nearby(
 
 fn prepare_nearby_assertion_with_presentation(
     name: &str,
-    storage_policy: StoragePolicy,
     cancellation: NearbyCancellation,
     presentation: InvitationPresentation,
 ) -> Result<PreparedNearbyAssertion, String> {
@@ -389,10 +352,7 @@ fn prepare_nearby_assertion_with_presentation(
             session_binding,
             plan,
         } = connect_nearby(
-            Operation::Assert {
-                name,
-                storage_policy,
-            },
+            Operation::Assert { name },
             Some(&cancellation),
             presentation,
         )?;
@@ -427,7 +387,6 @@ fn prepare_nearby_assertion_with_presentation(
                 ApproverMessage::PairedAssertionResult {
                     credential_id,
                     prf_first,
-                    disposition,
                     identity,
                 },
             )
@@ -436,13 +395,11 @@ fn prepare_nearby_assertion_with_presentation(
                 ApproverMessage::AssertionResult {
                     credential_id,
                     prf_first,
-                    disposition,
                     identity,
                 },
             ) => AssertionResult {
                 credential_id,
                 prf_first,
-                disposition,
                 identity,
             },
             (_, ApproverMessage::Done {}) => {
@@ -526,14 +483,13 @@ fn run_nearby_registration(
             ));
         }
         Err(IdentityInitCommitError::PublishedButNotDurable(error)) => {
-            crate::remember::after_init();
             session
                 .send_final(&CliMessage::InitialIndeterminate {
                     reason: InitialIndeterminateReason::IdentityDurabilityUnknown,
                 })
                 .ok();
             return Err(format!(
-                "passkey was created and its local identity record is visible, but durable storage could not be confirmed: {error}. No success was acknowledged; rerun `keytap init --force` before relying on it"
+                "passkey was created and its local identity record is visible, but durable publication could not be confirmed: {error}. No success was acknowledged; rerun `keytap init --force` before relying on it"
             ));
         }
     };
@@ -641,15 +597,9 @@ enum AssertionAuthorization {
     },
 }
 
-enum PreparedAssertionStorage {
-    Once,
-    Remember { raw_key: Zeroizing<Vec<u8>> },
-}
-
 struct AssertionResult {
     credential_id: String,
-    prf_first: String,
-    disposition: AssertionDisposition,
+    prf_first: Zeroizing<String>,
     identity: IdentityProofDto,
 }
 
@@ -662,10 +612,8 @@ struct AssertionPayload {
 /// winner may consume it through `commit`.
 pub(crate) struct PreparedNearbyAssertion {
     session: RelaySession,
-    key_name: String,
     identity: PreparedIdentityAcceptance,
     payload: AssertionPayload,
-    storage: PreparedAssertionStorage,
 }
 
 fn prepare_assertion(
@@ -675,7 +623,6 @@ fn prepare_assertion(
     result: AssertionResult,
     cancellation: Option<&NearbyCancellation>,
 ) -> Result<PreparedNearbyAssertion, String> {
-    let disposition = authorize_disposition(assertion.storage, result.disposition)?;
     let payload = decode_assertion_fields(&result.credential_id, &result.prf_first)?;
     let proof = decode_identity_proof(&payload.credential_id, result.identity)?;
     let fields = |binding| NearbyIdentityProofContext {
@@ -683,7 +630,6 @@ fn prepare_assertion(
         challenge: &assertion.challenge,
         prf_output: &payload.prf_output,
         key_name: &assertion.key_name,
-        disposition,
     };
     let identity = match authorization {
         AssertionAuthorization::FirstPair {
@@ -717,33 +663,19 @@ fn prepare_assertion(
             return Err(identity_error_message(error));
         }
     };
-    let storage = match disposition {
-        AssertionDisposition::Once => PreparedAssertionStorage::Once,
-        AssertionDisposition::Remember => {
-            let raw_key = Zeroizing::new(
-                keytap_core::derive_raw_key(payload.prf_output.as_ref())
-                    .map_err(|error| format!("key derivation failed: {error}"))?,
-            );
-            PreparedAssertionStorage::Remember { raw_key }
-        }
-    };
     Ok(PreparedNearbyAssertion {
         session,
-        key_name: assertion.key_name,
         identity,
         payload,
-        storage,
     })
 }
 
 impl PreparedNearbyAssertion {
-    pub(crate) fn commit(self) -> Result<NearbyAssertion, String> {
+    pub(crate) fn commit(self) -> Result<Zeroizing<[u8; 32]>, String> {
         let Self {
             mut session,
-            key_name,
             identity,
             payload,
-            storage,
         } = self;
         match identity {
             PreparedIdentityAcceptance::Pairing(identity) => {
@@ -754,31 +686,12 @@ impl PreparedNearbyAssertion {
                 commit_identity_acceptance(&mut session, identity.commit())?;
             }
         }
-        let storage = match storage {
-            PreparedAssertionStorage::Once => StorageOutcome::Once,
-            PreparedAssertionStorage::Remember { raw_key } => {
-                match crate::remember::remember_requested_nearby(
-                    &key_name,
-                    &payload.credential_id,
-                    &raw_key,
-                ) {
-                    crate::remember::NearbyRememberOutcome::Stored => StorageOutcome::Stored,
-                    crate::remember::NearbyRememberOutcome::Unavailable => {
-                        StorageOutcome::Unavailable
-                    }
-                }
-            }
-        };
-        if let Err(error) = session.send_final(&CliMessage::AssertionAccepted { storage }) {
+        if let Err(error) = session.send_final(&CliMessage::AssertionAccepted) {
             note(&format!(
                 "Passkey result was accepted, but the nearby-device acknowledgement could not be delivered: {error}"
             ));
         }
-        Ok(NearbyAssertion {
-            credential_id: payload.credential_id,
-            prf_output: payload.prf_output.to_vec(),
-            storage,
-        })
+        Ok(payload.prf_output)
     }
 
     #[cfg(target_os = "macos")]
@@ -786,21 +699,6 @@ impl PreparedNearbyAssertion {
         self.session
             .send_final(&CliMessage::CompletedElsewhere)
             .ok();
-    }
-}
-
-fn authorize_disposition(
-    policy: StoragePolicy,
-    disposition: AssertionDisposition,
-) -> Result<AssertionDisposition, String> {
-    match (policy, disposition) {
-        (StoragePolicy::Choose, AssertionDisposition::Once) => Ok(AssertionDisposition::Once),
-        (StoragePolicy::Choose | StoragePolicy::Remember, AssertionDisposition::Remember) => {
-            Ok(AssertionDisposition::Remember)
-        }
-        (StoragePolicy::Remember, AssertionDisposition::Once) => {
-            Err("nearby device declined local storage required by this command".to_string())
-        }
     }
 }
 
@@ -1069,7 +967,6 @@ enum CeremonyRequest {
         identity_salt: String,
         challenge: String,
         identity: IdentityRequest,
-        storage: StoragePolicy,
     },
 }
 
@@ -1098,7 +995,7 @@ enum CliMessage {
     InitialAccepted,
     InitialRejected { reason: InitialRejectedReason },
     InitialIndeterminate { reason: InitialIndeterminateReason },
-    AssertionAccepted { storage: StorageOutcome },
+    AssertionAccepted,
     CompletedElsewhere,
     ProtocolError { code: ProtocolErrorCode },
 }
@@ -1122,17 +1019,15 @@ enum ApproverMessage {
     PairedAssertionResult {
         #[serde(rename = "credentialId")]
         credential_id: String,
-        #[serde(rename = "prfFirst")]
-        prf_first: String,
-        disposition: AssertionDisposition,
+        #[serde(rename = "prfFirst", deserialize_with = "deserialize_zeroizing_string")]
+        prf_first: Zeroizing<String>,
         identity: IdentityProofDto,
     },
     AssertionResult {
         #[serde(rename = "credentialId")]
         credential_id: String,
-        #[serde(rename = "prfFirst")]
-        prf_first: String,
-        disposition: AssertionDisposition,
+        #[serde(rename = "prfFirst", deserialize_with = "deserialize_zeroizing_string")]
+        prf_first: Zeroizing<String>,
         identity: IdentityProofDto,
     },
     Done {},
@@ -1196,17 +1091,26 @@ fn decode_assertion_fields(
     prf_first: &str,
 ) -> Result<AssertionPayload, String> {
     let credential_id = decode_credential_id(credential_id)?;
-    let bytes = decode_canonical(prf_first, "PRF output")?;
-    let prf_output: [u8; 32] = bytes.try_into().map_err(|value: Vec<u8>| {
-        format!(
+    let bytes = Zeroizing::new(decode_canonical(prf_first, "PRF output")?);
+    if bytes.len() != 32 {
+        return Err(format!(
             "passkey provider returned {} bytes of PRF output; expected 32",
-            value.len()
-        )
-    })?;
+            bytes.len()
+        ));
+    }
+    let mut prf_output = Zeroizing::new([0u8; 32]);
+    prf_output.copy_from_slice(&bytes);
     Ok(AssertionPayload {
         credential_id,
-        prf_output: Zeroizing::new(prf_output),
+        prf_output,
     })
+}
+
+fn deserialize_zeroizing_string<'de, D>(deserializer: D) -> Result<Zeroizing<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    String::deserialize(deserializer).map(Zeroizing::new)
 }
 
 fn decode_identity_proof(
@@ -1409,7 +1313,6 @@ mod tests {
             identity: IdentityRequest::Pinned {
                 credential_id: "credential".to_string(),
             },
-            storage: StoragePolicy::Choose,
         };
         assert_eq!(
             serde_json::to_value(CliMessage::Request { request }).unwrap(),
@@ -1421,10 +1324,13 @@ mod tests {
                     "prfSalt": "salt",
                     "identitySalt": "identity",
                     "challenge": "challenge",
-                    "identity": {"kind": "pinned", "credentialId": "credential"},
-                    "storage": "choose"
+                    "identity": {"kind": "pinned", "credentialId": "credential"}
                 }
             })
+        );
+        assert_eq!(
+            serde_json::to_value(CliMessage::AssertionAccepted).unwrap(),
+            serde_json::json!({"type": "assertion-accepted"})
         );
     }
 
@@ -1439,22 +1345,11 @@ mod tests {
             r#"{"type":"sas-approver-confirmed","extra":true}"#
         )
         .is_err());
+        assert!(serde_json::from_str::<ApproverMessage>(
+            r#"{"type":"assertion-result","credentialId":"YQ","prfFirst":"Yg","disposition":"once","identity":{"algorithm":"ed25519","publicKey":"Yw","signature":"ZA"}}"#
+        )
+        .is_err());
         assert!(serde_json::from_str::<ApproverMessage>(r#"{"type":"unknown"}"#).is_err());
-    }
-
-    #[test]
-    fn storage_policy_cannot_be_weakened() {
-        assert!(matches!(
-            authorize_disposition(StoragePolicy::Choose, AssertionDisposition::Once),
-            Ok(AssertionDisposition::Once)
-        ));
-        assert!(matches!(
-            authorize_disposition(StoragePolicy::Choose, AssertionDisposition::Remember),
-            Ok(AssertionDisposition::Remember)
-        ));
-        assert!(
-            authorize_disposition(StoragePolicy::Remember, AssertionDisposition::Once).is_err()
-        );
     }
 
     #[test]

@@ -37,7 +37,6 @@ let sasWordsPromise;
  *   {kind: 'boot'} |
  *   {kind: 'connecting'} |
  *   {kind: 'sas', session: RelaySession, request: Request, digest: Uint8Array} |
- *   {kind: 'choice', session: RelaySession, request: AssertRequest, binding: ProofBinding} |
  *   {kind: 'ceremony', session: RelaySession, operation: CeremonyOperation} |
  *   {kind: 'registration-created', session: RelaySession, credential: CreatedCredential} |
  *   {kind: 'sent', session: RelaySession, result: SentResult} |
@@ -46,19 +45,18 @@ let sasWordsPromise;
  *   {kind: 'expired'}
  * } Phase
  * @typedef {RegisterRequest | AssertRequest} Request
- * @typedef {{kind: 'assert', challenge: Uint8Array, prfSalt: Uint8Array, identitySalt: Uint8Array, identity: IdentityMode, keyName: string, storage: 'choose'|'remember'}} AssertRequest
+ * @typedef {{kind: 'assert', challenge: Uint8Array, prfSalt: Uint8Array, identitySalt: Uint8Array, identity: IdentityMode, keyName: string}} AssertRequest
  * @typedef {{kind: 'pairing-any'} | {kind: 'pairing-credential', credentialId: Uint8Array} | {kind: 'pinned', credentialId: Uint8Array}} IdentityMode
  * @typedef {
  *   {kind: 'first-pair-sas', digest: Uint8Array} |
  *   {kind: 'pinned-identity', sessionBinding: Uint8Array, requestFrameBytes: Uint8Array}
  * } ProofBinding
- * @typedef {'once'|'remember'} Disposition
- * @typedef {{kind: 'registration', request: RegisterRequest} | {kind: 'assertion', request: AssertRequest, binding: ProofBinding, disposition: Disposition}} CeremonyOperation
+ * @typedef {{kind: 'registration', request: RegisterRequest} | {kind: 'assertion', request: AssertRequest, binding: ProofBinding}} CeremonyOperation
  * @typedef {{kind: 'register', challenge: Uint8Array, identitySalt: Uint8Array, userId: Uint8Array, userName: string}} RegisterRequest
  * @typedef {{kind: 'identified', credentialId: Uint8Array} | {kind: 'malformed'}} CreatedCredential
- * @typedef {{kind: 'registration'} | {kind: 'assertion', keyName: string, disposition: Disposition}} SentResult
+ * @typedef {{kind: 'registration'} | {kind: 'assertion'}} SentResult
  * @typedef {{kind: 'pre-result'} | {kind: 'registration-created'} | {kind: 'registration-sent'} | {kind: 'assertion-sent'} | {kind: 'terminal', outcome: TerminalOutcome}} SuspendedWork
- * @typedef {{kind: 'registered'|'once'|'stored'|'storage-unavailable'|'completed-elsewhere'|'pairing-rejected'|'identity-store-unavailable'|'identity-rejected'|'identity-indeterminate'|'capability-unavailable'|'registration-created-unsaved'|'registration-indeterminate'|'assertion-indeterminate'|'failed'|'expired', title: string, message: string}} TerminalOutcome
+ * @typedef {{kind: 'registered'|'approved'|'completed-elsewhere'|'pairing-rejected'|'identity-store-unavailable'|'identity-rejected'|'identity-indeterminate'|'capability-unavailable'|'registration-created-unsaved'|'registration-indeterminate'|'assertion-indeterminate'|'failed'|'expired', title: string, message: string}} TerminalOutcome
  */
 
 /** @type {Phase} */
@@ -453,7 +451,7 @@ export async function assertionProofBinding(
   }
 }
 
-async function runAssertion(request, binding, disposition, signal) {
+async function runAssertion(request, binding, signal) {
   guardPasskeyOrigin();
   const publicKey = {
     challenge: request.challenge,
@@ -496,7 +494,6 @@ async function runAssertion(request, binding, disposition, signal) {
       credentialId,
       prfFirst,
       keyName: request.keyName,
-      disposition,
     }, identitySeed, deriveEd25519PublicKey);
   } catch (error) {
     prfFirst.fill(0);
@@ -507,7 +504,7 @@ async function runAssertion(request, binding, disposition, signal) {
   return { credentialId, prfFirst, identity };
 }
 
-function assertionResultMessage(request, result, disposition) {
+function assertionResultMessage(request, result) {
   const message = {
     type: request.identity.kind === 'pinned' ? 'assertion-result' : 'paired-assertion-result',
     credentialId: encodeBase64URL(result.credentialId),
@@ -517,16 +514,9 @@ function assertionResultMessage(request, result, disposition) {
       publicKey: encodeBase64URL(result.identity.publicKey),
       signature: encodeBase64URL(result.identity.signature),
     },
-    disposition,
   };
   result.prfFirst.fill(0);
   return message;
-}
-
-function isPasskeyCancellation(error) {
-  return error?.name === 'NotAllowedError'
-    || error?.name === 'AbortError'
-    || error?.message === 'cancelled';
 }
 
 export function classifyCreatedCredential(credential) {
@@ -593,7 +583,6 @@ export function suspendPhaseForPagehide(currentPhase) {
     case 'boot':
     case 'connecting':
     case 'sas':
-    case 'choice':
     case 'ceremony':
     case 'expired':
       return { kind: 'suspended', work: { kind: 'pre-result' } };
@@ -622,21 +611,10 @@ export function outcomeForSuspendedPhase(suspendedPhase) {
 
 const $ = id => document.getElementById(id);
 
-function appendParts(element, parts) {
-  for (const part of parts) {
-    if (typeof part === 'string') {
-      element.append(part);
-    } else {
-      const code = document.createElement('code');
-      code.textContent = part.code;
-      element.append(code);
-    }
-  }
+function paragraph(text) {
+  const element = document.createElement('p');
+  element.textContent = text;
   return element;
-}
-
-function paragraph(...parts) {
-  return appendParts(document.createElement('p'), parts);
 }
 
 function action(label, secondary = false) {
@@ -658,10 +636,9 @@ function setScreen(title, summary, ...content) {
   $('title').focus();
 }
 
-function setStatus(...parts) {
+function setStatus(message) {
   $('alert').textContent = '';
-  $('status').replaceChildren();
-  appendParts($('status'), parts);
+  $('status').textContent = message;
 }
 
 function waitForChoice(choices, signal) {
@@ -751,29 +728,6 @@ async function runSas(session, sessionBinding, request, requestFrameBytes, signa
   return digest;
 }
 
-async function chooseDisposition(session, request, binding, signal, notice = '') {
-  const once = action('Use once');
-  const remember = action(request.storage === 'remember' ? 'Approve and remember' : 'Use and remember', true);
-  const controls = request.storage === 'remember' ? [remember] : [once, remember];
-  setScreen(
-    request.storage === 'remember' ? 'Remember this key?' : 'Use once or remember?',
-    `Your CLI requested key: ${request.keyName}`,
-    paragraph(
-      request.storage === 'remember'
-        ? 'Store this derived key on that machine.'
-        : 'Use it only for this command, or store it on that machine for later commands.',
-    ),
-    paragraph('Remove a stored key later with ', { code: `keytap forget ${request.keyName}` }, '.'),
-    ...controls,
-  );
-  if (notice) setStatus(notice);
-  phase = { kind: 'choice', session, request, binding };
-  const choices = request.storage === 'remember'
-    ? [[remember, 'remember']]
-    : [[once, 'once'], [remember, 'remember']];
-  return waitForChoice(choices, signal);
-}
-
 async function completeRegistration(session, request, sasDigest, signal) {
   phase = { kind: 'ceremony', session, operation: { kind: 'registration', request } };
   setScreen(
@@ -825,61 +779,27 @@ async function completeRegistration(session, request, sasDigest, signal) {
 }
 
 async function completeAssertion(session, request, binding, signal) {
-  let notice = '';
-  for (;;) {
-    const disposition = await chooseDisposition(session, request, binding, signal, notice);
-    phase = {
-      kind: 'ceremony',
-      session,
-      operation: { kind: 'assertion', request, binding, disposition },
-    };
-    setScreen(
-      'Approve this key request',
-      `Approve ${request.keyName} with your passkey.`,
-      paragraph('The derived key will be sent only through the end-to-end encrypted relay.'),
-    );
-    setStatus('Waiting for passkey approval…');
-    let result;
-    try {
-      result = await runAssertion(request, binding, disposition, signal);
-    } catch (error) {
-      if (!isPasskeyCancellation(error) || signal.aborted) throw error;
-      notice = 'The passkey prompt was cancelled or did not open. Nothing was sent; choose again to retry.';
-      continue;
-    }
-    const message = assertionResultMessage(request, result, disposition);
-    await session.send(message);
-    phase = {
-      kind: 'sent',
-      session,
-      result: { kind: 'assertion', keyName: request.keyName, disposition },
-    };
-    setStatus('Approved result sent. Waiting for the CLI to verify it…');
-    const acknowledgement = await nextCliMessage(session, 'assertion-accepted');
-    switch (acknowledgement.storage) {
-      case 'once':
-        if (disposition !== 'once') throw new ProtocolError('CLI acknowledged the wrong storage disposition');
-        return {
-          kind: 'once',
-          title: 'Key sent',
-          message: 'The key was accepted for this command and was not stored on that machine. You can close this page.',
-        };
-      case 'stored':
-        if (disposition !== 'remember') throw new ProtocolError('CLI acknowledged the wrong storage disposition');
-        return {
-          kind: 'stored',
-          title: 'Key remembered',
-          message: `The key was accepted and stored on that machine. Remove it later with keytap forget ${request.keyName}.`,
-        };
-      case 'unavailable':
-        if (disposition !== 'remember') throw new ProtocolError('CLI acknowledged the wrong storage disposition');
-        return {
-          kind: 'storage-unavailable',
-          title: 'Could not remember key',
-          message: 'The CLI received the approved key but could not confirm that it was stored. Check the terminal before retrying.',
-        };
-    }
-  }
+  phase = {
+    kind: 'ceremony',
+    session,
+    operation: { kind: 'assertion', request, binding },
+  };
+  setScreen(
+    'Approve this key request',
+    `Approve ${request.keyName} with your passkey.`,
+    paragraph('The derived key will be sent only through the end-to-end encrypted relay.'),
+  );
+  setStatus('Waiting for passkey approval…');
+  const result = await runAssertion(request, binding, signal);
+  await session.send(assertionResultMessage(request, result));
+  phase = { kind: 'sent', session, result: { kind: 'assertion' } };
+  setStatus('Approved result sent. Waiting for the CLI to verify it…');
+  await nextCliMessage(session, 'assertion-accepted');
+  return {
+    kind: 'approved',
+    title: 'Key sent',
+    message: 'The key was accepted for this command. You can close this page.',
+  };
 }
 
 export function failureOutcome(error, currentPhase) {
@@ -950,7 +870,6 @@ export function failureOutcome(error, currentPhase) {
     case 'boot':
     case 'connecting':
     case 'sas':
-    case 'choice':
     case 'ceremony':
       return {
         kind: 'failed',
@@ -978,13 +897,11 @@ function renderTerminal(outcome) {
   $('alert').textContent = '';
   switch (outcome.kind) {
     case 'registered':
-    case 'once':
-    case 'stored':
+    case 'approved':
     case 'completed-elsewhere':
       $('status').textContent = outcome.message;
       $('status').focus();
       break;
-    case 'storage-unavailable':
     case 'pairing-rejected':
     case 'identity-store-unavailable':
     case 'identity-rejected':

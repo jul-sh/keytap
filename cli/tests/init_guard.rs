@@ -1,22 +1,50 @@
-//! End-to-end tests of init's refusal to silently replace a passkey. A stored
-//! nearby identity proves this machine was initialized; rerunning `keytap
-//! init` there must die before any ceremony unless --force is deliberate.
+//! Non-interactive coverage for init's destructive replacement guard.
 
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 const BIN: &str = env!("CARGO_BIN_EXE_keytap");
+const STORED_IDENTITY: &[u8] = br#"{"format":"keytap-nearby-identity-v3","identity":{"kind":"credential","credentialId":"ABEiM0RVZneImaq7zN3u_w"}}"#;
 
-/// Run the binary with ONLY the given env vars (plus CI=true, so a bug that
-/// reaches a ceremony fails fast instead of prompting). A hang means a
-/// ceremony started where none should: kill and fail rather than wedge the
-/// suite.
-fn keytap(envs: &[(&str, &str)], args: &[&str]) -> Output {
+static NEXT_TEMP_DIR: AtomicUsize = AtomicUsize::new(0);
+
+struct TempStateDir(PathBuf);
+
+impl TempStateDir {
+    fn initialized() -> Self {
+        let sequence = NEXT_TEMP_DIR.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "keytap-init-guard-{}-{sequence}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(path.join("keytap")).unwrap();
+        std::fs::write(path.join("keytap/nearby-identity.json"), STORED_IDENTITY).unwrap();
+        Self(path)
+    }
+
+    fn path(&self) -> &Path {
+        &self.0
+    }
+
+    fn identity_path(&self) -> PathBuf {
+        self.0.join("keytap/nearby-identity.json")
+    }
+}
+
+impl Drop for TempStateDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn init_with_state(state: &Path) -> Output {
     let child = Command::new(BIN)
-        .args(args)
+        .arg("init")
         .env_clear()
-        .env("CI", "true")
-        .envs(envs.iter().copied())
+        .env("XDG_STATE_HOME", state)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -26,64 +54,36 @@ fn keytap(envs: &[(&str, &str)], args: &[&str]) -> Output {
 }
 
 fn wait_or_kill(mut child: Child) -> Output {
-    let deadline = Instant::now() + Duration::from_secs(60);
+    let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         if child.try_wait().unwrap().is_some() {
             return child.wait_with_output().unwrap();
         }
-        if Instant::now() > deadline {
+        if Instant::now() >= deadline {
             let _ = child.kill();
-            panic!("keytap hung — a ceremony started where none should");
+            let _ = child.wait();
+            panic!("keytap init did not honor the stored-record guard");
         }
-        std::thread::sleep(Duration::from_millis(25));
+        std::thread::sleep(Duration::from_millis(10));
     }
 }
 
-fn stderr(out: &Output) -> String {
-    String::from_utf8_lossy(&out.stderr).into_owned()
-}
-
-/// A state directory containing the credential anchor written by init.
-fn initialized_state_dir(tag: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("keytap-init-guard-{}-{tag}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(dir.join("keytap")).unwrap();
-    std::fs::write(
-        dir.join("keytap/nearby-identity.json"),
-        r#"{"format":"keytap-nearby-identity-v3","identity":{"kind":"credential","credentialId":"ABEiM0RVZneImaq7zN3u_w"}}"#,
-    )
-    .unwrap();
-    dir
-}
-
-/// The identity check is file-only and must run before any platform ceremony.
 #[test]
-fn reinit_is_refused_without_force() {
-    let dir = initialized_state_dir("refuse");
-    let state = dir.to_str().unwrap();
+fn existing_record_refuses_plain_init_before_any_ceremony() {
+    let state = TempStateDir::initialized();
 
-    // Disable the CI guard so the file-only reinit guard is the next boundary.
-    // If it regresses and opens a ceremony, the timeout still catches it.
-    let out = keytap(&[("XDG_STATE_HOME", state), ("CI", "false")], &["init"]);
-    assert!(!out.status.success());
-    let err = stderr(&out);
-    assert!(err.contains("already stored"), "stderr: {err}");
-    assert!(err.contains("--force"), "stderr: {err}");
+    // The stored record itself must stop init before an interactive passkey
+    // request can begin.
+    let output = init_with_state(state.path());
 
-    // The refusal must leave the identity exactly as it found it.
-    let identity = std::fs::read_to_string(dir.join("keytap/nearby-identity.json")).unwrap();
-    assert!(identity.contains("ABEiM0RVZneImaq7zN3u_w"));
-
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-/// --force overrides the reinit guard, never the CI one: headless jobs still
-/// refuse the ceremony itself.
-#[test]
-fn force_does_not_bypass_the_ci_guard() {
-    let out = keytap(&[], &["init", "--force"]);
-    assert!(!out.status.success());
-    let err = stderr(&out);
-    assert!(err.contains("$CI is set"), "stderr: {err}");
-    assert!(err.contains("outside CI"), "stderr: {err}");
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.starts_with("error: "), "stderr: {stderr}");
+    assert!(stderr.contains("already stored"), "stderr: {stderr}");
+    assert!(stderr.contains("--force"), "stderr: {stderr}");
+    assert_eq!(
+        std::fs::read(state.identity_path()).unwrap(),
+        STORED_IDENTITY
+    );
 }

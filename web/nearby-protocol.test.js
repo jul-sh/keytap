@@ -33,14 +33,22 @@ const APPROVER_INFO = encoder.encode('keytap:relay-key:v1\0approver-to-cli');
 const BOX_DOMAIN = encoder.encode('keytap:relay-box:v1\0');
 const CLI_DIRECTION = encoder.encode('CLI\0');
 const APPROVER_DIRECTION = encoder.encode('APP\0');
-const IDENTITY_PROOF_DOMAIN = encoder.encode('keytap:nearby-identity-proof:v4\0');
+const IDENTITY_PROOF_DOMAIN = encoder.encode('keytap:nearby-identity-proof:v5\0');
 const REGISTRATION_IDENTITY_PROOF_DOMAIN = encoder.encode(
   'keytap:nearby-registration-identity-proof:v1\0',
 );
-const ED25519_PKCS8_SEED_PREFIX = Buffer.from('302e020100300506032b657004220420', 'hex');
-
 function concat(...values) {
   return Buffer.concat(values.map(value => Buffer.from(value)));
+}
+
+async function deriveEd25519PublicKey(seed) {
+  const privateKey = createPrivateKey({
+    key: concat(Buffer.from('302e020100300506032b657004220420', 'hex'), seed),
+    format: 'der',
+    type: 'pkcs8',
+  });
+  const spki = createPublicKey(privateKey).export({ format: 'der', type: 'spki' });
+  return new Uint8Array(spki.subarray(spki.length - 32));
 }
 
 function u64(value) {
@@ -214,16 +222,6 @@ test('SAS binds the exact request plaintext and preserves commit-reveal ordering
   assert.match(sasPhrase(digest, words), /^[a-z]{1,8} [a-z]{1,8}$/);
 });
 
-async function deriveEd25519PublicKey(seed) {
-  const privateKey = createPrivateKey({
-    key: concat(ED25519_PKCS8_SEED_PREFIX, seed),
-    format: 'der',
-    type: 'pkcs8',
-  });
-  const spki = createPublicKey(privateKey).export({ format: 'der', type: 'spki' });
-  return new Uint8Array(spki.subarray(spki.length - 32));
-}
-
 test('assertion identity modes bind first pairing to SAS and later use to the exact invitation', async () => {
   const identitySeed = new Uint8Array(32).fill(9);
   const sessionBinding = new Uint8Array(32).fill(3);
@@ -234,7 +232,6 @@ test('assertion identity modes bind first pairing to SAS and later use to the ex
     credentialId: encoder.encode('credential'),
     prfFirst: new Uint8Array(32).fill(5),
     keyName: 'deploy',
-    disposition: 'remember',
   };
   const proof = await createNearbyIdentityProof(fields, identitySeed, deriveEd25519PublicKey);
   const message = nearbyIdentityProofMessage({ ...fields, publicKey: proof.publicKey });
@@ -246,7 +243,7 @@ test('assertion identity modes bind first pairing to SAS and later use to the ex
   assert.equal(verify(null, message, publicKey, proof.signature), true);
   assert.equal(verify(
     null,
-    nearbyIdentityProofMessage({ ...fields, disposition: 'once', publicKey: proof.publicKey }),
+    nearbyIdentityProofMessage({ ...fields, keyName: 'changed', publicKey: proof.publicKey }),
     publicKey,
     proof.signature,
   ), false);
@@ -288,15 +285,65 @@ test('assertion identity modes bind first pairing to SAS and later use to the ex
       requestFrameBytes,
     ),
   );
+  assert.deepEqual(
+    Buffer.from(pinnedIdentity),
+    concat(
+      IDENTITY_PROOF_DOMAIN,
+      Uint8Array.of(1),
+      u32(32),
+      sessionBinding,
+      u32(requestFrameBytes.length),
+      requestFrameBytes,
+      u32(fields.challenge.length),
+      fields.challenge,
+      u32(fields.credentialId.length),
+      fields.credentialId,
+      u32(fields.prfFirst.length),
+      fields.prfFirst,
+      u32(fields.keyName.length),
+      encoder.encode(fields.keyName),
+      u32(proof.publicKey.length),
+      proof.publicKey,
+    ),
+  );
 
   const signingKey = await importEd25519SigningKey(identitySeed);
   assert.equal(signingKey.extractable, false);
 
   await assert.rejects(
+    createNearbyIdentityProof(fields, new Uint8Array(31), deriveEd25519PublicKey),
+    IdentityProofUnavailableError,
+  );
+  await assert.rejects(
     createNearbyIdentityProof(fields, identitySeed, async () => {
-      throw new Error('Ed25519 unavailable');
+      throw new Error('WASM unavailable');
     }),
     IdentityProofUnavailableError,
+  );
+});
+
+test('first-pair assertion proof matches the Rust v5 fixture', async () => {
+  const fields = {
+    binding: { kind: 'first-pair-sas', digest: new Uint8Array(32).fill(0x42) },
+    challenge: new Uint8Array(32).fill(0x24),
+    credentialId: encoder.encode('credential-one'),
+    prfFirst: new Uint8Array(32).fill(0x11),
+    keyName: 'deploy',
+  };
+  const proof = await createNearbyIdentityProof(
+    fields,
+    new Uint8Array(32).fill(7),
+    deriveEd25519PublicKey,
+  );
+  const message = nearbyIdentityProofMessage({ ...fields, publicKey: proof.publicKey });
+  assert.equal(message.length, 205);
+  assert.equal(
+    encodeBase64URL(proof.publicKey),
+    '6kpsY-KcUgq-9VB7Ey7F-ZVHdq6-vnuSQh7qaRRG0iw',
+  );
+  assert.equal(
+    encodeBase64URL(proof.signature),
+    'K6UQsJn0iaWzPHcScwnOl0jW-lxkJ6JxxohYLv76gtJV2iDA2j_nmqX1-ooxoTcs1TfwHqN1dfDljSDTURdPBw',
   );
 });
 
@@ -370,7 +417,6 @@ function assertionRequest(identity = { kind: 'pinned', credentialId: 'AQ' }) {
       identitySalt: B32,
       identity,
       keyName: 'default',
-      storage: 'choose',
     },
   };
 }
@@ -412,7 +458,7 @@ test('request and CLI unions reject unknown or state-inappropriate fields', () =
     [{ type: 'sas-cli-reveal', nonce: B32 }, 'sas-cli-reveal'],
     [{ type: 'sas-cli-confirmed' }, 'sas-cli-confirmed'],
     [{ type: 'initial-accepted' }, 'initial-accepted'],
-    [{ type: 'assertion-accepted', storage: 'stored' }, 'assertion-accepted'],
+    [{ type: 'assertion-accepted' }, 'assertion-accepted'],
   ]) {
     assert.deepEqual(parseCliMessage(message, expected), message);
     assert.throws(() => parseCliMessage({ ...message, extra: true }, expected), /invalid/i);

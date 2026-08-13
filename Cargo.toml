@@ -1,8 +1,6 @@
 [workspace]
-members = ["core", "cli", "cli/spec", "macos", "web/wasm"]
+members = ["core", "cli", "macos", "web/wasm"]
 resolver = "2"
 
-# The released keytap version. `keytap --version` and the CLI crates inherit
-# it from here; bump this (only here) when cutting a release.
 [workspace.package]
 version = "9.0.0"
