@@ -8,7 +8,7 @@ PROVISIONING_PROFILE ?=
 UNAME_S := $(shell uname -s)
 MACOS_TEST_TARGET := $(if $(filter Darwin,$(UNAME_S)),test-macos,)
 
-.PHONY: all build build-wasm sign notarize setup-signing install verify package test test-core test-spec test-cli test-macos test-wasm test-web clean
+.PHONY: all build build-wasm sign notarize setup-signing install verify package test test-core test-spec test-cli test-envtap test-macos test-wasm test-web clean
 
 all: build sign notarize
 
@@ -33,6 +33,7 @@ build:
 		--app-icon keytap --include-all-app-icons \
 		--output-partial-info-plist /dev/null > /dev/null
 	@cp target/release/keytap $(BIN)
+	@ln -sf keytap $(BUNDLE)/Contents/MacOS/envtap
 	@install -m 755 $(LAUNCHER_SOURCE) $(BUNDLE_LAUNCHER)
 	@echo "Built $(BUNDLE)"
 
@@ -55,18 +56,21 @@ notarize:
 INSTALL_DIR = $(HOME)/.local/share/keytap
 INSTALL_BUNDLE = $(INSTALL_DIR)/$(BUNDLE)
 INSTALL_LAUNCHER = $(HOME)/.local/bin/keytap
+# The same executable through its `envtap` entrypoint is the env-file tool.
+INSTALL_ENVTAP_LAUNCHER = $(HOME)/.local/bin/envtap
 
 install: setup-signing all
 	@mkdir -p $(HOME)/.local/bin
 	@rm -rf $(INSTALL_BUNDLE)
 	@mkdir -p $(INSTALL_DIR)
 	@cp -R $(BUNDLE) $(INSTALL_BUNDLE)
-	@rm -f $(INSTALL_LAUNCHER)
+	@rm -f $(INSTALL_LAUNCHER) $(INSTALL_ENVTAP_LAUNCHER)
 	@install -m 755 $(INSTALL_BUNDLE)/Contents/Resources/keytap-launcher $(INSTALL_LAUNCHER)
+	@install -m 755 $(INSTALL_BUNDLE)/Contents/Resources/keytap-launcher $(INSTALL_ENVTAP_LAUNCHER)
 	@KEYTAP_APP_BUNDLE="$(INSTALL_BUNDLE)" KEYTAP_LAUNCHER_REGISTER_ONLY=1 $(INSTALL_LAUNCHER)
 	@echo "Installed: $(INSTALL_BUNDLE)"
 	@echo "Registered with LaunchServices"
-	@echo "Installed launcher: ~/.local/bin/keytap"
+	@echo "Installed launchers: ~/.local/bin/keytap and ~/.local/bin/envtap"
 
 verify:
 	codesign -dvv $(BUNDLE) 2>&1
@@ -76,7 +80,7 @@ verify:
 build-wasm:
 	wasm-pack build --target web web/wasm --out-dir ../pkg --out-name keytap_web
 
-test: test-core test-spec test-cli $(MACOS_TEST_TARGET) test-wasm test-web
+test: test-core test-spec test-cli test-envtap $(MACOS_TEST_TARGET) test-wasm test-web
 	@echo "All tests passed."
 
 test-core:
@@ -87,6 +91,9 @@ test-spec:
 
 test-cli:
 	cargo test -p keytap
+
+test-envtap:
+	cargo test -p envtap
 
 test-macos:
 	swift test --package-path macos/swift-lib

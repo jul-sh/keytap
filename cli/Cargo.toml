@@ -10,6 +10,8 @@ path = "src/main.rs"
 [dependencies]
 keytap-core = { path = "../core" }
 keytap-cli-spec = { path = "spec" }
+envtap = { path = "../envtap" }
+age = { version = "0.11", default-features = false }
 serde_json = "1"
 serde = { version = "1", features = ["derive"] }
 base64 = "0.22"
@@ -24,10 +26,6 @@ zeroize = "1"
 subtle = "2"
 ed25519-dalek = { version = "2", default-features = false }
 libc = "0.2"
-
-[dev-dependencies]
-# The encrypt_roundtrip integration test exercises age directly.
-age = { version = "0.11", default-features = false }
 
 # Platform integrations are target dependencies: native passkeys and Keychain
 # on macOS, and Secret Service (GNOME Keyring, KWallet, …) on Linux. `vendored`

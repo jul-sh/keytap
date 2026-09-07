@@ -1,5 +1,9 @@
 # Share an encrypted `.env` through Git
 
+> [envtap](../envtap/README.md) does this with one committed `tap.env`, a
+> grant per person, and `envtap run --`. The manual age workflow below still
+> works with any age-compatible tool.
+
 Think of [`age`](https://github.com/FiloSottile/age) as a lock that can have one
 keyhole per developer. Each developer has their own private key; nobody shares
 a password or private key. The identity can be managed by Keytap or by another

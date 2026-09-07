@@ -2,6 +2,7 @@
 mod approval;
 mod encrypt;
 mod env_keys;
+mod envtap_passkey;
 mod keychain;
 mod nearby;
 mod nearby_identity;
@@ -10,20 +11,27 @@ mod nearby_sas;
 mod remember;
 
 use keytap_cli_spec::{Command, Invocation};
+use std::process::ExitCode;
 #[cfg(any(target_os = "macos", test))]
 use std::sync::mpsc;
 #[cfg(target_os = "macos")]
 use std::sync::Arc;
 use zeroize::Zeroizing;
 
-fn main() {
+fn main() -> ExitCode {
+    // One executable, two entrypoints: invoked as `envtap`, this runs the
+    // env-file CLI from the `envtap` crate on Keytap's passkey.
+    if envtap_passkey::invoked_as_envtap() {
+        return envtap::run(std::env::args_os(), &envtap_passkey::KeytapPasskey);
+    }
+
     // The whole CLI surface — clap definitions, the single-screen overview,
     // the bare-`remember` special case — lives in keytap-cli-spec, shared
     // with the web terminal's wasm build. This binary only executes.
     let cli = match keytap_cli_spec::invoke(std::env::args_os()) {
         Invocation::Overview(text) => {
             print!("{text}");
-            return;
+            return ExitCode::SUCCESS;
         }
         Invocation::Misuse(msg) => die(&msg),
         Invocation::Parsed(Err(e)) => e.exit(),
@@ -31,21 +39,7 @@ fn main() {
     };
 
     match cli.command {
-        Command::Init { force } => {
-            guard_ceremony("init");
-            let init_mode = if force {
-                nearby_identity::InitMode::Replace
-            } else {
-                nearby_identity::InitMode::Create
-            };
-            let pending_init = nearby_identity::prepare_init(init_mode).unwrap_or_else(|error| {
-                die(&format!(
-                    "could not prepare the local credential record update: {error}"
-                ))
-            });
-            register(pending_init);
-            remember::after_init();
-        }
+        Command::Init { force } => init(force),
         Command::Public { ref name, format } => {
             with_derived_key(name, |raw_key| emit_public_key(raw_key, format, name));
         }
@@ -65,26 +59,7 @@ fn main() {
         Command::Decrypt { ref name } => {
             with_derived_key(name, encrypt::decrypt);
         }
-        Command::Remember { ref name } => {
-            // Fail fast on invalid names or unavailable local storage before
-            // asking either device to perform a ceremony.
-            if let Err(e) = keytap_core::prf_salt_for_name(name) {
-                die(&e.to_string());
-            }
-            guard_ceremony("remember");
-            let mut target = remember::write_target();
-            let assertion = authenticate(name, nearby::StoragePolicy::Remember);
-            match assertion.into_remember_disposition() {
-                RememberDisposition::StoreLocally(assertion) => {
-                    let raw_key = derive_key(&assertion.prf_output);
-                    remember::remember(&mut target, name, &assertion.credential_id, &raw_key);
-                }
-                RememberDisposition::AlreadyStored => {}
-                RememberDisposition::Unavailable => {
-                    die("the nearby assertion succeeded, but this key could not be remembered")
-                }
-            }
-        }
+        Command::Remember { ref name } => remember_key(name),
         Command::Forget { ref name, all } => {
             if all {
                 remember::forget_all();
@@ -93,6 +68,47 @@ fn main() {
             }
         }
         Command::Remembered => remember::remembered(),
+    }
+    ExitCode::SUCCESS
+}
+
+/// `keytap init`: create the passkey and its local credential record.
+pub(crate) fn init(force: bool) {
+    guard_ceremony("init");
+    let init_mode = if force {
+        nearby_identity::InitMode::Replace
+    } else {
+        nearby_identity::InitMode::Create
+    };
+    let pending_init = nearby_identity::prepare_init(init_mode).unwrap_or_else(|error| {
+        die(&format!(
+            "could not prepare the local credential record update: {error}"
+        ))
+    });
+    register(pending_init);
+    remember::after_init();
+}
+
+/// `keytap remember NAME`: approve with the passkey and store the derived
+/// key on this machine.
+pub(crate) fn remember_key(name: &str) {
+    // Fail fast on invalid names or unavailable local storage before
+    // asking either device to perform a ceremony.
+    if let Err(e) = keytap_core::prf_salt_for_name(name) {
+        die(&e.to_string());
+    }
+    guard_ceremony("remember");
+    let mut target = remember::write_target();
+    let assertion = authenticate(name, nearby::StoragePolicy::Remember);
+    match assertion.into_remember_disposition() {
+        RememberDisposition::StoreLocally(assertion) => {
+            let raw_key = derive_key(&assertion.prf_output);
+            remember::remember(&mut target, name, &assertion.credential_id, &raw_key);
+        }
+        RememberDisposition::AlreadyStored => {}
+        RememberDisposition::Unavailable => {
+            die("the nearby assertion succeeded, but this key could not be remembered")
+        }
     }
 }
 

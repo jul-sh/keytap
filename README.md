@@ -59,6 +59,8 @@ URL=$(curl -fsSL 'https://api.github.com/repos/jul-sh/keytap/releases?per_page=1
        && if [ -x ~/.local/share/keytap/Keytap.app/Contents/Resources/keytap-launcher ]; then
             install -m 755 ~/.local/share/keytap/Keytap.app/Contents/Resources/keytap-launcher \
               ~/.local/bin/keytap \
+            && install -m 755 ~/.local/share/keytap/Keytap.app/Contents/Resources/keytap-launcher \
+              ~/.local/bin/envtap \
             && KEYTAP_LAUNCHER_REGISTER_ONLY=1 ~/.local/bin/keytap
           else
             printf '%s\n' '#!/bin/sh' \
@@ -70,7 +72,8 @@ URL=$(curl -fsSL 'https://api.github.com/repos/jul-sh/keytap/releases?per_page=1
             && sleep 2
           fi
      else
-       unzip -o keytap-*-linux-x86_64.zip keytap -d ~/.local/bin
+       unzip -o keytap-*-linux-x86_64.zip keytap -d ~/.local/bin \
+       && ln -sf keytap ~/.local/bin/envtap
      fi
 ```
 
@@ -146,6 +149,15 @@ passkey provider, WebAuthn PRF, and the `keytap.jul.sh` relying party.
 - The approval page necessarily handles the PRF result and passkey-derived
   identity material before encrypting them to the CLI. Trust the code served
   by `keytap.jul.sh` and the browser running it.
+
+## envtap
+
+[envtap](envtap/README.md) keeps a repository's environment variables in
+`tap.env`: encrypted per value, committed to Git, with a grant for each person
+and CI job that may read them. It is this same executable through its
+`envtap` entrypoint; the install above sets up both. Your key is Keytap's named
+key `envtap`, so `envtap login` is `keytap remember envtap` and one passkey
+serves both tools.
 
 ## Guides
 

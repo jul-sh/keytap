@@ -27,9 +27,14 @@
             hash = "sha256-s1KzB5vsGbDOpeqjOkEgiT9EGdHU4QUd2juwrfvacuw=";
           };
         };
+
       in
       {
-        packages = pkgs.lib.optionalAttrs (builtins.hasAttr system releases) {
+        # The release carries one executable with two entrypoints; through
+        # `envtap` it is the env-file tool, so `packages.envtap` is the same
+        # derivation.
+        packages = pkgs.lib.optionalAttrs (builtins.hasAttr system releases) (rec {
+          envtap = default;
           default = pkgs.stdenv.mkDerivation {
             pname = "keytap";
             version = "9.0.0";
@@ -48,17 +53,20 @@
               cp -R Keytap.app $out/share/keytap/
               makeWrapper ${macosLauncher} $out/bin/keytap \
                 --set KEYTAP_APP_BUNDLE $out/share/keytap/Keytap.app
+              makeWrapper ${macosLauncher} $out/bin/envtap \
+                --set KEYTAP_APP_BUNDLE $out/share/keytap/Keytap.app
             '' else ''
               mkdir -p $out/bin
               cp keytap $out/bin/keytap
               chmod +x $out/bin/keytap
+              ln -s keytap $out/bin/envtap
             '';
             doInstallCheck = isDarwin;
             installCheckPhase = pkgs.lib.optionalString isDarwin ''
               /usr/bin/codesign --verify --deep --strict $out/share/keytap/Keytap.app
             '';
           };
-        };
+        });
 
         devShells.default = pkgs.mkShell {
           buildInputs = with pkgs; [
