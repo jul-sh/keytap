@@ -3,9 +3,9 @@ use bech32::{Bech32, Hrp};
 use hkdf::Hkdf;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
+use zeroize::Zeroizing;
 
 mod ed25519;
-pub mod encrypt;
 mod ssh;
 
 #[derive(Debug, Error)]
@@ -227,3 +227,24 @@ fn validate_key_name(name: &str) -> Result<(), KeytapError> {
 
 #[cfg(test)]
 mod tests;
+
+/// The derived age identity for a raw key.
+pub fn age_identity(raw_key: &[u8]) -> Result<age::x25519::Identity, KeytapError> {
+    use std::str::FromStr;
+    let secret_key_bytes = Zeroizing::new(
+        format_private_key(raw_key, PrivateKeyFormat::AgeSecretKey).map_err(|e| {
+            KeytapError::Crypto {
+                message: format!("key format error: {e}"),
+            }
+        })?,
+    );
+    let secret_key_str =
+        Zeroizing::new(String::from_utf8(secret_key_bytes.to_vec()).map_err(|e| {
+            KeytapError::Crypto {
+                message: format!("key format error: {e}"),
+            }
+        })?);
+    age::x25519::Identity::from_str(&secret_key_str).map_err(|e| KeytapError::Crypto {
+        message: format!("invalid age identity: {e}"),
+    })
+}

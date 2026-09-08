@@ -25,7 +25,7 @@ const HELP = `keytap web terminal; shared CLI parser, help, and derivation code.
 
   keytap …                      the shared keytap command surface
   ls · cat · echo · rm · xxd    a tiny in-memory filesystem
-  pipes and redirects           echo hi | keytap encrypt > hi.age
+  pipes and redirects           keytap public --as ssh > id.pub
   clear (or ctrl+l)             wipe the screen
 
 tab key completes · ↑ ↓ history · ctrl+c or esc cancels a passkey prompt
@@ -330,7 +330,6 @@ function completionCandidates(tokens, endsWithSpace) {
     }
     const spec = completionsSpec.find(([name]) => name === sub);
     if (current.startsWith('-') && spec) return { current, options: spec[1] };
-    if (sub === 'encrypt' && last === '-R') return { current, options: [...fs.keys()] };
     return { current, options: [] };
   }
 

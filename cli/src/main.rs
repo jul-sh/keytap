@@ -1,6 +1,5 @@
 #[cfg(any(target_os = "macos", test))]
 mod approval;
-mod encrypt;
 mod env_keys;
 mod envtap_passkey;
 mod keychain;
@@ -45,19 +44,6 @@ fn main() -> ExitCode {
         }
         Command::Reveal { ref name, format } => {
             with_derived_key(name, |raw_key| emit_private_key(raw_key, format));
-        }
-        Command::Encrypt {
-            ref name,
-            ref recipients,
-            ref recipients_file,
-            no_self,
-        } => {
-            with_derived_key(name, |raw_key| {
-                encrypt::encrypt(raw_key, recipients, recipients_file, !no_self)
-            });
-        }
-        Command::Decrypt { ref name } => {
-            with_derived_key(name, encrypt::decrypt);
         }
         Command::Remember { ref name } => remember_key(name),
         Command::Forget { ref name, all } => {

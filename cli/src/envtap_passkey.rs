@@ -22,7 +22,7 @@ impl Passkey for KeytapPasskey {
         let Some(raw_key) = remember::lookup(KEY_NAME) else {
             return Ok(None);
         };
-        keytap_core::encrypt::identity(&raw_key)
+        keytap_core::age_identity(&raw_key)
             .map(Some)
             .map_err(|error| error.to_string())
     }

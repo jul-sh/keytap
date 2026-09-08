@@ -105,24 +105,6 @@ fn env_key_accepts_lowercase_encoding() {
 }
 
 #[test]
-fn env_key_encrypt_decrypt_round_trip() {
-    let key = age_encoding(&RAW);
-    let envs: &[(&str, &str)] = &[("KEYTAP_KEY_BACKUP", &key)];
-    let plaintext = b"the CI path never prompts".as_slice();
-
-    let encrypted = keytap(envs, &["encrypt", "backup"], plaintext);
-    let ciphertext = {
-        assert!(encrypted.status.success(), "stderr: {}", stderr(&encrypted));
-        encrypted.stdout
-    };
-    assert_ne!(ciphertext, plaintext);
-
-    let decrypted = keytap(envs, &["decrypt", "backup"], &ciphertext);
-    assert!(decrypted.status.success(), "stderr: {}", stderr(&decrypted));
-    assert_eq!(decrypted.stdout, plaintext);
-}
-
-#[test]
 fn env_var_name_flattens_punctuation() {
     let key = age_encoding(&RAW);
     let out = keytap(

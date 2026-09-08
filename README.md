@@ -14,7 +14,7 @@ Unlock with Touch ID; or approve using a passkey on a nearby device.
 
 <!--HELP:BEGIN-->
 ```
-Derive keys and encrypt files from a passkey.
+Derive keys from a passkey.
 
 Usage: keytap <COMMAND> [ARGS]
 
@@ -22,17 +22,13 @@ Commands
   init                                       Create a keytap passkey, if you do not already have one
   public [NAME] [--as <hex|base64|age|ssh>]  Output the public key
   reveal [NAME] [--as <hex|base64|age|ssh>]  Reveal private key material
-  encrypt [NAME] [--to VAL] [-R VAL]         Encrypt stdin to stdout with the derived age identity
-  decrypt [NAME]                             Decrypt age input from stdin to stdout with the derived age identity
   remember NAME                              Remember a derived key on this machine (no more prompts for it)
   forget [NAME] [--all]                      Forget a remembered key
   remembered                                 List keys remembered on this machine (never prints key material)
 
 Arguments & options
-  NAME      Key name for domain separation  [default: default]
-  --as      Output format  [default: hex]
-  --to VAL  Additional age recipient (can be repeated)
-  -R VAL    File containing age recipients (one per line)
+  NAME  Key name for domain separation  [default: default]
+  --as  Output format  [default: hex]
 
 Skip repeated prompts for a key: `keytap remember NAME` (see `keytap remember --help`).
 Holds that expire instead (ssh-agent, TTLs): see `keytap reveal --help`.
@@ -161,7 +157,6 @@ serves both tools.
 
 ## Guides
 
-- [Share an encrypted `.env` through Git with multiple developers](docs/team-env.md)
 - [Deploy the Cloudflare approval relay](docs/relay.md)
 
 ## License

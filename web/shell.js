@@ -102,7 +102,7 @@ export function createFs() {
   const files = new Map();
   files.set(
     'notes.txt',
-    encode('in-memory demo filesystem; nothing here survives a reload.\ntry: keytap encrypt < notes.txt > notes.age\n')
+    encode('in-memory demo filesystem; nothing here survives a reload.\ntry: keytap public --as ssh\n')
   );
   return files;
 }
