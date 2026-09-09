@@ -17,7 +17,6 @@ jobs:
           cargo test -p keytap-core
           cargo test -p keytap-cli-spec
           cargo test -p keytap
-          cargo test -p envtap
           cargo test -p keytap-web
 
       - name: Install wasm-pack

@@ -3,13 +3,7 @@
 set -u
 
 keytap_bundle=${KEYTAP_APP_BUNDLE:-"$HOME/.local/share/keytap/Keytap.app"}
-# One executable, two entrypoints: the bundle holds `envtap` as a link to
-# `keytap`, and this launcher installed under either name runs that one.
-case "$(/usr/bin/basename -- "$0")" in
-  envtap) keytap_program=envtap ;;
-  *) keytap_program=keytap ;;
-esac
-keytap_binary="$keytap_bundle/Contents/MacOS/$keytap_program"
+keytap_binary="$keytap_bundle/Contents/MacOS/keytap"
 keytap_lsregister=${KEYTAP_LSREGISTER:-/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister}
 keytap_sleep=${KEYTAP_SLEEP:-/bin/sleep}
 keytap_cache_dir=${KEYTAP_CACHE_DIR:-"$HOME/Library/Caches/keytap"}

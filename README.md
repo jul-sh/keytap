@@ -54,8 +54,6 @@ URL=$(curl -fsSL 'https://api.github.com/repos/jul-sh/keytap/releases?per_page=1
        && if [ -x ~/.local/share/keytap/Keytap.app/Contents/Resources/keytap-launcher ]; then
             install -m 755 ~/.local/share/keytap/Keytap.app/Contents/Resources/keytap-launcher \
               ~/.local/bin/keytap \
-            && install -m 755 ~/.local/share/keytap/Keytap.app/Contents/Resources/keytap-launcher \
-              ~/.local/bin/envtap \
             && KEYTAP_LAUNCHER_REGISTER_ONLY=1 ~/.local/bin/keytap
           else
             printf '%s\n' '#!/bin/sh' \
@@ -67,8 +65,7 @@ URL=$(curl -fsSL 'https://api.github.com/repos/jul-sh/keytap/releases?per_page=1
             && sleep 2
           fi
      else
-       unzip -o keytap-*-linux-x86_64.zip keytap -d ~/.local/bin \
-       && ln -sf keytap ~/.local/bin/envtap
+       unzip -o keytap-*-linux-x86_64.zip keytap -d ~/.local/bin
      fi
 ```
 
@@ -114,8 +111,8 @@ file. Treat remembered keys like private keys. **Use once** skips storing the
 named key, but nearby pairing metadata is still retained.
 
 Keytap does not open an interactive ceremony when `$CI` is set, and a
-headless job has no passkey to answer one. Secrets for CI belong in
-[envtap](envtap/README.md), which reads `ENVTAP_IDENTITY`.
+headless job has no passkey to answer one. Give CI its own key: with SOPS,
+an `age-keygen` identity in `SOPS_AGE_KEY`.
 
 ## Security
 
@@ -139,14 +136,33 @@ passkey provider, WebAuthn PRF, and the `keytap.jul.sh` relying party.
   identity material before encrypting them to the CLI. Trust the code served
   by `keytap.jul.sh` and the browser running it.
 
-## envtap
+## Secrets in a repository: SOPS
 
-[envtap](envtap/README.md) keeps a repository's environment variables in
-`tap.env`: encrypted per value, committed to Git, with a grant for each person
-and CI job that may read them. It is this same executable through its
-`envtap` entrypoint; the install above sets up both. Your key is Keytap's named
-key `envtap`, so `envtap login` is `keytap remember envtap` and one passkey
-serves both tools.
+Keytap derives the key; [SOPS](https://github.com/getsops/sops) encrypts the
+files. Each developer publishes an age recipient derived from their passkey,
+and SOPS encrypts every value in a `.env`, YAML, or JSON file to all of them.
+
+```bash
+keytap public sops --as age            # your recipient, for .sops.yaml
+keytap remember sops                   # one ceremony; no prompts afterwards
+export SOPS_AGE_KEY_CMD='keytap reveal sops --as age'
+```
+
+```yaml
+# .sops.yaml
+creation_rules:
+  - path_regex: secrets\.env$
+    age: age1alice…,age1bob…
+```
+
+```bash
+sops secrets.env                       # edit decrypted in $EDITOR
+sops exec-env secrets.env 'npm run dev'
+sops updatekeys secrets.env            # after changing .sops.yaml
+```
+
+CI has no passkey: give the job an `age-keygen` identity in `SOPS_AGE_KEY`
+and list its recipient in `.sops.yaml`.
 
 ## Guides
 

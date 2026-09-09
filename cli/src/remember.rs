@@ -259,7 +259,7 @@ pub fn forget(name: &str) {
 /// Delete the remembered key for `name` under the current root. `Ok(false)`
 /// when nothing was remembered; `Err` when the stores or the passkey record
 /// cannot be used.
-pub fn try_forget(name: &str) -> Result<bool, String> {
+fn try_forget(name: &str) -> Result<bool, String> {
     let authority = crate::nearby_identity::remember_authority().map_err(|error| {
         format!(
             "could not determine the current passkey identity: {error}; use `keytap forget --all` to clear every root"
