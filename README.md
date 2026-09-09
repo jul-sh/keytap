@@ -32,7 +32,6 @@ Arguments & options
 
 Skip repeated prompts for a key: `keytap remember NAME` (see `keytap remember --help`).
 Holds that expire instead (ssh-agent, TTLs): see `keytap reveal --help`.
-CI (headless, $CI set): keys come from `$KEYTAP_KEY_<NAME>` — see `keytap reveal --help`.
 Run `keytap <COMMAND> --help` for the full details of any command.
 ```
 <!--HELP:END-->
@@ -114,15 +113,9 @@ Secret Service when available; the fallback is an owner-only, unencrypted state
 file. Treat remembered keys like private keys. **Use once** skips storing the
 named key, but nearby pairing metadata is still retained.
 
-Keytap does not open an interactive ceremony when `$CI` is set. Set
-`KEYTAP_KEY_<NAME>` to `keytap reveal <name> --as age` output; names are
-uppercased and non-alphanumeric characters become `_`.
-
-```bash
-keytap reveal ci --as age | gh secret set KEYTAP_KEY_CI
-```
-
-Leaking that value permanently compromises the named key; retire the name.
+Keytap does not open an interactive ceremony when `$CI` is set, and a
+headless job has no passkey to answer one. Secrets for CI belong in
+[envtap](envtap/README.md), which reads `ENVTAP_IDENTITY`.
 
 ## Security
 

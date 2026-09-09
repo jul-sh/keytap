@@ -154,7 +154,7 @@ pub fn format_private_key(
 
 /// Parse the age secret key encoding (`AGE-SECRET-KEY-1…`) back into the raw
 /// 32 key bytes — the inverse of `format_private_key(_, AgeSecretKey)`. This
-/// is the one encoding accepted from the environment (`$KEYTAP_KEY_<NAME>`):
+/// is the one encoding accepted as an age secret key:
 /// bech32's checksum means a corrupted value fails here instead of silently
 /// becoming a different key.
 pub fn parse_age_secret_key(s: &str) -> Result<Vec<u8>, KeytapError> {

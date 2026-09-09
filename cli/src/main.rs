@@ -1,6 +1,5 @@
 #[cfg(any(target_os = "macos", test))]
 mod approval;
-mod env_keys;
 mod envtap_passkey;
 mod keychain;
 mod nearby;
@@ -98,9 +97,8 @@ pub(crate) fn remember_key(name: &str) {
     }
 }
 
-/// Resolve the raw key for `name` and hand it to `use_key`: first the
-/// environment (`$KEYTAP_KEY_<NAME>`, the CI path), then a key remembered on
-/// this machine, then a fresh ceremony. Under `$CI`, a fresh ceremony is
+/// Resolve the raw key for `name` and hand it to `use_key`: a key remembered
+/// on this machine, else a fresh ceremony. Under `$CI`, a fresh ceremony is
 /// refused.
 ///
 /// The named derived key is retained only when the user explicitly chooses to
@@ -110,18 +108,14 @@ fn with_derived_key(name: &str, use_key: impl FnOnce(&[u8])) {
     if let Err(error) = keytap_core::prf_salt_for_name(name) {
         die(&error.to_string());
     }
-    if let Some(raw_key) = env_keys::resolve(name) {
-        return use_key(&raw_key);
-    }
     if let Some(raw_key) = remember::lookup(name) {
         return use_key(&raw_key);
     }
     if in_ci() {
         die(&format!(
-            "$CI is set and there is no key for '{name}': refusing to start a passkey ceremony \
-             (it would hang this job). Set ${var} to the output of \
-             `keytap reveal {name} --as age` before running this job.",
-            var = env_keys::var_name(name)
+            "$CI is set and no key named '{name}' is remembered on this machine: refusing to \
+             start a passkey ceremony (it would hang this job). Secrets for CI belong in envtap \
+             with $ENVTAP_IDENTITY."
         ));
     }
     let assertion = authenticate(name, nearby::StoragePolicy::Choose);
