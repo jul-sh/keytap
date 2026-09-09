@@ -528,7 +528,7 @@ dependencies = [
 
 [[package]]
 name = "envtap"
-version = "9.0.0"
+version = "10.0.0"
 dependencies = [
  "age",
  "base64 0.22.1",
@@ -943,7 +943,7 @@ dependencies = [
 
 [[package]]
 name = "keytap"
-version = "9.0.0"
+version = "10.0.0"
 dependencies = [
  "age",
  "base64 0.22.1",
@@ -970,7 +970,7 @@ dependencies = [
 
 [[package]]
 name = "keytap-cli-spec"
-version = "9.0.0"
+version = "10.0.0"
 dependencies = [
  "clap",
  "keytap-core",
@@ -979,7 +979,7 @@ dependencies = [
 
 [[package]]
 name = "keytap-core"
-version = "9.0.0"
+version = "10.0.0"
 dependencies = [
  "age",
  "base64 0.22.1",
@@ -998,14 +998,14 @@ dependencies = [
 
 [[package]]
 name = "keytap-macos"
-version = "9.0.0"
+version = "10.0.0"
 dependencies = [
  "swift-rs",
 ]
 
 [[package]]
 name = "keytap-web"
-version = "9.0.0"
+version = "10.0.0"
 dependencies = [
  "getrandom 0.2.17",
  "hex",
