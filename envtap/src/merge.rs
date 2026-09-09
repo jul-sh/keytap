@@ -130,8 +130,8 @@ mod tests {
 
     fn identity() -> (LocalIdentity, Recipient) {
         let identity = x25519::Identity::generate();
-        let recipient = Recipient::Age(identity.to_public());
-        (LocalIdentity::Age(identity), recipient)
+        let recipient = Recipient::new(identity.to_public());
+        (LocalIdentity::new(identity), recipient)
     }
 
     fn open(bytes: &[u8], identity: &LocalIdentity) -> UnlockedVault {

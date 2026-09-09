@@ -1,17 +1,16 @@
 //! Keys that can read a vault, and public keys that can be granted access.
 //!
-//! A recipient is a native age public key or an SSH public key. A local
-//! identity is the matching private half: the age key Keytap derives from
-//! your passkey, an age identity file, or an SSH private key.
+//! A recipient is an age public key. A local identity is the matching age
+//! secret key: the one Keytap derives from your passkey, or one from an age
+//! identity file.
 
 use std::fs;
-use std::io::{self, BufReader, IsTerminal, Read};
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
-use age::secrecy::{ExposeSecret, SecretString};
+use age::secrecy::ExposeSecret;
 use age::x25519;
-use base64::Engine as _;
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::store;
@@ -23,52 +22,27 @@ const REMEMBERED_FILE_NAME: &str = "identity-file";
 
 /// A public key that a vault can be encrypted to.
 #[derive(Clone)]
-pub enum Recipient {
-    Age(x25519::Recipient),
-    Ssh(age::ssh::Recipient),
-}
+pub struct Recipient(x25519::Recipient);
 
 impl Recipient {
-    /// Parse `age1…` or `ssh-ed25519 AAAA…` (an SSH key comment is ignored).
-    /// Only ed25519 SSH keys are accepted, so the RSA code that age compiles
-    /// for its SSH support is never executed.
+    pub fn new(recipient: x25519::Recipient) -> Self {
+        Self(recipient)
+    }
+
+    /// Parse `age1…`.
     pub fn parse(text: &str) -> Result<Self, String> {
-        let text = text.trim();
-        if text.starts_with("age1") {
-            return x25519::Recipient::from_str(text)
-                .map(Recipient::Age)
-                .map_err(|_| "not a valid age public key".to_owned());
-        }
-        if text.starts_with("ssh-") {
-            let mut tokens = text.split_whitespace();
-            let (Some(kind), Some(key)) = (tokens.next(), tokens.next()) else {
-                return Err("an SSH public key needs a type and a key".to_owned());
-            };
-            let parsed = age::ssh::Recipient::from_str(&format!("{kind} {key}"))
-                .map_err(|error| format!("unsupported SSH public key: {error:?}"))?;
-            return match parsed {
-                age::ssh::Recipient::SshEd25519(..) => Ok(Recipient::Ssh(parsed)),
-                age::ssh::Recipient::SshRsa(..) => {
-                    Err("ssh-rsa keys are not supported; use an ssh-ed25519 key".to_owned())
-                }
-            };
-        }
-        Err("expected an age public key (age1…) or an SSH public key (ssh-ed25519 …)".to_owned())
+        x25519::Recipient::from_str(text.trim())
+            .map(Self)
+            .map_err(|_| "expected an age public key (age1…)".to_owned())
     }
 
     /// The single spelling Envtap writes into a vault.
     pub fn canonical(&self) -> String {
-        match self {
-            Recipient::Age(recipient) => recipient.to_string(),
-            Recipient::Ssh(recipient) => recipient.to_string(),
-        }
+        self.0.to_string()
     }
 
     pub fn as_dyn(&self) -> &dyn age::Recipient {
-        match self {
-            Recipient::Age(recipient) => recipient,
-            Recipient::Ssh(recipient) => recipient,
-        }
+        &self.0
     }
 }
 
@@ -78,29 +52,21 @@ impl PartialEq for Recipient {
     }
 }
 
-/// A private key available on this machine.
-pub enum LocalIdentity {
-    Age(x25519::Identity),
-    Ssh {
-        identity: Box<dyn age::Identity>,
-        public_key: Recipient,
-    },
-}
+/// A secret key available on this machine.
+pub struct LocalIdentity(x25519::Identity);
 
 impl LocalIdentity {
+    pub fn new(identity: x25519::Identity) -> Self {
+        Self(identity)
+    }
+
     pub fn as_dyn(&self) -> &dyn age::Identity {
-        match self {
-            LocalIdentity::Age(identity) => identity,
-            LocalIdentity::Ssh { identity, .. } => identity.as_ref(),
-        }
+        &self.0
     }
 
     /// The public key to grant.
     pub fn public_key(&self) -> Recipient {
-        match self {
-            LocalIdentity::Age(identity) => Recipient::Age(identity.to_public()),
-            LocalIdentity::Ssh { public_key, .. } => public_key.clone(),
-        }
+        Recipient(self.0.to_public())
     }
 }
 
@@ -154,13 +120,13 @@ pub fn resolve(explicit: Option<&Path>, passkey: &dyn Passkey) -> Result<Identit
         let identity = parse_age_secret(value.trim())
             .map_err(|_| format!("{IDENTITY_ENVIRONMENT} is not an age secret key"))?;
         return Ok(Identities {
-            list: vec![LocalIdentity::Age(identity)],
+            list: vec![LocalIdentity::new(identity)],
             source: Source::Environment,
         });
     }
     if let Some(identity) = passkey.remembered()? {
         return Ok(Identities {
-            list: vec![LocalIdentity::Age(identity)],
+            list: vec![LocalIdentity::new(identity)],
             source: Source::Passkey,
         });
     }
@@ -177,8 +143,8 @@ fn parse_age_secret(text: &str) -> Result<x25519::Identity, String> {
     x25519::Identity::from_str(text.trim()).map_err(|error| error.to_owned())
 }
 
-/// Parse an age identity file (one or more `AGE-SECRET-KEY-1…` lines) or an
-/// OpenSSH private key.
+/// Parse an age identity file: one or more `AGE-SECRET-KEY-1…` lines, with
+/// `#` comments.
 pub fn parse_identity_file(path: &Path) -> Result<Vec<LocalIdentity>, String> {
     let mut raw = read_identity_file(path)?;
     let parsed = parse_identity_text(&raw, path);
@@ -187,128 +153,19 @@ pub fn parse_identity_file(path: &Path) -> Result<Vec<LocalIdentity>, String> {
 }
 
 fn parse_identity_text(raw: &str, path: &Path) -> Result<Vec<LocalIdentity>, String> {
-    if raw.contains("-----BEGIN OPENSSH PRIVATE KEY-----") {
-        return parse_ssh_identity(raw, path).map(|identity| vec![identity]);
-    }
     let mut identities = Vec::new();
     for line in raw.lines().map(str::trim) {
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        let identity = parse_age_secret(line).map_err(|_| {
-            format!(
-                "{} must contain age secret keys or one OpenSSH private key",
-                path.display()
-            )
-        })?;
-        identities.push(LocalIdentity::Age(identity));
+        let identity = parse_age_secret(line)
+            .map_err(|_| format!("{} must contain age secret keys", path.display()))?;
+        identities.push(LocalIdentity::new(identity));
     }
     if identities.is_empty() {
         return Err(format!("{} contains no identity", path.display()));
     }
     Ok(identities)
-}
-
-fn parse_ssh_identity(raw: &str, path: &Path) -> Result<LocalIdentity, String> {
-    let public_key = openssh_public_key(raw)
-        .map_err(|error| format!("cannot use SSH key {}: {error}", path.display()))?;
-    let parsed = age::ssh::Identity::from_buffer(
-        BufReader::new(raw.as_bytes()),
-        Some(path.display().to_string()),
-    )
-    .map_err(|error| format!("cannot parse SSH key {}: {error}", path.display()))?;
-    let identity: Box<dyn age::Identity> = match parsed {
-        age::ssh::Identity::Unencrypted(_) => Box::new(parsed),
-        age::ssh::Identity::Encrypted(_) => Box::new(parsed.with_callbacks(PassphrasePrompt)),
-        age::ssh::Identity::Unsupported(_) => {
-            return Err(format!(
-                "{} is an SSH key Envtap cannot use; use an ssh-ed25519 key",
-                path.display()
-            ))
-        }
-    };
-    Ok(LocalIdentity::Ssh {
-        identity,
-        public_key,
-    })
-}
-
-/// The public key embedded, unencrypted, in an OpenSSH private key file.
-/// Only ed25519 keys are accepted; see [`Recipient::parse`].
-fn openssh_public_key(raw: &str) -> Result<Recipient, String> {
-    use base64::engine::general_purpose::STANDARD;
-
-    let body: String = raw
-        .lines()
-        .filter(|line| !line.starts_with("-----"))
-        .map(str::trim)
-        .collect();
-    let bytes = STANDARD
-        .decode(body)
-        .map_err(|_| "not an OpenSSH private key".to_owned())?;
-    let mut cursor = bytes
-        .strip_prefix(b"openssh-key-v1\0")
-        .ok_or_else(|| "not an OpenSSH private key".to_owned())?;
-    for _ in 0..3 {
-        read_ssh_string(&mut cursor)?;
-    }
-    if read_ssh_u32(&mut cursor)? != 1 {
-        return Err("the file must contain exactly one key".to_owned());
-    }
-    let blob = read_ssh_string(&mut cursor)?;
-    let mut inner = blob;
-    let key_type = std::str::from_utf8(read_ssh_string(&mut inner)?)
-        .map_err(|_| "invalid key type".to_owned())?;
-    if key_type != "ssh-ed25519" {
-        return Err(format!(
-            "it is an {key_type} key, which Envtap does not support; use an ssh-ed25519 key"
-        ));
-    }
-    Recipient::parse(&format!("ssh-ed25519 {}", STANDARD.encode(blob)))
-}
-
-fn read_ssh_u32(cursor: &mut &[u8]) -> Result<u32, String> {
-    let (head, rest) = cursor
-        .split_first_chunk::<4>()
-        .ok_or_else(|| "truncated OpenSSH key".to_owned())?;
-    *cursor = rest;
-    Ok(u32::from_be_bytes(*head))
-}
-
-fn read_ssh_string<'a>(cursor: &mut &'a [u8]) -> Result<&'a [u8], String> {
-    let length = read_ssh_u32(cursor)? as usize;
-    if cursor.len() < length {
-        return Err("truncated OpenSSH key".to_owned());
-    }
-    let (value, rest) = cursor.split_at(length);
-    *cursor = rest;
-    Ok(value)
-}
-
-#[derive(Clone)]
-struct PassphrasePrompt;
-
-impl age::Callbacks for PassphrasePrompt {
-    fn display_message(&self, message: &str) {
-        eprintln!("{message}");
-    }
-
-    fn confirm(&self, _message: &str, _yes: &str, _no: Option<&str>) -> Option<bool> {
-        None
-    }
-
-    fn request_public_string(&self, _description: &str) -> Option<String> {
-        None
-    }
-
-    fn request_passphrase(&self, description: &str) -> Option<SecretString> {
-        if !io::stdin().is_terminal() {
-            return None;
-        }
-        rpassword::prompt_password(format!("{description}: "))
-            .ok()
-            .map(SecretString::from)
-    }
 }
 
 fn read_identity_file(path: &Path) -> Result<String, String> {
@@ -408,19 +265,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_age_and_ssh_recipients_canonically() {
+    fn parses_age_recipients_canonically() {
         let identity = x25519::Identity::generate();
         let text = identity.to_public().to_string();
         let parsed = Recipient::parse(&format!("  {text}\n")).unwrap();
         assert_eq!(parsed.canonical(), text);
-
-        let ssh = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGxK1UiU7rAoLh9Sh7yMOWFhDx4a8Yx7/1oVbrMTyA5F user@host";
-        let parsed = Recipient::parse(ssh).unwrap();
-        assert_eq!(
-            parsed.canonical(),
-            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGxK1UiU7rAoLh9Sh7yMOWFhDx4a8Yx7/1oVbrMTyA5F"
-        );
-        assert!(Recipient::parse("ssh-dss AAAA").is_err());
+        assert!(Recipient::parse("ssh-ed25519 AAAA").is_err());
         assert!(Recipient::parse("hello").is_err());
     }
 

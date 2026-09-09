@@ -46,7 +46,7 @@ struct Scope {
     )]
     env: Option<String>,
 
-    /// Decrypt with this age identity file or SSH private key instead of your login
+    /// Decrypt with this age identity file instead of your login
     #[arg(short = 'i', long, global = true, value_name = "PATH")]
     identity: Option<PathBuf>,
 }
@@ -108,9 +108,9 @@ enum Command {
     #[command(after_help = GRANT_HELP)]
     Grant {
         label: String,
-        /// An age public key (age1…) or an SSH public key (ssh-ed25519 …)
-        #[arg(required = true, num_args = 1.., value_name = "PUBLIC KEY")]
-        recipient: Vec<String>,
+        /// An age public key (age1…), as printed by `envtap public-key`
+        #[arg(value_name = "PUBLIC KEY")]
+        recipient: String,
     },
     /// Remove access and re-encrypt under a new key
     #[command(after_help = REVOKE_HELP)]
@@ -153,9 +153,9 @@ the passkey first, like `keytap init`. When this machine cannot use passkeys
 itself, a QR code and a one-use link let a device that can approve instead.
 Do not share them.
 
-To use an age identity file or an SSH private key instead of a passkey:
+To use an age identity file instead of a passkey:
 
-  envtap login -i ~/.ssh/id_ed25519";
+  envtap login -i key.txt";
 
 const SET_HELP: &str = "Reads the value from a hidden prompt, or from stdin when piped. A missing
 tap.env is created in the current directory and grants your key.
@@ -179,10 +179,9 @@ in the current directory and grants your key.
 
 const GRANT_HELP: &str =
     "LABEL names the key in the file. The public key is what `envtap public-key`
-prints on their machine, or their SSH public key.
+prints on their machine.
 
-  envtap grant sam age1…
-  envtap grant sam ssh-ed25519 AAAA…";
+  envtap grant sam age1…";
 
 const REVOKE_HELP: &str = "Values are re-encrypted under a new key that the revoked key never had.
 Values already committed remain readable to it in Git history, so rotate
@@ -254,7 +253,7 @@ fn dispatch(command: Command, scope: &Context) -> Result<ExitCode, String> {
         Command::Export { format } => export(scope, format),
         Command::Import { path, label } => import(scope, &path, label.as_deref()),
         Command::PublicKey => public_key(scope),
-        Command::Grant { label, recipient } => grant(scope, &label, &recipient.join(" ")),
+        Command::Grant { label, recipient } => grant(scope, &label, &recipient),
         Command::Revoke { label } => {
             mutate(scope, |vault| vault.revoke(&label).map_err(vault_error))?;
             eprintln!(
@@ -754,7 +753,7 @@ fn grant_ci(scope: &Context, label: &str, command: &[OsString]) -> Result<ExitCo
     let mut opened = open_for_write(scope)?;
     let vault_id = opened.vault.id();
     let ci_identity = x25519::Identity::generate();
-    let ci_recipient = Recipient::Age(ci_identity.to_public());
+    let ci_recipient = Recipient::new(ci_identity.to_public());
     opened
         .vault
         .grant(label, &ci_recipient)

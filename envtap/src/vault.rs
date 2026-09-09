@@ -2,7 +2,7 @@
 //!
 //! The file is dotenv-shaped text. Directive lines start with `#:`. The first
 //! line names the format and a random vault ID. Each grant line carries a
-//! label, a public key, and the vault's data key wrapped to that public key
+//! label, an age public key, and the vault's data key wrapped to that key
 //! with age. Each variable line holds the value encrypted under the data key
 //! with ChaCha20-Poly1305, with the vault ID and the variable name bound as
 //! associated data.
@@ -629,23 +629,21 @@ fn parse_directive(raw: &str, number: usize) -> Result<Line> {
         Some(other) => return Err(invalid(number, format!("unknown directive `{other}`"))),
         None => return Err(invalid(number, "empty directive")),
     }
-    if tokens.len() < 5 {
+    let [_, _, label, recipient_text, wrap_text] = tokens[..] else {
         return Err(invalid(
             number,
             "expected `#: grant <label> <public key> <wrapped key>`",
         ));
-    }
-    let label = tokens[2];
+    };
     validate_label(label).map_err(|error| invalid(number, error.to_string()))?;
-    let recipient_text = tokens[3..tokens.len() - 1].join(" ");
-    let recipient = Recipient::parse(&recipient_text).map_err(|error| invalid(number, error))?;
+    let recipient = Recipient::parse(recipient_text).map_err(|error| invalid(number, error))?;
     if recipient.canonical() != recipient_text {
         return Err(invalid(
             number,
             format!("the public key for `{label}` is not in canonical form"),
         ));
     }
-    let wrap = BASE64.decode(tokens[tokens.len() - 1]).map_err(|_| {
+    let wrap = BASE64.decode(wrap_text).map_err(|_| {
         invalid(
             number,
             format!("the wrapped key for `{label}` is not base64url"),
@@ -814,11 +812,6 @@ fn unwrap_with(wrap: &[u8], identities: &[LocalIdentity]) -> Result<Option<Zeroi
     let reader = match decryptor.decrypt(identities.iter().map(LocalIdentity::as_dyn)) {
         Ok(reader) => reader,
         Err(age::DecryptError::NoMatchingKeys) => return Ok(None),
-        Err(age::DecryptError::KeyDecryptionFailed) => {
-            return Err(VaultError::Crypto(
-                "the SSH key could not be decrypted; run interactively to enter its passphrase or use an unencrypted key".into(),
-            ))
-        }
         Err(error) => {
             return Err(VaultError::Tampered(format!(
                 "a wrapped key does not authenticate: {error}"
@@ -849,8 +842,8 @@ mod tests {
 
     fn identity() -> (LocalIdentity, Recipient) {
         let identity = x25519::Identity::generate();
-        let recipient = Recipient::Age(identity.to_public());
-        (LocalIdentity::Age(identity), recipient)
+        let recipient = Recipient::new(identity.to_public());
+        (LocalIdentity::new(identity), recipient)
     }
 
     fn text(bytes: &[u8]) -> String {

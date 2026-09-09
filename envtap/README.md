@@ -62,7 +62,7 @@ Commands:
 Options:
   -f, --file <PATH>      Use this file instead of the nearest tap.env
   -e, --env <ENV>        Use tap.<ENV>.env instead of tap.env
-  -i, --identity <PATH>  Decrypt with this age identity file or SSH private key
+  -i, --identity <PATH>  Decrypt with this age identity file instead of your login
 ```
 
 Commands find the nearest `tap.env` in the current directory or a parent,
@@ -80,10 +80,10 @@ that can approve instead. Do not share them.
 The derived key lives in the OS credential store; `envtap logout` is
 `keytap forget envtap`, and `keytap reveal envtap --as age` is your backup.
 
-To use an SSH key or an age identity file instead of a passkey:
+To use an age identity file instead of a passkey:
 
 ```bash
-envtap login -i ~/.ssh/id_ed25519
+envtap login -i key.txt
 ```
 
 ## Share
@@ -98,13 +98,6 @@ age1sam…
 ```bash
 envtap grant sam age1sam…
 git commit -am "Grant Sam access"
-```
-
-An SSH public key works too, so a teammate can be granted from
-`~/.ssh/id_ed25519.pub` without installing anything first:
-
-```bash
-envtap grant sam ssh-ed25519 AAAA…
 ```
 
 When someone leaves:
