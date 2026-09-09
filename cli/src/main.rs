@@ -1,6 +1,5 @@
 #[cfg(any(target_os = "macos", test))]
 mod approval;
-mod envtap_passkey;
 mod keychain;
 mod nearby;
 mod nearby_identity;
@@ -17,12 +16,6 @@ use std::sync::Arc;
 use zeroize::Zeroizing;
 
 fn main() -> ExitCode {
-    // One executable, two entrypoints: invoked as `envtap`, this runs the
-    // env-file CLI from the `envtap` crate on Keytap's passkey.
-    if envtap_passkey::invoked_as_envtap() {
-        return envtap::run(std::env::args_os(), &envtap_passkey::KeytapPasskey);
-    }
-
     // The whole CLI surface — clap definitions, the single-screen overview,
     // the bare-`remember` special case — lives in keytap-cli-spec, shared
     // with the web terminal's wasm build. This binary only executes.
@@ -114,8 +107,7 @@ fn with_derived_key(name: &str, use_key: impl FnOnce(&[u8])) {
     if in_ci() {
         die(&format!(
             "$CI is set and no key named '{name}' is remembered on this machine: refusing to \
-             start a passkey ceremony (it would hang this job). Secrets for CI belong in envtap \
-             with $ENVTAP_IDENTITY."
+             start a passkey ceremony (it would hang this job). Give CI its own key instead."
         ));
     }
     let assertion = authenticate(name, nearby::StoragePolicy::Choose);
