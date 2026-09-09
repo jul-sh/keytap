@@ -246,25 +246,7 @@ pub fn remember_requested_nearby(
 /// Delete the remembered key for `name` under the authoritative root, from every
 /// store that holds one.
 pub fn forget(name: &str) {
-    let authority = crate::nearby_identity::remember_authority().unwrap_or_else(|error| {
-        crate::die(&format!(
-            "could not determine the current passkey identity: {error}; use `keytap forget --all` to clear every root"
-        ))
-    });
-    let root = root_id(authority.credential_id());
-    let mut stores = open_stores().unwrap_or_else(|e| crate::die(&e.to_string()));
-    let mut deleted = false;
-    for store in &mut stores {
-        match forget_root_in(store.as_mut(), &root, name) {
-            Ok(d) => deleted |= d,
-            Err(e) => crate::die(&e.to_string()),
-        }
-    }
-    if !matches!(authority.revalidate(), Ok(true)) {
-        crate::die(
-            "the passkey identity changed while the remembered key was being deleted; retry",
-        );
-    }
+    let deleted = try_forget(name).unwrap_or_else(|error| crate::die(&error));
     if deleted {
         eprintln!("Forgot '{name}'. The next keytap command for this name will prompt again.");
     } else {
@@ -272,6 +254,30 @@ pub fn forget(name: &str) {
             "no remembered key named '{name}' for the current passkey"
         ));
     }
+}
+
+/// Delete the remembered key for `name` under the current root. `Ok(false)`
+/// when nothing was remembered; `Err` when the stores or the passkey record
+/// cannot be used.
+pub fn try_forget(name: &str) -> Result<bool, String> {
+    let authority = crate::nearby_identity::remember_authority().map_err(|error| {
+        format!(
+            "could not determine the current passkey identity: {error}; use `keytap forget --all` to clear every root"
+        )
+    })?;
+    let root = root_id(authority.credential_id());
+    let mut stores = open_stores().map_err(|e| e.to_string())?;
+    let mut deleted = false;
+    for store in &mut stores {
+        deleted |= forget_root_in(store.as_mut(), &root, name).map_err(|e| e.to_string())?;
+    }
+    if !matches!(authority.revalidate(), Ok(true)) {
+        return Err(
+            "the passkey identity changed while the remembered key was being deleted; retry"
+                .to_owned(),
+        );
+    }
+    Ok(deleted)
 }
 
 /// Delete every remembered key on this machine, including entries left over

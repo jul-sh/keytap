@@ -3,9 +3,9 @@ use bech32::{Bech32, Hrp};
 use hkdf::Hkdf;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
+use zeroize::Zeroizing;
 
 mod ed25519;
-pub mod encrypt;
 mod ssh;
 
 #[derive(Debug, Error)]
@@ -154,7 +154,7 @@ pub fn format_private_key(
 
 /// Parse the age secret key encoding (`AGE-SECRET-KEY-1…`) back into the raw
 /// 32 key bytes — the inverse of `format_private_key(_, AgeSecretKey)`. This
-/// is the one encoding accepted from the environment (`$KEYTAP_KEY_<NAME>`):
+/// is the one encoding accepted as an age secret key:
 /// bech32's checksum means a corrupted value fails here instead of silently
 /// becoming a different key.
 pub fn parse_age_secret_key(s: &str) -> Result<Vec<u8>, KeytapError> {
@@ -227,3 +227,24 @@ fn validate_key_name(name: &str) -> Result<(), KeytapError> {
 
 #[cfg(test)]
 mod tests;
+
+/// The derived age identity for a raw key.
+pub fn age_identity(raw_key: &[u8]) -> Result<age::x25519::Identity, KeytapError> {
+    use std::str::FromStr;
+    let secret_key_bytes = Zeroizing::new(
+        format_private_key(raw_key, PrivateKeyFormat::AgeSecretKey).map_err(|e| {
+            KeytapError::Crypto {
+                message: format!("key format error: {e}"),
+            }
+        })?,
+    );
+    let secret_key_str =
+        Zeroizing::new(String::from_utf8(secret_key_bytes.to_vec()).map_err(|e| {
+            KeytapError::Crypto {
+                message: format!("key format error: {e}"),
+            }
+        })?);
+    age::x25519::Identity::from_str(&secret_key_str).map_err(|e| KeytapError::Crypto {
+        message: format!("invalid age identity: {e}"),
+    })
+}

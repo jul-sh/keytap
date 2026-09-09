@@ -16,7 +16,7 @@ mod help;
 #[command(
     name = "keytap",
     version,
-    about = "Derive keys and encrypt files from a passkey.",
+    about = "Derive keys from a passkey.",
     // The top-level help is our own generated single-screen overview (see
     // `invoke`); clap keeps its default `--help` on each subcommand.
     disable_help_subcommand = true
@@ -61,32 +61,6 @@ pub enum Command {
         /// Output format
         #[arg(long = "as", value_name = "FORMAT", default_value = "hex")]
         format: Format,
-    },
-
-    /// Encrypt stdin to stdout with the derived age identity
-    Encrypt {
-        /// Key name for domain separation
-        #[arg(default_value = "default")]
-        name: String,
-
-        /// Additional age recipient (can be repeated)
-        #[arg(long = "to")]
-        recipients: Vec<String>,
-
-        /// File containing age recipients (one per line)
-        #[arg(short = 'R')]
-        recipients_file: Vec<String>,
-
-        /// Don't include self as a recipient when encrypting
-        #[arg(long)]
-        no_self: bool,
-    },
-
-    /// Decrypt age input from stdin to stdout with the derived age identity
-    Decrypt {
-        /// Key name for domain separation
-        #[arg(default_value = "default")]
-        name: String,
     },
 
     /// Remember a derived key on this machine (no more prompts for it)
@@ -294,8 +268,6 @@ mod tests {
                 format!("init {removed}"),
                 format!("public {removed}"),
                 format!("reveal {removed}"),
-                format!("encrypt {removed}"),
-                format!("decrypt {removed}"),
                 format!("remember deploy {removed}"),
                 format!("forget {removed}"),
                 format!("remembered {removed}"),

@@ -53,15 +53,3 @@ fn formats_render() {
     assert!(public.starts_with("ssh-ed25519 "));
     assert!(public.ends_with(" keytap:demo\n"));
 }
-
-#[wasm_bindgen_test]
-fn age_roundtrip() {
-    let raw = vec![7u8; 32];
-    let recipients = keytap_core::encrypt::recipients(Some(&raw), &[], &[]).unwrap();
-    let mut ciphertext = Vec::new();
-    keytap_core::encrypt::encrypt_stream(&recipients, &mut &b"wasm parity"[..], &mut ciphertext)
-        .unwrap();
-    let mut plaintext = Vec::new();
-    keytap_core::encrypt::decrypt_stream(&raw, &mut &ciphertext[..], &mut plaintext).unwrap();
-    assert_eq!(plaintext, b"wasm parity");
-}

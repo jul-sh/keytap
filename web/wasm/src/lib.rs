@@ -148,43 +148,6 @@ pub async fn cli_run(argv: Vec<String>, stdin: &[u8], host: Host) -> Result<JsVa
                 .map_err(|e| fail(&format!("format error: {e}")))?
         }
 
-        Command::Encrypt {
-            name,
-            recipients,
-            recipients_file,
-            no_self,
-        } => {
-            let mut files = Vec::new();
-            for file in recipients_file {
-                let data = host.read_file(file);
-                if data.is_undefined() || data.is_null() {
-                    return Err(fail(&format!(
-                        "failed to read recipients file {file}: no such file"
-                    )));
-                }
-                let bytes = Uint8Array::new(&data).to_vec();
-                files.push((file.clone(), String::from_utf8_lossy(&bytes).into_owned()));
-            }
-            let raw_key = obtain_key(&host, name).await?;
-            let self_key = (!no_self).then_some(&raw_key[..]);
-            let recipients = keytap_core::encrypt::recipients(self_key, recipients, &files)
-                .map_err(|e| fail(&e.to_string()))?;
-            let mut reader: &[u8] = stdin;
-            let mut out = Vec::new();
-            keytap_core::encrypt::encrypt_stream(&recipients, &mut reader, &mut out)
-                .map_err(|e| fail(&e.to_string()))?;
-            out
-        }
-
-        Command::Decrypt { name } => {
-            let raw_key = obtain_key(&host, name).await?;
-            let mut reader: &[u8] = stdin;
-            let mut out = Vec::new();
-            keytap_core::encrypt::decrypt_stream(&raw_key, &mut reader, &mut out)
-                .map_err(|e| fail(&e.to_string()))?;
-            out
-        }
-
         Command::Remember { name: _ }
         | Command::Forget { name: _, all: _ }
         | Command::Remembered => {
@@ -354,8 +317,6 @@ mod plan_tests {
                 format!("init {removed}"),
                 format!("public {removed}"),
                 format!("reveal {removed}"),
-                format!("encrypt {removed}"),
-                format!("decrypt {removed}"),
                 format!("remember deploy {removed}"),
                 format!("forget {removed}"),
                 format!("remembered {removed}"),
@@ -375,7 +336,7 @@ mod plan_tests {
     /// this pins the shape the chrome's follow-up hints key off.
     #[test]
     fn command_serializes_from_the_clap_idents() {
-        let cli = match plan(argv("encrypt backup --to age1x -R friends.txt --no-self")) {
+        let cli = match plan(argv("reveal backup --as age")) {
             Plan::Run(cli) => cli,
             _ => panic!("expected run"),
         };
@@ -383,29 +344,11 @@ mod plan_tests {
         assert_eq!(
             json,
             serde_json::json!({
-                "cmd": "encrypt",
+                "cmd": "reveal",
                 "name": "backup",
-                "recipients": ["age1x"],
-                "recipientsFile": ["friends.txt"],
-                "noSelf": true,
+                "format": "age",
             })
         );
-    }
-
-    #[test]
-    fn age_roundtrip_through_core() {
-        let raw = vec![7u8; 32];
-        let recipients = keytap_core::encrypt::recipients(Some(&raw), &[], &[]).unwrap();
-        let mut ciphertext = Vec::new();
-        keytap_core::encrypt::encrypt_stream(
-            &recipients,
-            &mut &b"hello keytap"[..],
-            &mut ciphertext,
-        )
-        .unwrap();
-        let mut plaintext = Vec::new();
-        keytap_core::encrypt::decrypt_stream(&raw, &mut &ciphertext[..], &mut plaintext).unwrap();
-        assert_eq!(plaintext, b"hello keytap");
     }
 
     #[test]

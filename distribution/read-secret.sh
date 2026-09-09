@@ -1,6 +1,6 @@
 #!/bin/bash
 # Decrypts a secret from distribution/secrets/<NAME>.age.
-# Uses keytap locally; falls back to age + AGE_SECRET_KEY in CI.
+# Uses age with the key keytap derives locally; falls back to AGE_SECRET_KEY in CI.
 #
 # Usage:
 #   ./distribution/read-secret.sh SECRET_NAME
@@ -25,7 +25,7 @@ fi
 if [ -n "${AGE_SECRET_KEY:-}" ]; then
     printf '%s\n' "$AGE_SECRET_KEY" | age -d -i - "$SECRET_PATH"
 elif command -v keytap &>/dev/null; then
-    keytap decrypt keytap < "$SECRET_PATH"
+    age -d -i <(keytap reveal keytap --as age) "$SECRET_PATH"
 else
     echo "Error: Neither AGE_SECRET_KEY nor keytap is available" >&2
     exit 1

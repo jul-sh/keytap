@@ -14,7 +14,7 @@ Unlock with Touch ID; or approve using a passkey on a nearby device.
 
 <!--HELP:BEGIN-->
 ```
-Derive keys and encrypt files from a passkey.
+Derive keys from a passkey.
 
 Usage: keytap <COMMAND> [ARGS]
 
@@ -22,21 +22,16 @@ Commands
   init                                       Create a keytap passkey, if you do not already have one
   public [NAME] [--as <hex|base64|age|ssh>]  Output the public key
   reveal [NAME] [--as <hex|base64|age|ssh>]  Reveal private key material
-  encrypt [NAME] [--to VAL] [-R VAL]         Encrypt stdin to stdout with the derived age identity
-  decrypt [NAME]                             Decrypt age input from stdin to stdout with the derived age identity
   remember NAME                              Remember a derived key on this machine (no more prompts for it)
   forget [NAME] [--all]                      Forget a remembered key
   remembered                                 List keys remembered on this machine (never prints key material)
 
 Arguments & options
-  NAME      Key name for domain separation  [default: default]
-  --as      Output format  [default: hex]
-  --to VAL  Additional age recipient (can be repeated)
-  -R VAL    File containing age recipients (one per line)
+  NAME  Key name for domain separation  [default: default]
+  --as  Output format  [default: hex]
 
 Skip repeated prompts for a key: `keytap remember NAME` (see `keytap remember --help`).
 Holds that expire instead (ssh-agent, TTLs): see `keytap reveal --help`.
-CI (headless, $CI set): keys come from `$KEYTAP_KEY_<NAME>` — see `keytap reveal --help`.
 Run `keytap <COMMAND> --help` for the full details of any command.
 ```
 <!--HELP:END-->
@@ -59,6 +54,8 @@ URL=$(curl -fsSL 'https://api.github.com/repos/jul-sh/keytap/releases?per_page=1
        && if [ -x ~/.local/share/keytap/Keytap.app/Contents/Resources/keytap-launcher ]; then
             install -m 755 ~/.local/share/keytap/Keytap.app/Contents/Resources/keytap-launcher \
               ~/.local/bin/keytap \
+            && install -m 755 ~/.local/share/keytap/Keytap.app/Contents/Resources/keytap-launcher \
+              ~/.local/bin/envtap \
             && KEYTAP_LAUNCHER_REGISTER_ONLY=1 ~/.local/bin/keytap
           else
             printf '%s\n' '#!/bin/sh' \
@@ -70,7 +67,8 @@ URL=$(curl -fsSL 'https://api.github.com/repos/jul-sh/keytap/releases?per_page=1
             && sleep 2
           fi
      else
-       unzip -o keytap-*-linux-x86_64.zip keytap -d ~/.local/bin
+       unzip -o keytap-*-linux-x86_64.zip keytap -d ~/.local/bin \
+       && ln -sf keytap ~/.local/bin/envtap
      fi
 ```
 
@@ -115,15 +113,9 @@ Secret Service when available; the fallback is an owner-only, unencrypted state
 file. Treat remembered keys like private keys. **Use once** skips storing the
 named key, but nearby pairing metadata is still retained.
 
-Keytap does not open an interactive ceremony when `$CI` is set. Set
-`KEYTAP_KEY_<NAME>` to `keytap reveal <name> --as age` output; names are
-uppercased and non-alphanumeric characters become `_`.
-
-```bash
-keytap reveal ci --as age | gh secret set KEYTAP_KEY_CI
-```
-
-Leaking that value permanently compromises the named key; retire the name.
+Keytap does not open an interactive ceremony when `$CI` is set, and a
+headless job has no passkey to answer one. Secrets for CI belong in
+[envtap](envtap/README.md), which reads `ENVTAP_IDENTITY`.
 
 ## Security
 
@@ -147,9 +139,17 @@ passkey provider, WebAuthn PRF, and the `keytap.jul.sh` relying party.
   identity material before encrypting them to the CLI. Trust the code served
   by `keytap.jul.sh` and the browser running it.
 
+## envtap
+
+[envtap](envtap/README.md) keeps a repository's environment variables in
+`tap.env`: encrypted per value, committed to Git, with a grant for each person
+and CI job that may read them. It is this same executable through its
+`envtap` entrypoint; the install above sets up both. Your key is Keytap's named
+key `envtap`, so `envtap login` is `keytap remember envtap` and one passkey
+serves both tools.
+
 ## Guides
 
-- [Share an encrypted `.env` through Git with multiple developers](docs/team-env.md)
 - [Deploy the Cloudflare approval relay](docs/relay.md)
 
 ## License

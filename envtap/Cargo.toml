@@ -1,0 +1,32 @@
+[package]
+name = "envtap"
+# envtap ships inside the keytap executable, so it carries Keytap's version.
+version.workspace = true
+edition = "2021"
+license = "MIT"
+description = "Encrypted .env files with per-person access."
+repository = "https://github.com/jul-sh/keytap"
+rust-version = "1.88"
+
+[lib]
+path = "src/lib.rs"
+
+# A stand-in executable for envtap's own tests; the real one is `keytap`
+# invoked as `envtap`. Release builds are `-p keytap` and never include it.
+[[bin]]
+name = "envtap-fake"
+path = "src/bin/fake.rs"
+
+[dependencies]
+age = { version = "0.11", default-features = false }
+base64 = "0.22"
+clap = { version = "4", features = ["derive"] }
+fs2 = "0.4"
+hex = "0.4"
+libc = "0.2"
+ring = "0.17"
+rpassword = "7"
+sha2 = "0.10"
+tempfile = "3"
+thiserror = "2"
+zeroize = "1"
