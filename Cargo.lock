@@ -904,7 +904,7 @@ dependencies = [
 
 [[package]]
 name = "keytap"
-version = "10.0.0"
+version = "11.0.0"
 dependencies = [
  "base64 0.22.1",
  "dbus-secret-service",
@@ -929,7 +929,7 @@ dependencies = [
 
 [[package]]
 name = "keytap-cli-spec"
-version = "10.0.0"
+version = "11.0.0"
 dependencies = [
  "clap",
  "keytap-core",
@@ -938,7 +938,7 @@ dependencies = [
 
 [[package]]
 name = "keytap-core"
-version = "10.0.0"
+version = "11.0.0"
 dependencies = [
  "age",
  "base64 0.22.1",
@@ -957,14 +957,14 @@ dependencies = [
 
 [[package]]
 name = "keytap-macos"
-version = "10.0.0"
+version = "11.0.0"
 dependencies = [
  "swift-rs",
 ]
 
 [[package]]
 name = "keytap-web"
-version = "10.0.0"
+version = "11.0.0"
 dependencies = [
  "getrandom",
  "hex",
